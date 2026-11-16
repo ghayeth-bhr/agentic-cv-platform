@@ -1,14 +1,15 @@
-# Agentic CV Platform: SAM 3 Adapter
+# Agentic CV Platform: SAM 3 Inference Service
 
-This branch adds the provider-neutral SAM 3 inference adapter to the fresh platform implementation. It wraps the tested Transformers API while keeping model imports lazy, so API code and CI can run without SAM 3 weights or a CUDA runtime.
+This branch exposes the local SAM 3 provider through a small, bounded FastAPI service. It is the first process boundary around model inference and is designed to run without loading gated weights during ordinary tests.
 
 ## What this branch provides
 
-- `Sam3Config` for checkpoint, device, precision, and threshold settings.
-- `Sam3Provider` as the inference boundary that future hosted providers can implement.
-- `LocalSam3Provider` for the local `facebook/sam3` checkpoint.
-- Normalized prediction results containing confidence, box coordinates, and masks.
-- RGB image loading and explicit provider cleanup for GPU memory release.
+- `GET /health/live` for process liveness.
+- `GET /health/ready` for service readiness.
+- `POST /v1/predict` for an image, text prompt, and optional thresholds.
+- Upload-size limits and invalid-image rejection before model execution.
+- Typed JSON responses containing scores, boxes, and boolean masks.
+- Provider injection for deterministic API tests and future hosted implementations.
 
 ## Local development
 
@@ -18,10 +19,10 @@ Run the complete test suite:
 uv run pytest -q
 ```
 
-The adapter tests inject a fake model and do not download weights. To run real inference, use the existing SAM 3 environment, ensure the gated checkpoint is available, and configure a CUDA device. The provider defaults to FP16 and one image per call; batching and request scheduling belong to later service work.
+The service tests use a fake provider and do not download SAM 3 weights. A real deployment must run with the SAM 3 environment, gated checkpoint access, CUDA, and a process supervisor. The endpoint currently handles one request at a time through the injected provider; queueing, GPU bulkheads, and batch workers are later slices.
 
 ## Branch boundary
 
-This branch depends on `feature/local-resumable-upload` and contains no HTTP service, workflow engine, or batch scheduler yet. The next slice should expose this provider through a bounded inference API with liveness/readiness checks and separate interactive and batch paths.
+This branch depends on `feature/sam3-inference-adapter`. It does not yet include authentication, object-storage URLs, workflow persistence, dynamic batching, or separate interactive and batch queues.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
