@@ -1,13 +1,32 @@
-# Agentic CV Platform
+# Agentic CV Platform: Resumable Local Uploads
 
-A local-first agentic computer-vision platform for object detection and segmentation.
+This branch establishes the local asset-ingestion foundation. It connects a tenant-scoped SQLite registry to a filesystem object-storage abstraction, allowing uploads to resume after interrupted chunk transfers before a source is registered in an asset.
 
-This repository is a fresh implementation. The existing `frames-extractor` project is reference material only and is not part of this Git history.
+## What this branch provides
 
-## Development
+- Asset, upload, and source metadata with SQLite foreign-key enforcement.
+- Tenant ownership checks before an upload can begin.
+- Out-of-order resumable parts with atomic replacement of individual chunks.
+- Contiguous-part validation and streaming SHA-256 verification at completion.
+- Atomic assembly into an object path before source metadata is committed.
+- Duplicate-source prevention using `(asset_id, content_sha256)`.
+
+## Local development
+
+Run all tests:
 
 ```text
-uv run pytest
+uv run pytest -q
 ```
 
-The first production target is a reliable local mode on Windows with NVIDIA CUDA. Cloud GPU workers, object storage, durable workflows, and multi-tenancy will be added behind stable contracts.
+The upload tests use temporary SQLite databases and temporary object roots. No cloud credentials or external services are required.
+
+## Storage model
+
+Incomplete parts live below `.uploads/<upload_id>/`. Completed objects live below `objects/` using generated tenant and asset prefixes. Metadata stores object URIs and content hashes rather than loading media into the database.
+
+## Branch boundary
+
+This is a local reduced-mode implementation. The storage interface is intentionally small so it can later be backed by S3/MinIO multipart uploads. It does not yet extract video frames, index embeddings, or publish durable workflow events.
+
+The older `frames-extractor` repository is reference material only and is not part of this Git history.
