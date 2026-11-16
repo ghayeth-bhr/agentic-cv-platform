@@ -1,0 +1,28 @@
+[project]
+name = "agentic-cv-platform"
+version = "0.1.0"
+description = "Agentic computer-vision platform for detection and segmentation datasets"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "numpy>=1.26",
+    "pillow>=10.0",
+    "python-multipart>=0.0.9",
+    "uvicorn>=0.30",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.27",
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentic_cv"]
