@@ -39,7 +39,8 @@ SAM3 predictions and masks.
 
 `JobStore` persists worker lease ownership, heartbeat expiry, and cancellation
 intent. Claiming and heartbeat operations reject stale or competing workers;
-workflow execution must consume the cancellation flag before work is stopped.
+`DurableLabelWorkflow` claims a lease, renews it at image checkpoints, observes
+cancellation, and emits a dedicated cancellation event.
 
 ## Local development
 
@@ -54,6 +55,6 @@ The validator tests use a fake VLM client. No multimodal model, GPU, network cal
 This branch builds on `feature/persistent-vector-index`. It provides a local
 Ollama client, overlay renderer, prompt enhancer, calibration bridge, and optional
 click-refinement WebSocket, but does not yet implement a production worker
-integration, cancellation-aware workflow execution, or authentication middleware.
+integration or authentication middleware.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
