@@ -20,7 +20,7 @@ from .dataset_export_workflow import DatasetExportWorkflow, DatasetExportWorkflo
 from .dataset_store import DatasetVersionStore
 from .embeddings import HuggingFaceEmbeddingConfig, HuggingFaceEmbeddingProvider
 from .job_store import JobStore
-from .object_storage import LocalObjectStorage
+from .object_storage import LocalObjectStorage, ObjectStorage, S3ObjectStorage
 from .outbox import Outbox
 from .preview import PreviewStore
 from .preview_api import PreviewApiDependencies, create_app as create_preview_app
@@ -37,6 +37,7 @@ class LocalAppConfig:
     data_dir: Path
     api_keys: Mapping[str, Principal] | None = None
     authorizer: Authorizer | None = None
+    object_storage: ObjectStorage | None = None
     embedding_provider: EmbeddingProvider | None = None
     sam3_provider: Sam3Provider | None = None
 
@@ -52,7 +53,15 @@ class LocalAppConfig:
                 tenant_claim=os.getenv("AGENTIC_CV_OIDC_TENANT_CLAIM", "tenant_id"),
                 roles_claim=os.getenv("AGENTIC_CV_OIDC_ROLES_CLAIM", "roles"),
             )
-        return cls(data_dir=data_dir, authorizer=authorizer)
+        bucket = os.getenv("AGENTIC_CV_S3_BUCKET")
+        object_storage = None
+        if bucket:
+            object_storage = S3ObjectStorage.from_environment(
+                bucket=bucket,
+                endpoint_url=os.getenv("AGENTIC_CV_S3_ENDPOINT_URL"),
+                region_name=os.getenv("AWS_REGION"),
+            )
+        return cls(data_dir=data_dir, authorizer=authorizer, object_storage=object_storage)
 
 
 @dataclass
@@ -87,7 +96,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
     jobs = JobStore(str(metadata_dir / "jobs.sqlite3"))
     preview = PreviewStore(str(metadata_dir / "preview.sqlite3"))
     sub_assets = SubAssetStore(str(metadata_dir / "sub-assets.sqlite3"))
-    storage = LocalObjectStorage(config.data_dir / "objects")
+    storage = config.object_storage or LocalObjectStorage(config.data_dir / "objects")
     uploads = ResumableUploadService(registry, storage)
     authorizer = config.authorizer or (
         StaticApiKeyAuthorizer(config.api_keys) if config.api_keys else None

@@ -58,6 +58,11 @@ previews, and read exports; writers can mutate assets, uploads, sub-assets, and
 exports; admins receive the wildcard permission. API routes enforce these
 resource-action permissions rather than trusting a coarse role label.
 
+Cloud-compatible uploads use `S3ObjectStorage`. Set `AGENTIC_CV_S3_BUCKET` to
+select it, optionally set `AGENTIC_CV_S3_ENDPOINT_URL` for MinIO and `AWS_REGION`
+for AWS. When the bucket variable is absent, the local filesystem adapter remains
+the default.
+
 `OutboxDispatcher` delivers pending integration events through an injected
 publisher, marks successful deliveries, and records retryable failures without
 blocking later events in the same polling pass.
