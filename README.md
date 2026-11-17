@@ -84,6 +84,19 @@ uv run pytest -q
 
 The validator tests use a fake VLM client. No multimodal model, GPU, network call, or cloud service is required.
 
+## Run the assembled local MVP
+
+Start the unified API with:
+
+```text
+uv run agentic-cv serve --data-dir .agentic-cv
+```
+
+It assembles the core asset/upload API, semantic-search routes, preview SSE,
+dataset-export jobs, and lazy SAM3 service under one FastAPI process. The health
+checks are available at `/health/live` and `/health/ready`; model weights are
+loaded only when their inference or embedding endpoints are used.
+
 ## Branch boundary
 
 This branch builds on `feature/persistent-vector-index`. It provides a local
