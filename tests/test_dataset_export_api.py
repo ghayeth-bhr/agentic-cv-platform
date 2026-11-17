@@ -57,4 +57,9 @@ def test_dataset_export_api_submits_and_reads_tenant_job(tmp_path):
     assert status.status_code == 200
     assert status.json()["kind"] == "dataset-export"
     assert status.json()["attempts"] == 0
+    cancelled = client.post(
+        f"/v1/dataset-exports/{submitted.json()['job_id']}/cancel", headers=headers
+    )
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
     registry.close(); versions.close(); jobs.close(); outbox.close()
