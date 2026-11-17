@@ -58,6 +58,9 @@ storage with reopen-safe reads, ordered listing, and idempotent creation.
 `DatasetExportService` materializes persisted versions into tenant/version-scoped
 COCO or YOLO directories and writes a manifest for each export.
 
+`DatasetExportWorkflow` wraps those exports in durable leased jobs with idempotent
+submission, cancellation handling, and completion/failure events.
+
 ## Local development
 
 ```text
@@ -72,6 +75,6 @@ This branch builds on `feature/persistent-vector-index`. It provides a local
 Ollama client, overlay renderer, prompt enhancer, calibration bridge, and optional
 click-refinement WebSocket, plus opt-in tenant authorization, but does not yet
 implement production identity-provider integration, full RBAC policy management,
-cloud object storage, or asynchronous export job orchestration.
+cloud object storage, or broker-backed queue infrastructure.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
