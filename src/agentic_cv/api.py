@@ -290,6 +290,26 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                 raise HTTPException(status_code=404, detail="unknown export job")
             return _job_response(job)
 
+        @app.post("/v1/dataset-exports/{job_id}/cancel", response_model=DatasetExportJobResponse)
+        def cancel_dataset_export(
+            job_id: UUID,
+            x_tenant_id: str = Header(...),
+            x_api_key: str | None = Header(None),
+        ) -> DatasetExportJobResponse:
+            tenant_id = _tenant(x_tenant_id)
+            _authorize(dependencies.authorizer, api_key=x_api_key, tenant_id=tenant_id, role="writer")
+            try:
+                job = export_workflow.dependencies.jobs.get(job_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            if job.tenant_id != tenant_id:
+                raise HTTPException(status_code=404, detail="unknown export job")
+            try:
+                job = export_workflow.dependencies.jobs.request_cancel(job_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            return _job_response(job)
+
     if dependencies.refinement is not None:
         refinement = dependencies.refinement
 

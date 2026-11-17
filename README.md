@@ -67,7 +67,8 @@ being inspected. `run_forever()` adds a stoppable polling loop for local worker
 processes.
 
 When configured, the API exposes authenticated `POST /v1/dataset-exports` for job
-submission and `GET /v1/dataset-exports/{job_id}` for tenant-scoped status reads.
+submission, `GET /v1/dataset-exports/{job_id}` for tenant-scoped status reads, and
+`POST /v1/dataset-exports/{job_id}/cancel` for cancellation requests.
 
 ## Local development
 
