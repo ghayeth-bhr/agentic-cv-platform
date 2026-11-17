@@ -61,6 +61,10 @@ COCO or YOLO directories and writes a manifest for each export.
 `DatasetExportWorkflow` wraps those exports in durable leased jobs with idempotent
 submission, cancellation handling, and completion/failure events.
 
+`DatasetExportWorker.run_once()` polls queued export jobs and processes each through
+the lease-aware workflow; one failed job does not prevent the remaining queue from
+being inspected.
+
 When configured, the API exposes authenticated `POST /v1/dataset-exports` for job
 submission and `GET /v1/dataset-exports/{job_id}` for tenant-scoped status reads.
 
@@ -78,6 +82,7 @@ This branch builds on `feature/persistent-vector-index`. It provides a local
 Ollama client, overlay renderer, prompt enhancer, calibration bridge, and optional
 click-refinement WebSocket, plus opt-in tenant authorization, but does not yet
 implement production identity-provider integration, full RBAC policy management,
-cloud object storage, or broker-backed queue infrastructure.
+cloud object storage, broker-backed queue infrastructure, or worker process
+supervision.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.

@@ -100,3 +100,13 @@ def test_cancel_is_durable_and_queued_jobs_cancel_immediately(tmp_path):
     with pytest.raises(ValueError, match="cancelled"):
         reopened.claim(job.job_id, worker_id="worker-a")
     reopened.close()
+
+
+def test_list_filters_jobs_by_status_and_kind(tmp_path):
+    store = JobStore(str(tmp_path / "jobs.sqlite3"))
+    tenant_id = uuid4()
+    export = store.create(tenant_id=tenant_id, kind="dataset-export", payload={}, idempotency_key="export")
+    store.create(tenant_id=tenant_id, kind="label", payload={}, idempotency_key="label")
+
+    assert [job.job_id for job in store.list(status="queued", kind="dataset-export")] == [export.job_id]
+    store.close()
