@@ -44,8 +44,9 @@ cancellation, and emits a dedicated cancellation event.
 
 API authentication is opt-in through `StaticApiKeyAuthorizer`. When configured,
 asset and upload write operations require `X-API-Key`, bind the key to
-`X-Tenant-ID`, and enforce the `writer` role. The default local API remains
-unauthenticated until an authorizer is supplied.
+`X-Tenant-ID`, and enforce the `writer` role. Semantic-search and preview reads
+use the `reader` role when their optional authorizer is configured. The default
+local APIs remain unauthenticated until an authorizer is supplied.
 
 `OutboxDispatcher` delivers pending integration events through an injected
 publisher, marks successful deliveries, and records retryable failures without

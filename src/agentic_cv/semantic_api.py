@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from .semantic_search import SearchResult, SemanticSearchService
 from .sub_assets import SubAssetStore
+from .auth import StaticApiKeyAuthorizer
 
 
 class SearchRequest(BaseModel):
@@ -39,6 +40,7 @@ class SubAssetResponse(BaseModel):
 class SemanticApiDependencies:
     search: SemanticSearchService
     sub_assets: SubAssetStore
+    authorizer: StaticApiKeyAuthorizer | None = None
 
 
 def _tenant(value: str) -> UUID:
@@ -64,11 +66,34 @@ def _validate_request(request: SearchRequest) -> None:
         raise HTTPException(status_code=422, detail="limit must be at least 1")
 
 
+def _authorize(
+    authorizer: StaticApiKeyAuthorizer | None,
+    *,
+    api_key: str | None,
+    tenant_id: UUID | None,
+    role: str,
+) -> None:
+    if authorizer is None:
+        return
+    if tenant_id is None:
+        raise HTTPException(status_code=400, detail="X-Tenant-ID is required")
+    try:
+        authorizer.authorize(api_key=api_key, tenant_id=tenant_id, role=role)
+    except PermissionError as exc:
+        raise HTTPException(status_code=401 if api_key is None else 403, detail=str(exc)) from exc
+
+
 def create_app(dependencies: SemanticApiDependencies) -> FastAPI:
     app = FastAPI(title="Agentic CV semantic search API", version="1")
 
     @app.post("/v1/search", response_model=SearchResponse)
-    def search(request: SearchRequest) -> SearchResponse:
+    def search(
+        request: SearchRequest,
+        x_tenant_id: str | None = Header(None),
+        x_api_key: str | None = Header(None),
+    ) -> SearchResponse:
+        tenant_id = _tenant(x_tenant_id) if x_tenant_id is not None else None
+        _authorize(dependencies.authorizer, api_key=x_api_key, tenant_id=tenant_id, role="reader")
         _validate_request(request)
         try:
             results = dependencies.search.search(
@@ -84,8 +109,10 @@ def create_app(dependencies: SemanticApiDependencies) -> FastAPI:
     def create_sub_asset(
         request: SearchRequest,
         x_tenant_id: str = Header(...),
+        x_api_key: str | None = Header(None),
     ) -> SubAssetResponse:
         tenant_id = _tenant(x_tenant_id)
+        _authorize(dependencies.authorizer, api_key=x_api_key, tenant_id=tenant_id, role="writer")
         _validate_request(request)
         try:
             results = dependencies.search.search(
