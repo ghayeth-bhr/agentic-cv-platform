@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from agentic_cv.semantic_api import SemanticApiDependencies, create_app
 from agentic_cv.semantic_search import SearchResult
 from agentic_cv.sub_assets import SubAssetStore
+from agentic_cv.auth import Principal, StaticApiKeyAuthorizer
 
 
 class FakeSearch:
@@ -19,9 +20,11 @@ class FakeSearch:
         return results[:limit]
 
 
-def make_client(tmp_path):
+def make_client(tmp_path, *, authorizer=None):
     store = SubAssetStore(str(tmp_path / "sub-assets.sqlite3"))
-    client = TestClient(create_app(SemanticApiDependencies(search=FakeSearch(), sub_assets=store)))
+    client = TestClient(create_app(SemanticApiDependencies(
+        search=FakeSearch(), sub_assets=store, authorizer=authorizer
+    )))
     return client, store
 
 
@@ -66,4 +69,27 @@ def test_search_api_validates_empty_query_and_tenant_header(tmp_path):
 
     assert empty.status_code == 422
     assert bad_tenant.status_code == 400
+    store.close()
+
+
+def test_semantic_api_optional_reader_auth(tmp_path):
+    tenant_id = uuid4()
+    authorizer = StaticApiKeyAuthorizer({
+        "reader-key": Principal(tenant_id=tenant_id, roles=frozenset({"reader"})),
+    })
+    client, store = make_client(tmp_path, authorizer=authorizer)
+
+    missing = client.post("/v1/search", json={"query": "bear"})
+    valid = client.post(
+        "/v1/search", headers={"X-Tenant-ID": str(tenant_id), "X-API-Key": "reader-key"},
+        json={"query": "bear"},
+    )
+    wrong = client.post(
+        "/v1/search", headers={"X-Tenant-ID": str(uuid4()), "X-API-Key": "reader-key"},
+        json={"query": "bear"},
+    )
+
+    assert missing.status_code == 400
+    assert valid.status_code == 200
+    assert wrong.status_code == 403
     store.close()
