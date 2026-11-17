@@ -1,16 +1,13 @@
-# Agentic CV Platform: Click Refinement Sessions
+# Agentic CV Platform: Semantic Search API
 
-This branch adds the interactive point-click refinement state needed by semi-manual labeling. Positive and negative points are validated against the image, sent to an injected SAM 3 click provider, and returned with a revisioned prediction snapshot.
+This branch exposes semantic search and logical sub-asset creation over HTTP. It composes the provider-neutral search service with durable sub-asset metadata and deliberately omits local filesystem paths from responses.
 
-## What this branch provides
+## Endpoints
 
-- Interactive refinement sessions scoped to an image.
-- Positive and negative point validation.
-- Image-bound coordinate checks.
-- Provider injection for the future SAM 3 point API adapter.
-- Revision increments after every accepted click.
-- Stale revision rejection for concurrent editor updates.
-- Immutable snapshots containing points and current predictions.
+- `POST /v1/search` searches by natural-language query and optional asset IDs.
+- `POST /v1/sub-assets/from-search` repeats the search and persists the ordered result set for a tenant.
+- Search responses contain record IDs, asset IDs, and scores only.
+- Sub-assets retain the original query and parent asset IDs without duplicating media.
 
 ## Local development
 
@@ -18,10 +15,10 @@ This branch adds the interactive point-click refinement state needed by semi-man
 uv run pytest -q
 ```
 
-The tests use a fake click provider and CPU images. No gated model weights, GPU, editor UI, or cloud service is required.
+The API tests use a fake search service and temporary SQLite sub-asset storage. No embedding model, vector database, GPU, or cloud service is required.
 
 ## Branch boundary
 
-This branch builds on `feature/annotation-revision-store`. Sessions are currently process-local; they do not yet persist session state, expose WebSocket endpoints, or convert accepted masks into annotation revisions automatically.
+This branch builds on `feature/click-refinement-sessions`. It does not yet add authentication middleware, persistent vector storage, pagination cursors, search indexing jobs, or sub-asset deletion policies.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
