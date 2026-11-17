@@ -1,13 +1,15 @@
-# Agentic CV Platform: Local Asset Upload API
+# Agentic CV Platform: SAM 3 Calibration Loop
 
-This branch connects the local asset registry, resumable object storage, and durable event outbox through a FastAPI API. It is the first usable HTTP flow from asset creation to a completed source and `SourceReady` event.
+This branch adds bounded threshold calibration for SAM 3 over a representative sample set. It prevents a single lucky image from authorizing a full asset run and returns an explicit result when no threshold meets the required agreement.
 
-## Endpoints
+## What this branch provides
 
-- `POST /v1/assets` creates an asset for the `X-Tenant-ID` UUID.
-- `POST /v1/assets/{asset_id}/uploads` starts a checksum-aware upload session.
-- `PUT /v1/uploads/{upload_id}/parts/{part_number}` stores a resumable part.
-- `POST /v1/uploads/{upload_id}/complete` assembles the object, registers the source, and enqueues `SourceReady`.
+- Multiple `CalibrationSample` inputs instead of single-image validation.
+- Configurable threshold candidates and maximum iteration count.
+- Injected validators that can later call a VLM rubric.
+- Per-attempt sample counts and agreement scores.
+- `calibrated`, `max_iterations`, and `no_acceptable_threshold` outcomes.
+- No hidden success: failed calibration returns no production threshold.
 
 ## Local development
 
@@ -15,10 +17,10 @@ This branch connects the local asset registry, resumable object storage, and dur
 uv run pytest -q
 ```
 
-The API tests use temporary SQLite metadata, local object storage, and a local outbox. No cloud credentials, broker, GPU, or model weights are required.
+The calibration tests use a fake SAM 3 provider and CPU images. No gated model weights, GPU, VLM, broker, or cloud service is required.
 
 ## Branch boundary
 
-This branch builds on `feature/local-event-outbox`. Tenant identity is represented by a local header for now; production must replace it with authenticated identity and authorization middleware. The API does not yet expose signed URLs, upload cancellation, rate limits, video extraction, or workflow dispatch.
+This branch builds on `feature/local-asset-upload-api`. It does not yet persist calibration runs, render overlay artifacts, call a real VLM, adjust prompts automatically, or launch a whole-asset batch workflow.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
