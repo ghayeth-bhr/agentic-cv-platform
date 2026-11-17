@@ -70,7 +70,9 @@ blocking later events in the same polling pass.
 `RabbitMqPublisher` is the concrete broker publisher. It declares a durable topic
 exchange and publishes persistent JSON event envelopes; set
 `AGENTIC_CV_RABBITMQ_HOST` and the optional RabbitMQ connection variables to
-activate it in the composition root.
+activate it in the composition root. `RabbitMqConsumer` declares durable queues,
+binds routing keys, limits in-flight messages with QoS, acknowledges successful
+handlers, and requeues failures.
 
 `split_dataset` creates deterministic, image-disjoint train, validation, and test
 `DatasetVersion` objects from configurable ratios and a seed. Annotations remain
@@ -127,6 +129,6 @@ This branch builds on `feature/persistent-vector-index`. It provides a local
 Ollama client, overlay renderer, prompt enhancer, calibration bridge, and optional
 click-refinement WebSocket, plus opt-in tenant authorization, but does not yet
 implement cloud object storage, broker-backed queue infrastructure, or worker process
-supervision, or broker consumer supervision.
+supervision, or hosted deployment configuration.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
