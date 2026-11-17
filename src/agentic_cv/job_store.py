@@ -203,6 +203,36 @@ class JobStore:
             self._connection.commit()
             return self.get(job_id)
 
+    def requeue_expired_leases(
+        self, *, now: datetime | None = None, kind: str | None = None
+    ) -> tuple[UUID, ...]:
+        current_time = now or datetime.now(timezone.utc)
+        current_text = current_time.isoformat()
+        kind_clause = " AND kind = ?" if kind is not None else ""
+        values: tuple[str, ...] = (current_text,) if kind is None else (current_text, kind)
+        with self._lock:
+            rows = self._connection.execute(
+                f"""
+                SELECT job_id, cancel_requested FROM jobs
+                WHERE status = 'running' AND lease_expires_at IS NOT NULL
+                    AND lease_expires_at <= ?{kind_clause}
+                ORDER BY created_at, job_id
+                """,
+                values,
+            ).fetchall()
+            for row in rows:
+                status = "cancelled" if row["cancel_requested"] else "queued"
+                error = "job cancellation requested while lease expired" if row["cancel_requested"] else None
+                self._connection.execute(
+                    """
+                    UPDATE jobs SET status = ?, error = ?, lease_owner = NULL,
+                        lease_expires_at = NULL, updated_at = ? WHERE job_id = ?
+                    """,
+                    (status, error, current_text, row["job_id"]),
+                )
+            self._connection.commit()
+        return tuple(UUID(row["job_id"]) for row in rows)
+
     def request_cancel(self, job_id: UUID) -> JobRecord:
         with self._lock:
             current = self.get(job_id)

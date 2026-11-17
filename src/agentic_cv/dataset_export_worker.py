@@ -20,9 +20,13 @@ class DatasetExportWorker:
     def run_once(self, *, worker_id: str = "export-worker") -> tuple[UUID, ...]:
         """Attempt each queued export once and return the jobs inspected."""
 
-        processed: list[UUID] = []
+        processed: list[UUID] = list(
+            self.jobs.requeue_expired_leases(kind="dataset-export")
+        )
+        processed_set = set(processed)
         for job in self.jobs.list(status="queued", kind="dataset-export"):
-            processed.append(job.job_id)
+            if job.job_id not in processed_set:
+                processed.append(job.job_id)
             try:
                 self.workflow.execute(
                     job.job_id, tenant_id=job.tenant_id, worker_id=worker_id

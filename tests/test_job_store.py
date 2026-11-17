@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -109,4 +110,23 @@ def test_list_filters_jobs_by_status_and_kind(tmp_path):
     store.create(tenant_id=tenant_id, kind="label", payload={}, idempotency_key="label")
 
     assert [job.job_id for job in store.list(status="queued", kind="dataset-export")] == [export.job_id]
+    store.close()
+
+
+def test_expired_leases_are_requeued_or_cancelled(tmp_path):
+    store = JobStore(str(tmp_path / "jobs.sqlite3"))
+    now = datetime.now(timezone.utc)
+    queued_job = store.create(tenant_id=uuid4(), kind="dataset-export", payload={}, idempotency_key="expired")
+    cancelled_job = store.create(tenant_id=uuid4(), kind="dataset-export", payload={}, idempotency_key="cancelled")
+    store.claim(queued_job.job_id, worker_id="worker-a", lease_seconds=60)
+    store.claim(cancelled_job.job_id, worker_id="worker-a", lease_seconds=60)
+    store.request_cancel(cancelled_job.job_id)
+    expired = now + timedelta(seconds=120)
+
+    recovered = store.requeue_expired_leases(now=expired)
+
+    assert recovered == (queued_job.job_id, cancelled_job.job_id)
+    assert store.get(queued_job.job_id).status == "queued"
+    assert store.get(queued_job.job_id).lease_owner is None
+    assert store.get(cancelled_job.job_id).status == "cancelled"
     store.close()
