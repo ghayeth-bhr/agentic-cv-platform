@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Mapping
 
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from .api import ApiDependencies, ExportApiDependencies, create_app as create_core_app
 from .asset_registry import AssetRegistry
@@ -95,6 +97,8 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
             resources.close()
 
     app = FastAPI(title="Agentic CV Platform", version="1", lifespan=lifespan)
+    web_dir = Path(__file__).parent / "web"
+    app.mount("/static", StaticFiles(directory=web_dir), name="static")
     app.include_router(
         create_core_app(ApiDependencies(
             registry=registry, uploads=uploads, outbox=outbox,
@@ -111,7 +115,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
     app.include_router(create_preview_app(PreviewApiDependencies(store=preview, authorizer=authorizer)).router)
     app.include_router(create_sam3_app(sam3_provider).router)
 
-    @app.get("/")
+    @app.get("/api-info")
     def application_info() -> dict[str, object]:
         return {
             "name": "Agentic CV Platform",
@@ -125,6 +129,10 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
                 "sam3": "/v1/predict",
             },
         }
+
+    @app.get("/", include_in_schema=False)
+    def dashboard() -> FileResponse:
+        return FileResponse(web_dir / "index.html")
 
     @app.get("/health/live")
     def liveness() -> dict[str, str]:
