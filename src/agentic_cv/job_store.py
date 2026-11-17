@@ -6,7 +6,7 @@ import json
 import sqlite3
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
@@ -36,6 +36,9 @@ class JobRecord:
     error: str | None
     created_at: str
     updated_at: str
+    lease_owner: str | None
+    lease_expires_at: str | None
+    cancel_requested: bool
 
 
 class JobStore:
@@ -55,12 +58,23 @@ class JobStore:
                 idempotency_key TEXT NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0,
                 error TEXT,
+                lease_owner TEXT,
+                lease_expires_at TEXT,
+                cancel_requested INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE (tenant_id, idempotency_key)
             )
             """
         )
+        columns = {row["name"] for row in self._connection.execute("PRAGMA table_info(jobs)")}
+        for name, definition in (
+            ("lease_owner", "TEXT"),
+            ("lease_expires_at", "TEXT"),
+            ("cancel_requested", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if name not in columns:
+                self._connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
         self._connection.commit()
 
     def close(self) -> None:
@@ -130,6 +144,73 @@ class JobStore:
             self._connection.commit()
             return self.get(job_id)
 
+    def claim(self, job_id: UUID, *, worker_id: str, lease_seconds: float = 60) -> JobRecord:
+        if not worker_id.strip():
+            raise ValueError("worker_id must not be empty")
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be greater than 0")
+        with self._lock:
+            current = self.get(job_id)
+            now = datetime.now(timezone.utc)
+            if current.status not in ("queued", "running"):
+                raise ValueError(f"cannot claim job in {current.status} state")
+            if current.status == "running" and current.lease_expires_at:
+                expires_at = datetime.fromisoformat(current.lease_expires_at)
+                if expires_at > now and current.lease_owner != worker_id:
+                    raise RuntimeError("job is leased by another worker")
+            expires = (now + timedelta(seconds=lease_seconds)).isoformat()
+            attempts = current.attempts + (current.status == "queued")
+            self._connection.execute(
+                """
+                UPDATE jobs SET status = 'running', attempts = ?, lease_owner = ?,
+                    lease_expires_at = ?, updated_at = ? WHERE job_id = ?
+                """,
+                (attempts, worker_id, expires, now.isoformat(), str(job_id)),
+            )
+            self._connection.commit()
+            return self.get(job_id)
+
+    def heartbeat(self, job_id: UUID, *, worker_id: str, lease_seconds: float = 60) -> JobRecord:
+        if not worker_id.strip():
+            raise ValueError("worker_id must not be empty")
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be greater than 0")
+        with self._lock:
+            current = self.get(job_id)
+            self._require_active_lease(current, worker_id)
+            now = datetime.now(timezone.utc)
+            expires = (now + timedelta(seconds=lease_seconds)).isoformat()
+            self._connection.execute(
+                "UPDATE jobs SET lease_expires_at = ?, updated_at = ? WHERE job_id = ?",
+                (expires, now.isoformat(), str(job_id)),
+            )
+            self._connection.commit()
+            return self.get(job_id)
+
+    def request_cancel(self, job_id: UUID) -> JobRecord:
+        with self._lock:
+            current = self.get(job_id)
+            if current.status == "queued":
+                now = _utc_now()
+                self._connection.execute(
+                    "UPDATE jobs SET status = 'cancelled', cancel_requested = 1, updated_at = ? WHERE job_id = ?",
+                    (now, str(job_id)),
+                )
+            elif current.status == "running":
+                self._connection.execute(
+                    "UPDATE jobs SET cancel_requested = 1, updated_at = ? WHERE job_id = ?",
+                    (_utc_now(), str(job_id)),
+                )
+            self._connection.commit()
+            return self.get(job_id)
+
+    @staticmethod
+    def _require_active_lease(current: JobRecord, worker_id: str) -> None:
+        if current.status != "running" or current.lease_owner != worker_id:
+            raise RuntimeError("worker does not own an active job lease")
+        if current.lease_expires_at is None or datetime.fromisoformat(current.lease_expires_at) <= datetime.now(timezone.utc):
+            raise RuntimeError("job lease has expired")
+
     @staticmethod
     def _record(row: sqlite3.Row) -> JobRecord:
         return JobRecord(
@@ -137,4 +218,6 @@ class JobStore:
             kind=row["kind"], status=row["status"], payload=json.loads(row["payload"]),
             idempotency_key=row["idempotency_key"], attempts=row["attempts"],
             error=row["error"], created_at=row["created_at"], updated_at=row["updated_at"],
+            lease_owner=row["lease_owner"], lease_expires_at=row["lease_expires_at"],
+            cancel_requested=bool(row["cancel_requested"]),
         )

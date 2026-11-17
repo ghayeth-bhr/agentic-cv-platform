@@ -65,3 +65,38 @@ def test_idempotency_key_cannot_change_payload(tmp_path):
             idempotency_key="extract:1",
         )
     store.close()
+
+
+def test_claim_heartbeat_and_expired_lease_recovery(tmp_path):
+    store = JobStore(str(tmp_path / "jobs.sqlite3"))
+    job = store.create(tenant_id=uuid4(), kind="extract", payload={}, idempotency_key="extract:lease")
+
+    claimed = store.claim(job.job_id, worker_id="worker-a", lease_seconds=60)
+    assert claimed.status == "running"
+    assert claimed.lease_owner == "worker-a"
+    assert claimed.attempts == 1
+    renewed = store.heartbeat(job.job_id, worker_id="worker-a", lease_seconds=60)
+    assert renewed.lease_owner == "worker-a"
+
+    with pytest.raises(RuntimeError, match="another worker"):
+        store.claim(job.job_id, worker_id="worker-b")
+    with pytest.raises(RuntimeError, match="own"):
+        store.heartbeat(job.job_id, worker_id="worker-b")
+    store.close()
+
+
+def test_cancel_is_durable_and_queued_jobs_cancel_immediately(tmp_path):
+    path = str(tmp_path / "jobs.sqlite3")
+    store = JobStore(path)
+    job = store.create(tenant_id=uuid4(), kind="label", payload={}, idempotency_key="label:cancel")
+
+    cancelled = store.request_cancel(job.job_id)
+    assert cancelled.status == "cancelled"
+    assert cancelled.cancel_requested
+    store.close()
+
+    reopened = JobStore(path)
+    assert reopened.get(job.job_id).cancel_requested
+    with pytest.raises(ValueError, match="cancelled"):
+        reopened.claim(job.job_id, worker_id="worker-a")
+    reopened.close()
