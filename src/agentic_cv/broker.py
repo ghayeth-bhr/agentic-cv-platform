@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from .outbox import OutboxRecord
 
@@ -113,3 +113,64 @@ class RabbitMqPublisher:
             credentials=credentials,
         )
         return pika.BlockingConnection(parameters)
+
+
+class RabbitMqConsumer:
+    """Durable RabbitMQ queue consumer with explicit ack/requeue semantics."""
+
+    def __init__(
+        self,
+        *,
+        config: RabbitMqConfig,
+        queue: str,
+        handler: Callable[[dict[str, Any]], None],
+        routing_keys: Iterable[str] = ("#",),
+        prefetch_count: int = 1,
+        connection_factory: Callable[[RabbitMqConfig], Any] | None = None,
+    ) -> None:
+        if not queue.strip():
+            raise ValueError("queue must not be empty")
+        if prefetch_count < 1:
+            raise ValueError("prefetch_count must be at least 1")
+        self.config = config
+        self.queue = queue
+        self.handler = handler
+        self.routing_keys = tuple(routing_keys)
+        self.prefetch_count = prefetch_count
+        self._connection_factory = connection_factory or RabbitMqPublisher(config)._default_connection
+        self._connection: Any | None = None
+        self._channel: Any | None = None
+
+    def run(self) -> None:
+        self._connection = self._connection_factory(self.config)
+        self._channel = self._connection.channel()
+        self._channel.exchange_declare(
+            exchange=self.config.exchange, exchange_type=self.config.exchange_type, durable=True
+        )
+        self._channel.queue_declare(queue=self.queue, durable=True)
+        for routing_key in self.routing_keys:
+            self._channel.queue_bind(
+                queue=self.queue, exchange=self.config.exchange, routing_key=routing_key
+            )
+        self._channel.basic_qos(prefetch_count=self.prefetch_count)
+        self._channel.basic_consume(queue=self.queue, on_message_callback=self._on_message)
+        self._channel.start_consuming()
+
+    def stop(self) -> None:
+        if self._channel is not None:
+            self._channel.stop_consuming()
+        if self._connection is not None and not self._connection.is_closed:
+            self._connection.close()
+        self._channel = None
+        self._connection = None
+
+    def _on_message(self, channel: Any, method: Any, properties: Any, body: bytes) -> None:
+        try:
+            payload = json.loads(body.decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("broker message must contain a JSON object")
+            self.handler(payload)
+        except Exception:
+            channel.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+        else:
+            channel.basic_ack(delivery_tag=method.delivery_tag)
