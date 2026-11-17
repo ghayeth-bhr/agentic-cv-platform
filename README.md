@@ -1,15 +1,12 @@
-# Agentic CV Platform: Durable Preview Events
+# Agentic CV Platform: Preview SSE API
 
-This branch adds durable per-image progress events to the batch labeling workflow. Preview consumers can incrementally read tenant-scoped progress without coupling the UI directly to a worker process.
+This branch exposes durable batch progress as replayable Server-Sent Events. Clients can reconnect with `after_event_id` and receive only the tenant-authorized preview events they have not seen.
 
-## What this branch provides
+## Endpoint
 
-- SQLite-backed preview events with ordered IDs.
-- Per-image processed/total progress and status.
-- Incremental reads using `after_event_id`.
-- Tenant and job filtering.
-- Optional workflow callback integration after each processed image.
-- Existing durable job, annotation, and outbox behavior remains unchanged.
+`GET /v1/jobs/{job_id}/preview?after_event_id=0`
+
+The endpoint requires `X-Tenant-ID`, returns `text/event-stream`, and emits standard SSE `id`, `event`, and JSON `data` fields. It replays the current durable backlog and closes; a later live-polling or broker-backed implementation can preserve this client contract.
 
 ## Local development
 
@@ -17,10 +14,10 @@ This branch adds durable per-image progress events to the batch labeling workflo
 uv run pytest -q
 ```
 
-The preview tests use temporary SQLite files and fake SAM 3 providers. No model weights, GPU, broker, WebSocket server, or cloud service is required.
+The SSE tests use temporary SQLite preview storage. No browser, GPU, broker, or cloud service is required.
 
 ## Branch boundary
 
-This branch builds on `feature/durable-label-workflow`. It persists progress but does not yet expose SSE/WebSocket streaming, preview image artifacts, cancellation, worker leases, or a browser gallery.
+This branch builds on `feature/durable-preview-events`. It provides replayable SSE delivery but does not yet hold open live subscriptions, stream overlay artifacts, authenticate users, or provide a gallery UI.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
