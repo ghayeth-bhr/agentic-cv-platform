@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 import cv2
 import numpy as np
@@ -15,6 +15,7 @@ from .sam3 import Sam3Prediction, Sam3Provider
 
 
 BatchTask = Literal["detection", "segmentation"]
+ProgressCallback = Callable[[str, int, int], None]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -62,6 +63,7 @@ class Sam3BatchLabeler:
         threshold: float,
         category: DatasetCategory,
         task: BatchTask,
+        on_progress: ProgressCallback | None = None,
     ) -> BatchLabelResult:
         if not images:
             raise ValueError("at least one image is required")
@@ -106,6 +108,8 @@ class Sam3BatchLabeler:
                         score=prediction.score,
                     )
                 )
+            if on_progress is not None:
+                on_progress(image.image_id, len(dataset_images), len(images))
 
         dataset = DatasetVersion(
             images=tuple(dataset_images), categories=(category,), annotations=tuple(annotations)

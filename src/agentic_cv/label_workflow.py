@@ -12,6 +12,7 @@ from .contracts import EventEnvelope
 from .dataset import DatasetCategory
 from .job_store import JobRecord, JobStore
 from .outbox import Outbox
+from .preview import PreviewStore
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -20,6 +21,7 @@ class LabelWorkflowDependencies:
     annotations: AnnotationRevisionStore
     outbox: Outbox
     labeler: Sam3BatchLabeler
+    preview: PreviewStore | None = None
 
 
 class DurableLabelWorkflow:
@@ -68,8 +70,15 @@ class DurableLabelWorkflow:
             raise PermissionError("job does not belong to tenant")
         job = self.dependencies.jobs.transition(job_id, "running")
         try:
+            on_progress = None
+            if self.dependencies.preview is not None:
+                on_progress = lambda image_id, processed, total: self.dependencies.preview.publish(
+                    tenant_id=tenant_id, job_id=job_id, image_id=image_id,
+                    processed=processed, total=total,
+                )
             result = self.dependencies.labeler.label(
-                images, prompt=prompt, threshold=threshold, category=category, task=task
+                images, prompt=prompt, threshold=threshold, category=category, task=task,
+                on_progress=on_progress,
             )
             for annotation in result.dataset.annotations:
                 self.dependencies.annotations.save(
