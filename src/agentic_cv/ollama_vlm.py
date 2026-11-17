@@ -70,10 +70,12 @@ class OllamaVlmClient:
             ],
             "format": VALIDATION_SCHEMA,
             "stream": False,
+            "think": False,
             "keep_alive": self.keep_alive,
             "options": {
                 "num_ctx": self.num_ctx,
                 "temperature": self.temperature,
+                "num_predict": 256,
             },
         }
         request = Request(
