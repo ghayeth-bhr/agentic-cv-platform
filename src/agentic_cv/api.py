@@ -14,6 +14,9 @@ from .asset_registry import AssetRegistry
 from .auth import StaticApiKeyAuthorizer
 from .click_refinement import ClickPoint, ClickRefinementService, RefinementSnapshot
 from .contracts import EventEnvelope
+from .dataset_export_workflow import DatasetExportWorkflow
+from .dataset_export import ExportFormat
+from .job_store import JobRecord
 from .outbox import Outbox
 from .uploads import ResumableUploadService
 
@@ -49,10 +52,30 @@ class SourceResponse(BaseModel):
     content_sha256: str
 
 
+class DatasetExportRequest(BaseModel):
+    version_id: UUID
+    format: ExportFormat
+    idempotency_key: str
+
+
+class DatasetExportJobResponse(BaseModel):
+    job_id: UUID
+    tenant_id: UUID
+    status: str
+    kind: str
+    attempts: int
+    error: str | None
+
+
 @dataclass(frozen=True, kw_only=True)
 class RefinementApiDependencies:
     service: ClickRefinementService
     image_loader: Callable[[str], Image.Image]
+
+
+@dataclass(frozen=True, kw_only=True)
+class ExportApiDependencies:
+    workflow: DatasetExportWorkflow
 
 
 def _tenant(value: str) -> UUID:
@@ -69,6 +92,7 @@ class ApiDependencies:
     outbox: Outbox
     refinement: RefinementApiDependencies | None = None
     authorizer: StaticApiKeyAuthorizer | None = None
+    exports: ExportApiDependencies | None = None
 
 
 def _authorize(
@@ -106,6 +130,13 @@ def _snapshot_payload(snapshot: RefinementSnapshot) -> dict:
             for prediction in snapshot.predictions
         ],
     }
+
+
+def _job_response(job: JobRecord) -> DatasetExportJobResponse:
+    return DatasetExportJobResponse(
+        job_id=job.job_id, tenant_id=job.tenant_id, status=job.status,
+        kind=job.kind, attempts=job.attempts, error=job.error,
+    )
 
 
 def create_app(dependencies: ApiDependencies) -> FastAPI:
@@ -220,6 +251,44 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
             object_uri=source.object_uri,
             content_sha256=source.content_sha256,
         )
+
+    if dependencies.exports is not None:
+        export_workflow = dependencies.exports.workflow
+
+        @app.post("/v1/dataset-exports", response_model=DatasetExportJobResponse, status_code=202)
+        def submit_dataset_export(
+            request: DatasetExportRequest,
+            x_tenant_id: str = Header(...),
+            x_api_key: str | None = Header(None),
+        ) -> DatasetExportJobResponse:
+            tenant_id = _tenant(x_tenant_id)
+            _authorize(dependencies.authorizer, api_key=x_api_key, tenant_id=tenant_id, role="writer")
+            try:
+                job = export_workflow.submit(
+                    tenant_id=tenant_id, version_id=request.version_id,
+                    format=request.format, idempotency_key=request.idempotency_key,
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            return _job_response(job)
+
+        @app.get("/v1/dataset-exports/{job_id}", response_model=DatasetExportJobResponse)
+        def get_dataset_export(
+            job_id: UUID,
+            x_tenant_id: str = Header(...),
+            x_api_key: str | None = Header(None),
+        ) -> DatasetExportJobResponse:
+            tenant_id = _tenant(x_tenant_id)
+            _authorize(dependencies.authorizer, api_key=x_api_key, tenant_id=tenant_id, role="writer")
+            try:
+                job = export_workflow.dependencies.jobs.get(job_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            if job.tenant_id != tenant_id:
+                raise HTTPException(status_code=404, detail="unknown export job")
+            return _job_response(job)
 
     if dependencies.refinement is not None:
         refinement = dependencies.refinement
