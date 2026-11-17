@@ -97,6 +97,10 @@ dataset-export jobs, and lazy SAM3 service under one FastAPI process. The health
 checks are available at `/health/live` and `/health/ready`; model weights are
 loaded only when their inference or embedding endpoints are used.
 
+The root URL serves the local browser dashboard. It provides asset upload, SAM3
+prediction, semantic search, and export-job controls. JSON runtime discovery is
+available at `/api-info`, and interactive API documentation remains at `/docs`.
+
 ## Branch boundary
 
 This branch builds on `feature/persistent-vector-index`. It provides a local

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agentic CV Platform</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">CV</span><span>Agentic CV <b>Studio</b></span></div>
+    <div class="runtime"><span class="status-dot"></span><span id="runtime-status">Checking local runtime</span><a href="/docs" target="_blank">API docs</a></div>
+  </header>
+
+  <main class="shell">
+    <section class="intro">
+      <p class="eyebrow">LOCAL-FIRST WORKBENCH</p>
+      <h1>Turn raw frames into <em>training data.</em></h1>
+      <p class="lede">Upload an asset, inspect SAM3 predictions, search your collection, and send a version to export without leaving your local machine.</p>
+    </section>
+
+    <section class="workspace-grid">
+      <article class="panel upload-panel">
+        <div class="panel-heading"><div><span class="step">01</span><h2>Bring in an asset</h2></div><span class="panel-icon">↥</span></div>
+        <p class="panel-copy">Create a collection and upload an image or frame.</p>
+        <label>Tenant ID<input id="tenant-id" value="00000000-0000-0000-0000-000000000001"></label>
+        <label>Asset name<input id="asset-name" value="MVP wildlife set"></label>
+        <label class="file-drop"><span class="file-symbol">＋</span><span><b id="file-label">Choose an image</b><small>PNG, JPG, or JPEG</small></span><input id="asset-file" type="file" accept="image/png,image/jpeg"></label>
+        <button id="upload-button" class="primary">Upload asset <span>→</span></button>
+        <p id="upload-status" class="inline-status" aria-live="polite"></p>
+      </article>
+
+      <article class="panel inspect-panel">
+        <div class="panel-heading"><div><span class="step">02</span><h2>Inspect with SAM3</h2></div><span class="panel-icon">⌁</span></div>
+        <p class="panel-copy">Send a local image to the segmentation service.</p>
+        <label>Object prompt<input id="predict-prompt" value="person"></label>
+        <label class="file-drop compact"><span class="file-symbol">＋</span><span><b id="predict-file-label">Choose an image</b><small>Prediction input</small></span><input id="predict-file" type="file" accept="image/png,image/jpeg"></label>
+        <button id="predict-button" class="secondary">Run prediction <span>↗</span></button>
+        <div id="predict-result" class="result-box empty">Prediction output will appear here.</div>
+      </article>
+    </section>
+
+    <section class="lower-grid">
+      <article class="panel search-panel">
+        <div class="panel-heading"><div><span class="step">03</span><h2>Find similar frames</h2></div><span class="panel-icon">⌕</span></div>
+        <div class="search-row"><input id="search-query" placeholder="e.g. workers near a concrete wall"><button id="search-button" class="icon-button" title="Search">→</button></div>
+        <div id="search-result" class="result-box empty">Semantic results will appear here.</div>
+      </article>
+      <article class="panel export-panel">
+        <div class="panel-heading"><div><span class="step">04</span><h2>Export a version</h2></div><span class="panel-icon">⇩</span></div>
+        <p class="panel-copy">Queue a validated dataset for training.</p>
+        <label>Dataset version ID<input id="version-id" placeholder="UUID from your version store"></label>
+        <div class="split-fields"><label>Format<select id="export-format"><option value="coco">COCO</option><option value="yolo-detection">YOLO detection</option><option value="yolo-segmentation">YOLO segmentation</option></select></label><label>Idempotency key<input id="export-key" value="browser-export-1"></label></div>
+        <button id="export-button" class="secondary">Queue export <span>→</span></button>
+        <p id="export-status" class="inline-status" aria-live="polite"></p>
+      </article>
+    </section>
+
+    <footer><span>Agentic CV Platform</span><span>Local runtime · <a href="/api-info">runtime info</a></span></footer>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>
