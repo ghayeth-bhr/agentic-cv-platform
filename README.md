@@ -1,15 +1,15 @@
-# Agentic CV Platform: Video Frame Extraction
+# Agentic CV Platform: Semantic Search Index
 
-This branch adds the CPU media worker that turns a video source into timestamped JPEG frame artifacts. It preserves frame provenance while keeping capture and image-writing seams injectable for deterministic testing.
+This branch adds the local semantic-search boundary for image and video-frame records. It normalizes provider embeddings, performs exact cosine search, supports asset filters, and keeps the storage/index implementation replaceable by pgvector or Qdrant later.
 
 ## What this branch provides
 
-- Configurable frame stride for sampling videos.
-- Optional maximum frame limit for bounded local jobs.
-- Frame index, timestamp, and output-path provenance records.
-- Atomic cleanup through capture release on success or failure.
-- Explicit failures for unavailable videos and failed image writes.
-- Headless OpenCV runtime dependency for server-side processing.
+- Provider-neutral image and text embedding interface.
+- Idempotent vector upserts by record ID.
+- Dimension and zero-vector validation.
+- Exact cosine ranking with deterministic tie breaking.
+- Asset-scoped search filters and bounded result limits.
+- Image loading through the same local frame-artifact paths produced by the media worker.
 
 ## Local development
 
@@ -17,10 +17,10 @@ This branch adds the CPU media worker that turns a video source into timestamped
 uv run pytest -q
 ```
 
-The extractor tests use a fake capture and writer, so they do not require a real video, camera, GUI, GPU, or cloud service. Real extraction uses `opencv-python-headless` and writes JPEG artifacts to the configured output directory.
+The tests use a deterministic fake embedding provider and tiny local images. No CLIP/SigLIP checkpoint, GPU, vector database, or cloud service is required.
 
 ## Branch boundary
 
-This branch builds on `feature/dataset-annotation-export`. It does not yet persist frame records into the asset registry, extract keyframes using motion policies, generate thumbnails, or enqueue embedding jobs after extraction.
+This branch builds on `feature/video-frame-extraction`. The index is in-memory for reduced local mode; it does not yet persist embeddings, expose search over HTTP, create sub-assets from results, or add a real CLIP/SigLIP provider.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
