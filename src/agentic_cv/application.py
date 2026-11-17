@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from .api import ApiDependencies, ExportApiDependencies, create_app as create_core_app
 from .asset_registry import AssetRegistry
 from .auth import Authorizer, OidcJwtAuthorizer, Principal, StaticApiKeyAuthorizer
+from .broker import RabbitMqConfig, RabbitMqPublisher
 from .dataset_export import DatasetExportService
 from .dataset_export_workflow import DatasetExportWorkflow, DatasetExportWorkflowDependencies
 from .dataset_store import DatasetVersionStore
@@ -22,6 +23,7 @@ from .embeddings import HuggingFaceEmbeddingConfig, HuggingFaceEmbeddingProvider
 from .job_store import JobStore
 from .object_storage import LocalObjectStorage, ObjectStorage, S3ObjectStorage
 from .outbox import Outbox
+from .outbox_dispatcher import EventPublisher, OutboxDispatcher
 from .preview import PreviewStore
 from .preview_api import PreviewApiDependencies, create_app as create_preview_app
 from .sam3 import LocalSam3Provider, Sam3Config, Sam3Provider
@@ -38,6 +40,7 @@ class LocalAppConfig:
     api_keys: Mapping[str, Principal] | None = None
     authorizer: Authorizer | None = None
     object_storage: ObjectStorage | None = None
+    event_publisher: EventPublisher | None = None
     embedding_provider: EmbeddingProvider | None = None
     sam3_provider: Sam3Provider | None = None
 
@@ -61,7 +64,13 @@ class LocalAppConfig:
                 endpoint_url=os.getenv("AGENTIC_CV_S3_ENDPOINT_URL"),
                 region_name=os.getenv("AWS_REGION"),
             )
-        return cls(data_dir=data_dir, authorizer=authorizer, object_storage=object_storage)
+        event_publisher = None
+        if os.getenv("AGENTIC_CV_RABBITMQ_HOST"):
+            event_publisher = RabbitMqPublisher(RabbitMqConfig.from_environment())
+        return cls(
+            data_dir=data_dir, authorizer=authorizer, object_storage=object_storage,
+            event_publisher=event_publisher,
+        )
 
 
 @dataclass
@@ -74,6 +83,7 @@ class LocalAppResources:
     sub_assets: SubAssetStore
     embedding_provider: EmbeddingProvider
     sam3_provider: Sam3Provider
+    outbox_dispatcher: OutboxDispatcher | None = None
 
     def close(self) -> None:
         for resource in (
@@ -82,6 +92,10 @@ class LocalAppResources:
             resource.close()
         for provider in (self.embedding_provider, self.sam3_provider):
             close = getattr(provider, "close", None)
+            if close is not None:
+                close()
+        if self.outbox_dispatcher is not None:
+            close = getattr(self.outbox_dispatcher.publisher, "close", None)
             if close is not None:
                 close()
 
@@ -115,6 +129,12 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
             jobs=jobs, versions=versions, exports=export_service, outbox=outbox
         )
     )
+    outbox_dispatcher = (
+        OutboxDispatcher(outbox=outbox, publisher=config.event_publisher)
+        if config.event_publisher is not None
+        else None
+    )
+    resources.outbox_dispatcher = outbox_dispatcher
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -126,6 +146,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
     app = FastAPI(title="Agentic CV Platform", version="1", lifespan=lifespan)
     web_dir = Path(__file__).parent / "web"
     app.mount("/static", StaticFiles(directory=web_dir), name="static")
+    app.state.outbox_dispatcher = outbox_dispatcher
     app.include_router(
         create_core_app(ApiDependencies(
             registry=registry, uploads=uploads, outbox=outbox,
