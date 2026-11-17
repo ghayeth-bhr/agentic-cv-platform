@@ -1,15 +1,15 @@
-# Agentic CV Platform: Persistent Vector Index
+# Agentic CV Platform: VLM Validation Adapter
 
-This branch adds a durable SQLite vector index for local semantic search. It preserves the existing exact cosine-search contract while storing normalized float32 embeddings across process restarts.
+This branch adds structured VLM validation for SAM 3 calibration. It validates the response schema, applies an explicit acceptance rubric, caps calls per run, and caches judgments by overlay, prompt, and model revision.
 
 ## What this branch provides
 
-- Persistent vector records keyed by image record ID.
-- Idempotent upsert and explicit removal.
-- Dimension consistency checks across the index.
-- Exact cosine ranking with asset filtering and bounded limits.
-- Reopen-safe metadata and embedding storage.
-- A replaceable local implementation before pgvector/Qdrant scale-out.
+- Typed target-presence, completeness, false-positive, and mask-tightness judgments.
+- Confidence and reasoning validation.
+- Explicit acceptance criteria for calibration.
+- Maximum VLM call budgets with a dedicated exception.
+- Deterministic cache keys including model revision.
+- Client/provider injection for local Ollama or hosted VLM adapters.
 
 ## Local development
 
@@ -17,10 +17,10 @@ This branch adds a durable SQLite vector index for local semantic search. It pre
 uv run pytest -q
 ```
 
-The vector tests use tiny synthetic embeddings and temporary SQLite files. No embedding model, GPU, vector database, or cloud service is required.
+The validator tests use a fake VLM client. No multimodal model, GPU, network call, or cloud service is required.
 
 ## Branch boundary
 
-This branch builds on `feature/preview-sse-api`. It provides durable local vectors but does not yet switch the semantic API to this index by default, add approximate nearest-neighbor search, or add model/checkpoint migration metadata.
+This branch builds on `feature/persistent-vector-index`. It validates VLM judgments but does not yet implement a real Ollama/hosted client, overlay artifact generation, prompt enhancement, or direct integration into the calibration sample validator.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
