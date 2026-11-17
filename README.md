@@ -1,15 +1,15 @@
-# Agentic CV Platform: Semantic Search Index
+# Agentic CV Platform: Hugging Face Embeddings
 
-This branch adds the local semantic-search boundary for image and video-frame records. It normalizes provider embeddings, performs exact cosine search, supports asset filters, and keeps the storage/index implementation replaceable by pgvector or Qdrant later.
+This branch adds the real lazy Hugging Face image/text embedding provider behind the semantic-search interface. It is compatible with SigLIP-style checkpoints and keeps heavy ML imports out of the base test process.
 
 ## What this branch provides
 
-- Provider-neutral image and text embedding interface.
-- Idempotent vector upserts by record ID.
-- Dimension and zero-vector validation.
-- Exact cosine ranking with deterministic tie breaking.
-- Asset-scoped search filters and bounded result limits.
-- Image loading through the same local frame-artifact paths produced by the media worker.
+- Configurable checkpoint, device, and FP16/BF16 precision.
+- Lazy `AutoProcessor` and `AutoModel` loading.
+- Image and text feature extraction with one vector per request.
+- Query padding with `max_length` for stable text embeddings.
+- Explicit CUDA checks and model cleanup for local GPU operation.
+- Injectable loader tests without Torch, Transformers, or model downloads.
 
 ## Local development
 
@@ -17,10 +17,10 @@ This branch adds the local semantic-search boundary for image and video-frame re
 uv run pytest -q
 ```
 
-The tests use a deterministic fake embedding provider and tiny local images. No CLIP/SigLIP checkpoint, GPU, vector database, or cloud service is required.
+The provider tests use fake Torch/model objects. Real semantic search requires installing the compatible Torch and Transformers versions in the local SAM/ML environment and granting access to the selected checkpoint.
 
 ## Branch boundary
 
-This branch builds on `feature/video-frame-extraction`. The index is in-memory for reduced local mode; it does not yet persist embeddings, expose search over HTTP, create sub-assets from results, or add a real CLIP/SigLIP provider.
+This branch builds on `feature/semantic-search-index`. It provides model integration but does not yet persist vectors, batch embeddings, expose semantic search over HTTP, or create sub-assets from search results.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
