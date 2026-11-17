@@ -6,17 +6,20 @@ from fastapi.testclient import TestClient
 
 from agentic_cv.api import ApiDependencies, create_app
 from agentic_cv.asset_registry import AssetRegistry
+from agentic_cv.auth import Principal, StaticApiKeyAuthorizer
 from agentic_cv.object_storage import LocalObjectStorage
 from agentic_cv.outbox import Outbox
 from agentic_cv.uploads import ResumableUploadService
 
 
-def make_client(tmp_path):
+def make_client(tmp_path, *, authorizer=None):
     registry = AssetRegistry(str(tmp_path / "metadata.sqlite3"))
     storage = LocalObjectStorage(tmp_path / "objects")
     outbox = Outbox(str(tmp_path / "events.sqlite3"))
     service = ResumableUploadService(registry, storage)
-    client = TestClient(create_app(ApiDependencies(registry=registry, uploads=service, outbox=outbox)))
+    client = TestClient(create_app(ApiDependencies(
+        registry=registry, uploads=service, outbox=outbox, authorizer=authorizer
+    )))
     return client, registry, outbox
 
 
@@ -73,5 +76,33 @@ def test_asset_upload_rejects_wrong_tenant_and_bad_header(tmp_path):
 
     assert wrong_tenant.status_code == 403
     assert bad_header.status_code == 400
+    registry.close()
+    outbox.close()
+
+
+def test_optional_api_key_auth_enforces_tenant_and_writer_role(tmp_path):
+    tenant_id = uuid4()
+    authorizer = StaticApiKeyAuthorizer({
+        "writer-key": Principal(tenant_id=tenant_id, roles=frozenset({"writer"})),
+    })
+    client, registry, outbox = make_client(tmp_path, authorizer=authorizer)
+
+    missing_key = client.post(
+        "/v1/assets", headers={"X-Tenant-ID": str(tenant_id)}, json={"name": "Private"}
+    )
+    valid = client.post(
+        "/v1/assets",
+        headers={"X-Tenant-ID": str(tenant_id), "X-API-Key": "writer-key"},
+        json={"name": "Private"},
+    )
+    wrong_tenant = client.post(
+        "/v1/assets",
+        headers={"X-Tenant-ID": str(uuid4()), "X-API-Key": "writer-key"},
+        json={"name": "Private"},
+    )
+
+    assert missing_key.status_code == 401
+    assert valid.status_code == 201
+    assert wrong_tenant.status_code == 403
     registry.close()
     outbox.close()

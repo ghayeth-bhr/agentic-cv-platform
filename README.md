@@ -42,6 +42,11 @@ intent. Claiming and heartbeat operations reject stale or competing workers;
 `DurableLabelWorkflow` claims a lease, renews it at image checkpoints, observes
 cancellation, and emits a dedicated cancellation event.
 
+API authentication is opt-in through `StaticApiKeyAuthorizer`. When configured,
+asset and upload write operations require `X-API-Key`, bind the key to
+`X-Tenant-ID`, and enforce the `writer` role. The default local API remains
+unauthenticated until an authorizer is supplied.
+
 ## Local development
 
 ```text
@@ -54,7 +59,7 @@ The validator tests use a fake VLM client. No multimodal model, GPU, network cal
 
 This branch builds on `feature/persistent-vector-index`. It provides a local
 Ollama client, overlay renderer, prompt enhancer, calibration bridge, and optional
-click-refinement WebSocket, but does not yet implement a production worker
-integration or authentication middleware.
+click-refinement WebSocket, plus opt-in tenant authorization, but does not yet
+implement production identity-provider integration or full RBAC policy management.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
