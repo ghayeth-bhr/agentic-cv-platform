@@ -98,7 +98,7 @@ def create_app(dependencies: SemanticApiDependencies) -> FastAPI:
         authorization: str | None = Header(None),
     ) -> SearchResponse:
         tenant_id = _tenant(x_tenant_id) if x_tenant_id is not None else None
-        _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="reader")
+        _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="search:read")
         _validate_request(request)
         try:
             results = dependencies.search.search(
@@ -118,7 +118,7 @@ def create_app(dependencies: SemanticApiDependencies) -> FastAPI:
         authorization: str | None = Header(None),
     ) -> SubAssetResponse:
         tenant_id = _tenant(x_tenant_id)
-        _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="writer")
+        _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="subassets:write")
         _validate_request(request)
         try:
             results = dependencies.search.search(

@@ -154,7 +154,7 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
         authorization: str | None = Header(None),
     ) -> AssetResponse:
         tenant_id = _tenant(x_tenant_id)
-        _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="writer")
+        _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="assets:write")
         asset = dependencies.registry.create_asset(
             tenant_id=tenant_id, name=request.name
         )
@@ -175,7 +175,7 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
     ) -> UploadResponse:
         try:
             tenant_id = _tenant(x_tenant_id)
-            _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="writer")
+            _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="uploads:write")
             upload = dependencies.uploads.start(
                 tenant_id=tenant_id, asset_id=asset_id,
                 filename=request.filename, media_type=request.media_type,
@@ -207,7 +207,7 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                 if x_tenant_id is None:
                     raise HTTPException(status_code=400, detail="X-Tenant-ID is required")
                 tenant_id = _tenant(x_tenant_id)
-                _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="writer")
+                _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="uploads:write")
                 if upload.tenant_id != tenant_id:
                     raise PermissionError("upload does not belong to tenant")
             dependencies.uploads.put_part(upload_id, part_number, await part.read())
@@ -230,7 +230,7 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                 if x_tenant_id is None:
                     raise HTTPException(status_code=400, detail="X-Tenant-ID is required")
                 tenant_id = _tenant(x_tenant_id)
-                _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="writer")
+                _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="uploads:write")
                 if upload.tenant_id != tenant_id:
                     raise PermissionError("upload does not belong to tenant")
             completed = dependencies.uploads.complete(upload_id)
@@ -271,7 +271,7 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
             authorization: str | None = Header(None),
         ) -> DatasetExportJobResponse:
             tenant_id = _tenant(x_tenant_id)
-            _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="writer")
+            _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="exports:write")
             try:
                 job = export_workflow.submit(
                     tenant_id=tenant_id, version_id=request.version_id,
@@ -291,7 +291,7 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
             authorization: str | None = Header(None),
         ) -> DatasetExportJobResponse:
             tenant_id = _tenant(x_tenant_id)
-            _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="writer")
+            _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="exports:read")
             try:
                 job = export_workflow.dependencies.jobs.get(job_id)
             except KeyError as exc:
@@ -308,7 +308,7 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
             authorization: str | None = Header(None),
         ) -> DatasetExportJobResponse:
             tenant_id = _tenant(x_tenant_id)
-            _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="writer")
+            _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="exports:write")
             try:
                 job = export_workflow.dependencies.jobs.get(job_id)
             except KeyError as exc:

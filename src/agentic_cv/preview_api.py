@@ -48,7 +48,7 @@ def _authorize(
     if authorizer is None:
         return
     try:
-        authorizer.authorize(credential=credential, tenant_id=tenant_id, role="reader")
+        authorizer.authorize(credential=credential, tenant_id=tenant_id, role="preview:read")
     except PermissionError as exc:
         raise HTTPException(status_code=401 if credential is None else 403, detail=str(exc)) from exc
 

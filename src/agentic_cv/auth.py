@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Protocol
 from uuid import UUID
 
+from .rbac import RolePolicy
+
 
 @dataclass(frozen=True, kw_only=True)
 class Principal:
@@ -24,10 +26,17 @@ class Authorizer(Protocol):
 class StaticApiKeyAuthorizer:
     """Authorize local API keys without changing the production auth boundary."""
 
-    def __init__(self, credentials: Mapping[str, Principal]) -> None:
+    def __init__(
+        self,
+        credentials: Mapping[str, Principal],
+        *,
+        policy: RolePolicy | None = None,
+    ) -> None:
         if not credentials:
             raise ValueError("at least one API credential is required")
         self._credentials = dict(credentials)
+        self.policy = policy or RolePolicy()
+        self.policy.validate()
 
     def authorize(
         self,
@@ -50,8 +59,8 @@ class StaticApiKeyAuthorizer:
             raise PermissionError("invalid API key")
         if principal.tenant_id != tenant_id:
             raise PermissionError("API key does not belong to tenant")
-        if role not in principal.roles:
-            raise PermissionError(f"API key lacks role: {role}")
+        if not self.policy.allows(principal.roles, role):
+            raise PermissionError(f"API key lacks role/permission: {role}")
         return principal
 
 
@@ -69,6 +78,7 @@ class OidcJwtAuthorizer:
         key_provider: Callable[[str], Any] | None = None,
         algorithms: tuple[str, ...] = ("RS256", "ES256"),
         clock_skew_seconds: int = 30,
+        policy: RolePolicy | None = None,
     ) -> None:
         if not issuer.strip() or not audience.strip() or not jwks_url.strip():
             raise ValueError("issuer, audience, and jwks_url must not be empty")
@@ -84,6 +94,8 @@ class OidcJwtAuthorizer:
         self.key_provider = key_provider
         self.algorithms = algorithms
         self.clock_skew_seconds = clock_skew_seconds
+        self.policy = policy or RolePolicy()
+        self.policy.validate()
 
     def authorize(
         self, *, credential: str | None, tenant_id: UUID, role: str
@@ -119,8 +131,8 @@ class OidcJwtAuthorizer:
         roles = self._roles(claims.get(self.roles_claim))
         if principal_tenant != tenant_id:
             raise PermissionError("token does not belong to tenant")
-        if role not in roles:
-            raise PermissionError(f"token lacks role: {role}")
+        if not self.policy.allows(roles, role):
+            raise PermissionError(f"token lacks role/permission: {role}")
         return Principal(
             tenant_id=principal_tenant,
             roles=frozenset(roles),

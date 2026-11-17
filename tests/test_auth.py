@@ -5,6 +5,7 @@ import pytest
 import jwt
 
 from agentic_cv.auth import OidcJwtAuthorizer, Principal, StaticApiKeyAuthorizer
+from agentic_cv.rbac import RolePolicy
 
 
 def test_static_api_key_authorizer_binds_tenant_and_role():
@@ -70,3 +71,17 @@ def test_oidc_authorizer_rejects_bad_scheme_tenant_and_role(monkeypatch):
     )
     with pytest.raises(PermissionError, match="tenant"):
         authorizer.authorize(credential="Bearer token", tenant_id=tenant_id, role="reader")
+
+
+def test_rbac_policy_separates_reader_writer_and_admin_permissions():
+    policy = RolePolicy()
+
+    assert policy.allows({"reader"}, "search:read")
+    assert not policy.allows({"reader"}, "assets:write")
+    assert policy.allows({"writer"}, "exports:write")
+    assert policy.allows({"admin"}, "anything:dangerous") is True
+
+
+def test_rbac_policy_requires_admin_role():
+    with pytest.raises(ValueError, match="admin"):
+        RolePolicy(grants={"reader": frozenset({"search:read"})}).validate()
