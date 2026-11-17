@@ -1,15 +1,15 @@
-# Agentic CV Platform: Hugging Face Embeddings
+# Agentic CV Platform: Sub-Asset Persistence
 
-This branch adds the real lazy Hugging Face image/text embedding provider behind the semantic-search interface. It is compatible with SigLIP-style checkpoints and keeps heavy ML imports out of the base test process.
+This branch turns semantic-search results into durable logical sub-assets. A sub-asset stores its tenant, parent asset IDs, original query, and ordered result IDs without duplicating image bytes.
 
 ## What this branch provides
 
-- Configurable checkpoint, device, and FP16/BF16 precision.
-- Lazy `AutoProcessor` and `AutoModel` loading.
-- Image and text feature extraction with one vector per request.
-- Query padding with `max_length` for stable text embeddings.
-- Explicit CUDA checks and model cleanup for local GPU operation.
-- Injectable loader tests without Torch, Transformers, or model downloads.
+- SQLite persistence for logical sub-assets.
+- Query snapshots for reproducible search-result collections.
+- Ordered result IDs and deduplicated parent asset IDs.
+- Tenant-scoped reads and access checks.
+- Validation for empty searches and duplicate result IDs.
+- Restart persistence through the local metadata database.
 
 ## Local development
 
@@ -17,10 +17,10 @@ This branch adds the real lazy Hugging Face image/text embedding provider behind
 uv run pytest -q
 ```
 
-The provider tests use fake Torch/model objects. Real semantic search requires installing the compatible Torch and Transformers versions in the local SAM/ML environment and granting access to the selected checkpoint.
+The tests use temporary SQLite files and synthetic search results. No embedding model, vector database, GPU, or cloud service is required.
 
 ## Branch boundary
 
-This branch builds on `feature/semantic-search-index`. It provides model integration but does not yet persist vectors, batch embeddings, expose semantic search over HTTP, or create sub-assets from search results.
+This branch builds on `feature/huggingface-embedding-provider`. It persists sub-asset metadata but does not yet expose search/sub-asset HTTP endpoints, persist vectors, or implement collaborative edits and lifecycle deletion policies.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
