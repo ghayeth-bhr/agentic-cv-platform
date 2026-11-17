@@ -40,6 +40,8 @@ def test_ollama_client_sends_structured_multimodal_request(monkeypatch, tmp_path
     assert timeout == 12
     assert body["model"] == "qwen3-vl:4b"
     assert body["stream"] is False
+    assert body["think"] is False
+    assert body["options"]["num_predict"] == 256
     assert body["messages"][0]["content"] == "a brown bear"
     assert base64.b64decode(body["messages"][0]["images"][0]) == b"overlay-bytes"
     assert body["format"]["required"]

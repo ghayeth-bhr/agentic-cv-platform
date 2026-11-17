@@ -26,6 +26,10 @@ and requests the structured validation schema. Its timeout, context size,
 temperature, and keep-alive are configurable; tests use a mocked HTTP boundary
 and do not require Ollama or GPU access.
 
+`OllamaPromptEnhancer` uses the same local model to produce one to three concise
+SAM3 noun phrases. On Ollama/Qwen responses where structured JSON is returned in
+`message.thinking`, the adapter accepts that field when `message.content` is empty.
+
 ## Local development
 
 ```text
@@ -37,7 +41,7 @@ The validator tests use a fake VLM client. No multimodal model, GPU, network cal
 ## Branch boundary
 
 This branch builds on `feature/persistent-vector-index`. It provides a local
-Ollama client, overlay renderer, and calibration bridge but does not yet implement
-prompt enhancement or a production worker integration.
+Ollama client, overlay renderer, prompt enhancer, and calibration bridge but does
+not yet implement a production worker integration.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
