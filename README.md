@@ -30,6 +30,13 @@ and do not require Ollama or GPU access.
 SAM3 noun phrases. On Ollama/Qwen responses where structured JSON is returned in
 `message.thinking`, the adapter accepts that field when `message.content` is empty.
 
+## Interactive refinement
+
+When configured with an image loader and `ClickRefinementService`, the API exposes
+`/v1/refinement/{image_id}` as a WebSocket. It sends an initial snapshot, accepts
+revisioned `click` messages with positive or negative points, and returns updated
+SAM3 predictions and masks.
+
 ## Local development
 
 ```text
@@ -41,7 +48,8 @@ The validator tests use a fake VLM client. No multimodal model, GPU, network cal
 ## Branch boundary
 
 This branch builds on `feature/persistent-vector-index`. It provides a local
-Ollama client, overlay renderer, prompt enhancer, and calibration bridge but does
-not yet implement a production worker integration.
+Ollama client, overlay renderer, prompt enhancer, calibration bridge, and optional
+click-refinement WebSocket, but does not yet implement a production worker
+integration or authentication middleware.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
