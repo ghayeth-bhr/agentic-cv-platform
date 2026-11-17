@@ -1,28 +1,24 @@
-# Agentic CV Platform: Local Event Outbox
+# Agentic CV Platform: Local Asset Upload API
 
-This branch adds a durable SQLite outbox for integration events. Producers persist an `EventEnvelope` before a future broker relay publishes it, preventing transient delivery failures from silently losing asset, upload, or workflow events.
+This branch connects the local asset registry, resumable object storage, and durable event outbox through a FastAPI API. It is the first usable HTTP flow from asset creation to a completed source and `SourceReady` event.
 
-## What this branch provides
+## Endpoints
 
-- Durable event envelopes with tenant and aggregate identity.
-- Idempotent insertion by event ID or tenant-scoped idempotency key.
-- Ordered pending-event reads with a bounded batch size.
-- Publish completion timestamps that remove events from pending delivery.
-- Retry attempt counts, last-error details, and retry scheduling metadata.
-- SQLite synchronization suitable for the local single-process mode.
+- `POST /v1/assets` creates an asset for the `X-Tenant-ID` UUID.
+- `POST /v1/assets/{asset_id}/uploads` starts a checksum-aware upload session.
+- `PUT /v1/uploads/{upload_id}/parts/{part_number}` stores a resumable part.
+- `POST /v1/uploads/{upload_id}/complete` assembles the object, registers the source, and enqueues `SourceReady`.
 
 ## Local development
-
-Run the complete test suite:
 
 ```text
 uv run pytest -q
 ```
 
-The outbox tests use temporary SQLite files. No Kafka, Redpanda, broker, GPU, or cloud service is required.
+The API tests use temporary SQLite metadata, local object storage, and a local outbox. No cloud credentials, broker, GPU, or model weights are required.
 
 ## Branch boundary
 
-This branch builds on `feature/local-job-state`. It persists and exposes delivery state but does not yet run a relay worker, claim leases between processes, or publish to a production broker. The next messaging slice should add a leased relay and dead-letter policy while keeping this outbox as the local source of truth.
+This branch builds on `feature/local-event-outbox`. Tenant identity is represented by a local header for now; production must replace it with authenticated identity and authorization middleware. The API does not yet expose signed URLs, upload cancellation, rate limits, video extraction, or workflow dispatch.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
