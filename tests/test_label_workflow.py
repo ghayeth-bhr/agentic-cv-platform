@@ -11,6 +11,7 @@ from agentic_cv.dataset import DatasetCategory
 from agentic_cv.job_store import JobStore
 from agentic_cv.label_workflow import DurableLabelWorkflow, LabelWorkflowDependencies
 from agentic_cv.outbox import Outbox
+from agentic_cv.preview import PreviewStore
 from agentic_cv.sam3 import Sam3Prediction
 
 
@@ -28,11 +29,12 @@ def make_workflow(tmp_path, *, fail=False):
     jobs = JobStore(str(tmp_path / "jobs.sqlite3"))
     annotations = AnnotationRevisionStore(str(tmp_path / "annotations.sqlite3"))
     outbox = Outbox(str(tmp_path / "events.sqlite3"))
+    preview = PreviewStore(str(tmp_path / "preview.sqlite3"))
     labeler = Sam3BatchLabeler(FakeProvider(fail=fail))
     workflow = DurableLabelWorkflow(LabelWorkflowDependencies(
-        jobs=jobs, annotations=annotations, outbox=outbox, labeler=labeler
+        jobs=jobs, annotations=annotations, outbox=outbox, labeler=labeler, preview=preview
     ))
-    return workflow, jobs, annotations, outbox
+    return workflow, jobs, annotations, outbox, preview
 
 
 def image(tmp_path):
@@ -42,7 +44,7 @@ def image(tmp_path):
 
 
 def test_successful_workflow_persists_annotations_and_event(tmp_path):
-    workflow, jobs, annotations, outbox = make_workflow(tmp_path)
+    workflow, jobs, annotations, outbox, preview = make_workflow(tmp_path)
     tenant_id = uuid4()
     job = workflow.submit(
         tenant_id=tenant_id, asset_id="asset-1", prompt="bear", threshold=0.5,
@@ -58,11 +60,12 @@ def test_successful_workflow_persists_annotations_and_event(tmp_path):
     assert jobs.get(job.job_id).status == "succeeded"
     assert annotations.latest(tenant_id=tenant_id, image_id="frame-1", annotation_id="frame-1:0").revision == 1
     assert outbox.pending()[0].event_type == "LabelRunCompleted"
-    jobs.close(); annotations.close(); outbox.close()
+    assert [event.image_id for event in preview.list_for_job(tenant_id=tenant_id, job_id=job.job_id)] == ["frame-1"]
+    jobs.close(); annotations.close(); outbox.close(); preview.close()
 
 
 def test_failed_workflow_persists_error_and_failure_event(tmp_path):
-    workflow, jobs, annotations, outbox = make_workflow(tmp_path, fail=True)
+    workflow, jobs, annotations, outbox, preview = make_workflow(tmp_path, fail=True)
     tenant_id = uuid4()
     job = workflow.submit(
         tenant_id=tenant_id, asset_id="asset-1", prompt="bear", threshold=0.5,
@@ -77,11 +80,11 @@ def test_failed_workflow_persists_error_and_failure_event(tmp_path):
 
     assert jobs.get(job.job_id).status == "failed"
     assert outbox.pending()[0].event_type == "LabelRunFailed"
-    jobs.close(); annotations.close(); outbox.close()
+    jobs.close(); annotations.close(); outbox.close(); preview.close()
 
 
 def test_workflow_rejects_wrong_tenant_before_running(tmp_path):
-    workflow, jobs, annotations, outbox = make_workflow(tmp_path)
+    workflow, jobs, annotations, outbox, preview = make_workflow(tmp_path)
     owner = uuid4()
     job = workflow.submit(
         tenant_id=owner, asset_id="asset-1", prompt="bear", threshold=0.5,
@@ -95,4 +98,4 @@ def test_workflow_rejects_wrong_tenant_before_running(tmp_path):
         )
 
     assert jobs.get(job.job_id).status == "queued"
-    jobs.close(); annotations.close(); outbox.close()
+    jobs.close(); annotations.close(); outbox.close(); preview.close()
