@@ -1,12 +1,15 @@
-# Agentic CV Platform: Preview SSE API
+# Agentic CV Platform: Persistent Vector Index
 
-This branch exposes durable batch progress as replayable Server-Sent Events. Clients can reconnect with `after_event_id` and receive only the tenant-authorized preview events they have not seen.
+This branch adds a durable SQLite vector index for local semantic search. It preserves the existing exact cosine-search contract while storing normalized float32 embeddings across process restarts.
 
-## Endpoint
+## What this branch provides
 
-`GET /v1/jobs/{job_id}/preview?after_event_id=0`
-
-The endpoint requires `X-Tenant-ID`, returns `text/event-stream`, and emits standard SSE `id`, `event`, and JSON `data` fields. It replays the current durable backlog and closes; a later live-polling or broker-backed implementation can preserve this client contract.
+- Persistent vector records keyed by image record ID.
+- Idempotent upsert and explicit removal.
+- Dimension consistency checks across the index.
+- Exact cosine ranking with asset filtering and bounded limits.
+- Reopen-safe metadata and embedding storage.
+- A replaceable local implementation before pgvector/Qdrant scale-out.
 
 ## Local development
 
@@ -14,10 +17,10 @@ The endpoint requires `X-Tenant-ID`, returns `text/event-stream`, and emits stan
 uv run pytest -q
 ```
 
-The SSE tests use temporary SQLite preview storage. No browser, GPU, broker, or cloud service is required.
+The vector tests use tiny synthetic embeddings and temporary SQLite files. No embedding model, GPU, vector database, or cloud service is required.
 
 ## Branch boundary
 
-This branch builds on `feature/durable-preview-events`. It provides replayable SSE delivery but does not yet hold open live subscriptions, stream overlay artifacts, authenticate users, or provide a gallery UI.
+This branch builds on `feature/preview-sse-api`. It provides durable local vectors but does not yet switch the semantic API to this index by default, add approximate nearest-neighbor search, or add model/checkpoint migration metadata.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
