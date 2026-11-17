@@ -9,7 +9,7 @@ from agentic_cv.annotation_store import AnnotationRevisionStore
 from agentic_cv.batch_labeling import LabelImage, Sam3BatchLabeler
 from agentic_cv.dataset import DatasetCategory
 from agentic_cv.job_store import JobStore
-from agentic_cv.label_workflow import DurableLabelWorkflow, LabelWorkflowDependencies
+from agentic_cv.label_workflow import DurableLabelWorkflow, JobCancelled, LabelWorkflowDependencies
 from agentic_cv.outbox import Outbox
 from agentic_cv.preview import PreviewStore
 from agentic_cv.sam3 import Sam3Prediction
@@ -99,3 +99,51 @@ def test_workflow_rejects_wrong_tenant_before_running(tmp_path):
 
     assert jobs.get(job.job_id).status == "queued"
     jobs.close(); annotations.close(); outbox.close(); preview.close()
+
+
+def test_workflow_claims_lease_and_stops_when_cancelled(tmp_path):
+    workflow, jobs, annotations, outbox, preview = make_workflow(tmp_path)
+    tenant_id = uuid4()
+    job = workflow.submit(
+        tenant_id=tenant_id, asset_id="asset-1", prompt="bear", threshold=0.5,
+        task="detection", category_id=1, category_name="bear", idempotency_key="run-cancel",
+    )
+
+    original_publish = preview.publish
+
+    def cancel_after_first_preview(**kwargs):
+        original_publish(**kwargs)
+        jobs.request_cancel(job.job_id)
+
+    preview.publish = cancel_after_first_preview
+    with pytest.raises(JobCancelled, match="cancellation"):
+        workflow.execute(
+            job.job_id, images=image(tmp_path) * 2, tenant_id=tenant_id, prompt="bear",
+            threshold=0.5, task="detection", category=DatasetCategory(category_id=1, name="bear"),
+            worker_id="worker-a",
+        )
+
+    cancelled = jobs.get(job.job_id)
+    assert cancelled.status == "cancelled"
+    assert cancelled.lease_owner == "worker-a"
+    assert outbox.pending()[0].event_type == "LabelRunCancelled"
+    annotations.close(); outbox.close(); preview.close(); jobs.close()
+
+
+def test_workflow_rejects_pre_cancelled_job(tmp_path):
+    workflow, jobs, annotations, outbox, preview = make_workflow(tmp_path)
+    tenant_id = uuid4()
+    job = workflow.submit(
+        tenant_id=tenant_id, asset_id="asset-1", prompt="bear", threshold=0.5,
+        task="detection", category_id=1, category_name="bear", idempotency_key="run-pre-cancel",
+    )
+    jobs.request_cancel(job.job_id)
+
+    with pytest.raises(JobCancelled, match="before execution"):
+        workflow.execute(
+            job.job_id, images=image(tmp_path), tenant_id=tenant_id, prompt="bear",
+            threshold=0.5, task="detection", category=DatasetCategory(category_id=1, name="bear"),
+        )
+
+    assert jobs.get(job.job_id).status == "cancelled"
+    annotations.close(); outbox.close(); preview.close(); jobs.close()

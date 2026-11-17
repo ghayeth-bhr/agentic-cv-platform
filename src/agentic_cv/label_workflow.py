@@ -15,6 +15,10 @@ from .outbox import Outbox
 from .preview import PreviewStore
 
 
+class JobCancelled(RuntimeError):
+    """Raised when a running label job observes a cancellation request."""
+
+
 @dataclass(frozen=True, kw_only=True)
 class LabelWorkflowDependencies:
     jobs: JobStore
@@ -64,21 +68,35 @@ class DurableLabelWorkflow:
         threshold: float,
         task: Literal["detection", "segmentation"],
         category: DatasetCategory,
+        worker_id: str = "label-worker",
+        lease_seconds: float = 60,
     ) -> BatchLabelResult:
         job = self.dependencies.jobs.get(job_id)
         if job.tenant_id != tenant_id:
             raise PermissionError("job does not belong to tenant")
-        job = self.dependencies.jobs.transition(job_id, "running")
-        try:
-            on_progress = None
+        if job.cancel_requested or job.status == "cancelled":
+            raise JobCancelled(f"job {job_id} was cancelled before execution")
+        job = self.dependencies.jobs.claim(
+            job_id, worker_id=worker_id, lease_seconds=lease_seconds
+        )
+
+        def checkpoint(image_id: str, processed: int, total: int) -> None:
+            current = self.dependencies.jobs.get(job_id)
+            if current.cancel_requested:
+                raise JobCancelled(f"job {job_id} cancellation requested")
+            self.dependencies.jobs.heartbeat(
+                job_id, worker_id=worker_id, lease_seconds=lease_seconds
+            )
             if self.dependencies.preview is not None:
-                on_progress = lambda image_id, processed, total: self.dependencies.preview.publish(
+                self.dependencies.preview.publish(
                     tenant_id=tenant_id, job_id=job_id, image_id=image_id,
                     processed=processed, total=total,
                 )
+
+        try:
             result = self.dependencies.labeler.label(
                 images, prompt=prompt, threshold=threshold, category=category, task=task,
-                on_progress=on_progress,
+                on_progress=checkpoint,
             )
             for annotation in result.dataset.annotations:
                 self.dependencies.annotations.save(
@@ -98,6 +116,19 @@ class DurableLabelWorkflow:
                 )
             )
             return result
+        except JobCancelled as exc:
+            self.dependencies.jobs.transition(job.job_id, "cancelled", error=str(exc))
+            self.dependencies.outbox.enqueue(
+                EventEnvelope(
+                    event_type="LabelRunCancelled",
+                    tenant_id=tenant_id,
+                    aggregate_type="job",
+                    aggregate_id=job_id,
+                    payload={"reason": str(exc)},
+                    idempotency_key=f"label-cancelled:{job_id}",
+                )
+            )
+            raise
         except Exception as exc:
             self.dependencies.jobs.transition(job.job_id, "failed", error=str(exc))
             self.dependencies.outbox.enqueue(
