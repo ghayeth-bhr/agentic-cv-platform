@@ -61,6 +61,9 @@ COCO or YOLO directories and writes a manifest for each export.
 `DatasetExportWorkflow` wraps those exports in durable leased jobs with idempotent
 submission, cancellation handling, and completion/failure events.
 
+When configured, the API exposes authenticated `POST /v1/dataset-exports` for job
+submission and `GET /v1/dataset-exports/{job_id}` for tenant-scoped status reads.
+
 ## Local development
 
 ```text
