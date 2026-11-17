@@ -123,12 +123,22 @@ The root URL serves the local browser dashboard. It provides asset upload, SAM3
 prediction, semantic search, and export-job controls. JSON runtime discovery is
 available at `/api-info`, and interactive API documentation remains at `/docs`.
 
+For a containerized local stack, use:
+
+```text
+docker compose -f docker-compose.local.yml up --build
+```
+
+This starts the API, export worker, RabbitMQ, and MinIO services with persistent
+local volumes. The host-based `agentic-cv serve` and `agentic-cv worker` commands
+remain the lighter development path.
+
 ## Branch boundary
 
 This branch builds on `feature/persistent-vector-index`. It provides a local
 Ollama client, overlay renderer, prompt enhancer, calibration bridge, and optional
 click-refinement WebSocket, plus opt-in tenant authorization, but does not yet
-implement cloud object storage, broker-backed queue infrastructure, or worker process
-supervision, or hosted deployment configuration.
+implement hosted deployment configuration, health-based orchestration, or worker
+autoscaling.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
