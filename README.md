@@ -1,13 +1,15 @@
-# Agentic CV Platform: Semantic Search API
+# Agentic CV Platform: Batch SAM 3 Labeling
 
-This branch exposes semantic search and logical sub-asset creation over HTTP. It composes the provider-neutral search service with durable sub-asset metadata and deliberately omits local filesystem paths from responses.
+This branch adds the whole-asset labeling worker. It applies a calibrated SAM 3 prompt and threshold to image records, preserves raw predictions, and converts boxes or masks into validated detection/segmentation annotations.
 
-## Endpoints
+## What this branch provides
 
-- `POST /v1/search` searches by natural-language query and optional asset IDs.
-- `POST /v1/sub-assets/from-search` repeats the search and persists the ordered result set for a tenant.
-- Search responses contain record IDs, asset IDs, and scores only.
-- Sub-assets retain the original query and parent asset IDs without duplicating media.
+- Batch labeling over multiple image artifacts.
+- Raw prediction preservation with score, box, and mask data.
+- Detection annotations from SAM 3 boxes.
+- Segmentation polygons extracted from SAM 3 masks with OpenCV contours.
+- Dataset validation before a batch result is returned.
+- Explicit prompt, threshold, task, and empty-batch validation.
 
 ## Local development
 
@@ -15,10 +17,10 @@ This branch exposes semantic search and logical sub-asset creation over HTTP. It
 uv run pytest -q
 ```
 
-The API tests use a fake search service and temporary SQLite sub-asset storage. No embedding model, vector database, GPU, or cloud service is required.
+The batch tests use a fake provider and tiny CPU images. No gated model weights, GPU, cloud service, or batch queue is required.
 
 ## Branch boundary
 
-This branch builds on `feature/click-refinement-sessions`. It does not yet add authentication middleware, persistent vector storage, pagination cursors, search indexing jobs, or sub-asset deletion policies.
+This branch builds on `feature/semantic-search-api`. It does not yet persist raw prediction artifacts, create durable batch jobs, stream previews, or connect output revisions to the annotation store.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
