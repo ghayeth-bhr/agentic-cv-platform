@@ -7,17 +7,17 @@ from pathlib import Path
 from uuid import UUID
 
 from .asset_registry import AssetRegistry, SourceRecord, UploadRecord
-from .object_storage import LocalObjectStorage
+from .object_storage import ObjectStorage
 
 
 @dataclass(frozen=True, kw_only=True)
 class CompletedUpload:
     source: SourceRecord
-    object_path: Path
+    object_path: Path | str
 
 
 class ResumableUploadService:
-    def __init__(self, registry: AssetRegistry, storage: LocalObjectStorage) -> None:
+    def __init__(self, registry: AssetRegistry, storage: ObjectStorage) -> None:
         self.registry = registry
         self.storage = storage
 
@@ -46,5 +46,6 @@ class ResumableUploadService:
         object_path = self.storage.complete(
             upload_id, object_key=upload.object_key, expected_sha256=upload.expected_sha256
         )
-        source = self.registry.complete_upload(upload_id, object_uri=object_path.as_uri())
+        object_uri = object_path.as_uri() if isinstance(object_path, Path) else object_path
+        source = self.registry.complete_upload(upload_id, object_uri=object_uri)
         return CompletedUpload(source=source, object_path=object_path)
