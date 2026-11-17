@@ -10,13 +10,13 @@ from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from .preview import PreviewEvent, PreviewStore
-from .auth import StaticApiKeyAuthorizer
+from .auth import Authorizer
 
 
 @dataclass(frozen=True, kw_only=True)
 class PreviewApiDependencies:
     store: PreviewStore
-    authorizer: StaticApiKeyAuthorizer | None = None
+    authorizer: Authorizer | None = None
 
 
 def _tenant(value: str) -> UUID:
@@ -40,17 +40,21 @@ def _format_event(event: PreviewEvent) -> str:
 
 
 def _authorize(
-    authorizer: StaticApiKeyAuthorizer | None,
+    authorizer: Authorizer | None,
     *,
-    api_key: str | None,
+    credential: str | None,
     tenant_id: UUID,
 ) -> None:
     if authorizer is None:
         return
     try:
-        authorizer.authorize(api_key=api_key, tenant_id=tenant_id, role="reader")
+        authorizer.authorize(credential=credential, tenant_id=tenant_id, role="reader")
     except PermissionError as exc:
-        raise HTTPException(status_code=401 if api_key is None else 403, detail=str(exc)) from exc
+        raise HTTPException(status_code=401 if credential is None else 403, detail=str(exc)) from exc
+
+
+def _credential(authorization: str | None, api_key: str | None) -> str | None:
+    return authorization or api_key
 
 
 def create_app(dependencies: PreviewApiDependencies) -> FastAPI:
@@ -61,10 +65,11 @@ def create_app(dependencies: PreviewApiDependencies) -> FastAPI:
         job_id: UUID,
         x_tenant_id: str = Header(...),
         x_api_key: str | None = Header(None),
+        authorization: str | None = Header(None),
         after_event_id: int = Query(default=0, ge=0),
     ) -> StreamingResponse:
         tenant_id = _tenant(x_tenant_id)
-        _authorize(dependencies.authorizer, api_key=x_api_key, tenant_id=tenant_id)
+        _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id)
         events = dependencies.store.list_for_job(
             tenant_id=tenant_id, job_id=job_id, after_event_id=after_event_id
         )

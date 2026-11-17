@@ -21,3 +21,13 @@ def test_local_application_assembles_health_and_core_routes(tmp_path):
         )
 
     assert response.status_code == 201
+
+
+def test_local_application_reads_oidc_configuration_from_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENTIC_CV_OIDC_ISSUER", "https://issuer.example")
+    monkeypatch.setenv("AGENTIC_CV_OIDC_AUDIENCE", "agentic-cv")
+    monkeypatch.setenv("AGENTIC_CV_OIDC_JWKS_URL", "https://issuer.example/jwks")
+
+    config = LocalAppConfig.from_environment(tmp_path / "data")
+
+    assert config.authorizer is not None

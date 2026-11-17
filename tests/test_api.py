@@ -95,6 +95,11 @@ def test_optional_api_key_auth_enforces_tenant_and_writer_role(tmp_path):
         headers={"X-Tenant-ID": str(tenant_id), "X-API-Key": "writer-key"},
         json={"name": "Private"},
     )
+    bearer_valid = client.post(
+        "/v1/assets",
+        headers={"X-Tenant-ID": str(tenant_id), "Authorization": "Bearer writer-key"},
+        json={"name": "Bearer asset"},
+    )
     wrong_tenant = client.post(
         "/v1/assets",
         headers={"X-Tenant-ID": str(uuid4()), "X-API-Key": "writer-key"},
@@ -103,6 +108,7 @@ def test_optional_api_key_auth_enforces_tenant_and_writer_role(tmp_path):
 
     assert missing_key.status_code == 401
     assert valid.status_code == 201
+    assert bearer_valid.status_code == 201
     assert wrong_tenant.status_code == 403
     registry.close()
     outbox.close()

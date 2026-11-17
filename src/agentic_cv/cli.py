@@ -19,4 +19,4 @@ def main() -> None:
     serve.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
     if args.command == "serve":
-        uvicorn.run(create_local_app(LocalAppConfig(data_dir=args.data_dir)), host=args.host, port=args.port)
+        uvicorn.run(create_local_app(LocalAppConfig.from_environment(args.data_dir)), host=args.host, port=args.port)

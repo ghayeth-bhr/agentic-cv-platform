@@ -8,6 +8,7 @@ dependencies = [
     "numpy>=1.26",
     "opencv-python-headless>=4.9",
     "pillow>=10.0",
+    "PyJWT[crypto]>=2.9",
     "python-multipart>=0.0.9",
     "uvicorn>=0.30",
 ]
