@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Literal
+from typing import Callable, Literal, Protocol
 
 from PIL import Image
 
@@ -35,7 +35,16 @@ class CalibrationResult:
     reason: str | None = None
 
 
-Validator = Callable[[CalibrationSample, list[Sam3Prediction]], bool]
+class PromptAwareValidator(Protocol):
+    def validate_with_prompt(
+        self,
+        sample: CalibrationSample,
+        predictions: list[Sam3Prediction],
+        prompt: str,
+    ) -> bool: ...
+
+
+Validator = Callable[[CalibrationSample, list[Sam3Prediction]], bool] | PromptAwareValidator
 
 
 class Sam3Calibrator:
@@ -77,7 +86,12 @@ class Sam3Calibrator:
             accepted_count = 0
             for sample in samples:
                 predictions = self.provider.predict(sample.image, prompt, threshold=threshold)
-                accepted_count += self.validator(sample, predictions)
+                prompt_aware_validator = getattr(self.validator, "validate_with_prompt", None)
+                if prompt_aware_validator is None:
+                    accepted = self.validator(sample, predictions)
+                else:
+                    accepted = prompt_aware_validator(sample, predictions, prompt)
+                accepted_count += accepted
             agreement = accepted_count / len(samples)
             attempt = CalibrationAttempt(
                 threshold=threshold,
