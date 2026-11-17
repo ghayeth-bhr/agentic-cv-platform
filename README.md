@@ -1,15 +1,15 @@
-# Agentic CV Platform: Batch SAM 3 Labeling
+# Agentic CV Platform: Durable Label Workflow
 
-This branch adds the whole-asset labeling worker. It applies a calibrated SAM 3 prompt and threshold to image records, preserves raw predictions, and converts boxes or masks into validated detection/segmentation annotations.
+This branch connects batch SAM 3 labeling to durable job state, annotation revisions, and the event outbox. A run now has explicit success/failure state and emits a completion event after annotations are persisted.
 
 ## What this branch provides
 
-- Batch labeling over multiple image artifacts.
-- Raw prediction preservation with score, box, and mask data.
-- Detection annotations from SAM 3 boxes.
-- Segmentation polygons extracted from SAM 3 masks with OpenCV contours.
-- Dataset validation before a batch result is returned.
-- Explicit prompt, threshold, task, and empty-batch validation.
+- Idempotent batch-label job submission.
+- Tenant ownership checks before execution.
+- `queued` to `running` to `succeeded`/`failed` lifecycle.
+- Annotation revision persistence for successful predictions.
+- `LabelRunCompleted` and `LabelRunFailed` outbox events.
+- Failure details retained on the job record.
 
 ## Local development
 
@@ -17,10 +17,10 @@ This branch adds the whole-asset labeling worker. It applies a calibrated SAM 3 
 uv run pytest -q
 ```
 
-The batch tests use a fake provider and tiny CPU images. No gated model weights, GPU, cloud service, or batch queue is required.
+The workflow tests use a fake SAM 3 provider and temporary SQLite stores. No gated model weights, GPU, broker, or cloud service is required.
 
 ## Branch boundary
 
-This branch builds on `feature/semantic-search-api`. It does not yet persist raw prediction artifacts, create durable batch jobs, stream previews, or connect output revisions to the annotation store.
+This branch builds on `feature/batch-sam3-labeling`. It does not yet provide worker leases, cancellation, progress events, raw prediction artifact storage, or a distributed workflow engine.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
