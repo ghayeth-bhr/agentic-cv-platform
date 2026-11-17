@@ -124,6 +124,22 @@ class JobStore:
             raise KeyError(f"unknown job: {job_id}")
         return self._record(row)
 
+    def list(self, *, status: JobStatus | None = None, kind: str | None = None) -> list[JobRecord]:
+        clauses: list[str] = []
+        values: list[str] = []
+        if status is not None:
+            clauses.append("status = ?")
+            values.append(status)
+        if kind is not None:
+            clauses.append("kind = ?")
+            values.append(kind)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._lock:
+            rows = self._connection.execute(
+                f"SELECT * FROM jobs{where} ORDER BY created_at, job_id", values
+            ).fetchall()
+        return [self._record(row) for row in rows]
+
     def transition(
         self,
         job_id: UUID,
