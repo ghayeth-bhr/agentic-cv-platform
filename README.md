@@ -20,10 +20,11 @@ Start Ollama and pull the model before wiring it into calibration:
 ollama pull qwen3-vl:4b
 ```
 
-`OllamaVlmClient` sends the rendered overlay as base64 to `/api/chat` and requests
-the structured validation schema. Its timeout, context size, temperature, and
-keep-alive are configurable; tests use a mocked HTTP boundary and do not require
-Ollama or GPU access.
+`render_prediction_overlay` writes the source image, SAM3 masks, and score-labeled
+boxes to a local PNG. `OllamaVlmClient` sends that artifact as base64 to `/api/chat`
+and requests the structured validation schema. Its timeout, context size,
+temperature, and keep-alive are configurable; tests use a mocked HTTP boundary
+and do not require Ollama or GPU access.
 
 ## Local development
 
@@ -36,7 +37,7 @@ The validator tests use a fake VLM client. No multimodal model, GPU, network cal
 ## Branch boundary
 
 This branch builds on `feature/persistent-vector-index`. It provides a local
-Ollama client and calibration bridge but does not yet implement overlay artifact
-generation, prompt enhancement, or a production worker integration.
+Ollama client, overlay renderer, and calibration bridge but does not yet implement
+prompt enhancement or a production worker integration.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
