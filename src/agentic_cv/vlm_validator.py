@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
+
+from .calibration import CalibrationSample
+from .sam3 import Sam3Prediction
 
 
 class VlmClient(Protocol):
@@ -103,3 +106,38 @@ class VlmValidator:
 
     def accepts(self, **kwargs: Any) -> bool:
         return self.validate(**kwargs).accepted(minimum_confidence=self.minimum_confidence)
+
+
+class VlmCalibrationValidator:
+    """Adapt VLM judgments to the callable contract used by calibration."""
+
+    def __init__(
+        self,
+        validator: VlmValidator,
+        overlay_builder: Callable[[CalibrationSample, list[Sam3Prediction]], str],
+        *,
+        model_revision: str = "default",
+    ) -> None:
+        self.validator = validator
+        self.overlay_builder = overlay_builder
+        self.model_revision = model_revision
+
+    def validate_with_prompt(
+        self,
+        sample: CalibrationSample,
+        predictions: list[Sam3Prediction],
+        prompt: str,
+    ) -> bool:
+        overlay_uri = self.overlay_builder(sample, predictions)
+        return self.validator.accepts(
+            overlay_uri=overlay_uri,
+            prompt=prompt,
+            model_revision=self.model_revision,
+        )
+
+    def __call__(
+        self,
+        sample: CalibrationSample,
+        predictions: list[Sam3Prediction],
+    ) -> bool:
+        return self.validate_with_prompt(sample, predictions, sample.image_id)
