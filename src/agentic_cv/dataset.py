@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 DatasetTask = Literal["detection", "segmentation"]
+DatasetSplit = Literal["train", "validation", "test"]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -75,6 +77,58 @@ class DatasetVersion:
             if annotation.image_id not in images or annotation.category_id not in categories:
                 raise ValueError("annotation references an unknown image or category")
             annotation.validate(images[annotation.image_id])
+
+
+def split_dataset(
+    dataset: DatasetVersion,
+    *,
+    train_ratio: float = 0.8,
+    validation_ratio: float = 0.1,
+    test_ratio: float = 0.1,
+    seed: int = 0,
+) -> dict[DatasetSplit, DatasetVersion]:
+    """Create deterministic, image-disjoint train/validation/test versions."""
+
+    ratios = (train_ratio, validation_ratio, test_ratio)
+    if any(ratio < 0 for ratio in ratios) or abs(sum(ratios) - 1.0) > 1e-9:
+        raise ValueError("split ratios must be non-negative and sum to 1")
+    if not dataset.images:
+        raise ValueError("dataset must contain at least one image")
+
+    ordered = sorted(
+        dataset.images,
+        key=lambda image: hashlib.sha256(f"{seed}:{image.image_id}".encode("utf-8")).digest(),
+    )
+    exact_counts = [len(ordered) * ratio for ratio in ratios]
+    counts = [int(value) for value in exact_counts]
+    for index in sorted(
+        range(3), key=lambda index: (-(exact_counts[index] - counts[index]), index)
+    )[: len(ordered) - sum(counts)]:
+        counts[index] += 1
+
+    names: tuple[DatasetSplit, ...] = ("train", "validation", "test")
+    assignments: dict[DatasetSplit, tuple[DatasetImage, ...]] = {}
+    offset = 0
+    for name, count in zip(names, counts):
+        assignments[name] = tuple(ordered[offset : offset + count])
+        offset += count
+
+    annotations_by_image = {
+        image_id: tuple(annotation for annotation in dataset.annotations if annotation.image_id == image_id)
+        for image_id in (image.image_id for image in dataset.images)
+    }
+    return {
+        name: DatasetVersion(
+            images=images,
+            categories=dataset.categories,
+            annotations=tuple(
+                annotation
+                for image in images
+                for annotation in annotations_by_image[image.image_id]
+            ),
+        )
+        for name, images in assignments.items()
+    }
 
 
 def export_coco(dataset: DatasetVersion) -> dict:

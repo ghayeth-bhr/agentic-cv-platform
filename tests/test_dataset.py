@@ -9,6 +9,7 @@ from agentic_cv.dataset import (
     DatasetVersion,
     export_coco,
     export_yolo,
+    split_dataset,
 )
 
 
@@ -61,3 +62,38 @@ def test_invalid_geometry_and_missing_segmentation_fail():
     dataset = DatasetVersion(images=(image,), categories=(category,), annotations=(no_polygon,))
     with pytest.raises(ValueError, match="polygon"):
         export_yolo(dataset, "segmentation")
+
+
+def test_split_dataset_is_deterministic_and_keeps_annotations_with_images():
+    category = DatasetCategory(category_id=0, name="object")
+    images = tuple(
+        DatasetImage(image_id=f"image-{index}", file_name=f"frame-{index}.jpg", width=10, height=10)
+        for index in range(10)
+    )
+    annotations = tuple(
+        Annotation(
+            annotation_id=f"annotation-{index}", image_id=f"image-{index}",
+            category_id=0, bbox=(0, 0, 2, 2),
+        )
+        for index in range(10)
+    )
+    dataset = DatasetVersion(images=images, categories=(category,), annotations=annotations)
+
+    first = split_dataset(dataset, seed=42)
+    second = split_dataset(dataset, seed=42)
+
+    assert {name: tuple(image.image_id for image in version.images) for name, version in first.items()} == {
+        name: tuple(image.image_id for image in version.images) for name, version in second.items()
+    }
+    assert [len(first[name].images) for name in ("train", "validation", "test")] == [8, 1, 1]
+    for version in first.values():
+        assert {annotation.image_id for annotation in version.annotations} <= {
+            image.image_id for image in version.images
+        }
+
+
+def test_split_dataset_rejects_invalid_ratios_and_empty_dataset():
+    with pytest.raises(ValueError, match="ratios"):
+        split_dataset(make_dataset(), train_ratio=0.5, validation_ratio=0.5, test_ratio=0.5)
+    with pytest.raises(ValueError, match="at least one image"):
+        split_dataset(DatasetVersion(images=(), categories=(), annotations=()))

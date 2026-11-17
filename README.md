@@ -47,6 +47,11 @@ asset and upload write operations require `X-API-Key`, bind the key to
 `X-Tenant-ID`, and enforce the `writer` role. The default local API remains
 unauthenticated until an authorizer is supplied.
 
+`split_dataset` creates deterministic, image-disjoint train, validation, and test
+`DatasetVersion` objects from configurable ratios and a seed. Annotations remain
+with their source images, so each partition can be passed directly to the existing
+COCO or YOLO exporters.
+
 ## Local development
 
 ```text
@@ -60,6 +65,7 @@ The validator tests use a fake VLM client. No multimodal model, GPU, network cal
 This branch builds on `feature/persistent-vector-index`. It provides a local
 Ollama client, overlay renderer, prompt enhancer, calibration bridge, and optional
 click-refinement WebSocket, plus opt-in tenant authorization, but does not yet
-implement production identity-provider integration or full RBAC policy management.
+implement production identity-provider integration, full RBAC policy management,
+or dataset version persistence.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
