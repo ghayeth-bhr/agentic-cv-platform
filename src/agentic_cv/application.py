@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Mapping
 
@@ -13,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .api import ApiDependencies, ExportApiDependencies, create_app as create_core_app
 from .asset_registry import AssetRegistry
-from .auth import Principal, StaticApiKeyAuthorizer
+from .auth import Authorizer, OidcJwtAuthorizer, Principal, StaticApiKeyAuthorizer
 from .dataset_export import DatasetExportService
 from .dataset_export_workflow import DatasetExportWorkflow, DatasetExportWorkflowDependencies
 from .dataset_store import DatasetVersionStore
@@ -35,8 +36,23 @@ from .uploads import ResumableUploadService
 class LocalAppConfig:
     data_dir: Path
     api_keys: Mapping[str, Principal] | None = None
+    authorizer: Authorizer | None = None
     embedding_provider: EmbeddingProvider | None = None
     sam3_provider: Sam3Provider | None = None
+
+    @classmethod
+    def from_environment(cls, data_dir: Path) -> "LocalAppConfig":
+        issuer = os.getenv("AGENTIC_CV_OIDC_ISSUER")
+        audience = os.getenv("AGENTIC_CV_OIDC_AUDIENCE")
+        jwks_url = os.getenv("AGENTIC_CV_OIDC_JWKS_URL")
+        authorizer = None
+        if issuer and audience and jwks_url:
+            authorizer = OidcJwtAuthorizer(
+                issuer=issuer, audience=audience, jwks_url=jwks_url,
+                tenant_claim=os.getenv("AGENTIC_CV_OIDC_TENANT_CLAIM", "tenant_id"),
+                roles_claim=os.getenv("AGENTIC_CV_OIDC_ROLES_CLAIM", "roles"),
+            )
+        return cls(data_dir=data_dir, authorizer=authorizer)
 
 
 @dataclass
@@ -73,7 +89,9 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
     sub_assets = SubAssetStore(str(metadata_dir / "sub-assets.sqlite3"))
     storage = LocalObjectStorage(config.data_dir / "objects")
     uploads = ResumableUploadService(registry, storage)
-    authorizer = StaticApiKeyAuthorizer(config.api_keys) if config.api_keys else None
+    authorizer = config.authorizer or (
+        StaticApiKeyAuthorizer(config.api_keys) if config.api_keys else None
+    )
     embedding_provider = config.embedding_provider or HuggingFaceEmbeddingProvider(
         HuggingFaceEmbeddingConfig()
     )

@@ -48,6 +48,11 @@ asset and upload write operations require `X-API-Key`, bind the key to
 use the `reader` role when their optional authorizer is configured. The default
 local APIs remain unauthenticated until an authorizer is supplied.
 
+Production OIDC/JWT validation is available through `OidcJwtAuthorizer`. The
+`serve` command enables it when `AGENTIC_CV_OIDC_ISSUER`,
+`AGENTIC_CV_OIDC_AUDIENCE`, and `AGENTIC_CV_OIDC_JWKS_URL` are set. Tokens must
+include `exp`, `iat`, `sub`, a UUID tenant claim, and the configured roles claim.
+
 `OutboxDispatcher` delivers pending integration events through an injected
 publisher, marks successful deliveries, and records retryable failures without
 blocking later events in the same polling pass.
@@ -106,8 +111,8 @@ available at `/api-info`, and interactive API documentation remains at `/docs`.
 This branch builds on `feature/persistent-vector-index`. It provides a local
 Ollama client, overlay renderer, prompt enhancer, calibration bridge, and optional
 click-refinement WebSocket, plus opt-in tenant authorization, but does not yet
-implement production identity-provider integration, full RBAC policy management,
-cloud object storage, broker-backed queue infrastructure, or worker process
+implement full RBAC policy management, cloud object storage, broker-backed queue
+infrastructure, or worker process
 supervision, or a concrete broker publisher implementation.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
