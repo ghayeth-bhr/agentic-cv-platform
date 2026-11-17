@@ -11,6 +11,7 @@ from PIL import Image
 from pydantic import BaseModel
 
 from .asset_registry import AssetRegistry
+from .auth import StaticApiKeyAuthorizer
 from .click_refinement import ClickPoint, ClickRefinementService, RefinementSnapshot
 from .contracts import EventEnvelope
 from .outbox import Outbox
@@ -67,6 +68,23 @@ class ApiDependencies:
     uploads: ResumableUploadService
     outbox: Outbox
     refinement: RefinementApiDependencies | None = None
+    authorizer: StaticApiKeyAuthorizer | None = None
+
+
+def _authorize(
+    authorizer: StaticApiKeyAuthorizer | None,
+    *,
+    api_key: str | None,
+    tenant_id: UUID,
+    role: str,
+) -> None:
+    if authorizer is None:
+        return
+    try:
+        authorizer.authorize(api_key=api_key, tenant_id=tenant_id, role=role)
+    except PermissionError as exc:
+        status = 401 if api_key is None else 403
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
 
 
 def _snapshot_payload(snapshot: RefinementSnapshot) -> dict:
@@ -97,9 +115,12 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
     def create_asset(
         request: AssetCreateRequest,
         x_tenant_id: str = Header(...),
+        x_api_key: str | None = Header(None),
     ) -> AssetResponse:
+        tenant_id = _tenant(x_tenant_id)
+        _authorize(dependencies.authorizer, api_key=x_api_key, tenant_id=tenant_id, role="writer")
         asset = dependencies.registry.create_asset(
-            tenant_id=_tenant(x_tenant_id), name=request.name
+            tenant_id=tenant_id, name=request.name
         )
         return AssetResponse(
             asset_id=asset.asset_id,
@@ -113,10 +134,13 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
         asset_id: UUID,
         request: UploadCreateRequest,
         x_tenant_id: str = Header(...),
+        x_api_key: str | None = Header(None),
     ) -> UploadResponse:
         try:
+            tenant_id = _tenant(x_tenant_id)
+            _authorize(dependencies.authorizer, api_key=x_api_key, tenant_id=tenant_id, role="writer")
             upload = dependencies.uploads.start(
-                tenant_id=_tenant(x_tenant_id), asset_id=asset_id,
+                tenant_id=tenant_id, asset_id=asset_id,
                 filename=request.filename, media_type=request.media_type,
                 expected_sha256=request.expected_sha256,
             )
@@ -136,8 +160,18 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
         upload_id: UUID,
         part_number: int,
         part: UploadFile = File(...),
+        x_tenant_id: str | None = Header(None),
+        x_api_key: str | None = Header(None),
     ) -> dict[str, int]:
         try:
+            upload = dependencies.uploads.registry.get_upload(upload_id)
+            if dependencies.authorizer is not None:
+                if x_tenant_id is None:
+                    raise HTTPException(status_code=400, detail="X-Tenant-ID is required")
+                tenant_id = _tenant(x_tenant_id)
+                _authorize(dependencies.authorizer, api_key=x_api_key, tenant_id=tenant_id, role="writer")
+                if upload.tenant_id != tenant_id:
+                    raise PermissionError("upload does not belong to tenant")
             dependencies.uploads.put_part(upload_id, part_number, await part.read())
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -146,8 +180,20 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
         return {"part_number": part_number}
 
     @app.post("/v1/uploads/{upload_id}/complete", response_model=SourceResponse)
-    def complete_upload(upload_id: UUID) -> SourceResponse:
+    def complete_upload(
+        upload_id: UUID,
+        x_tenant_id: str | None = Header(None),
+        x_api_key: str | None = Header(None),
+    ) -> SourceResponse:
         try:
+            upload = dependencies.uploads.registry.get_upload(upload_id)
+            if dependencies.authorizer is not None:
+                if x_tenant_id is None:
+                    raise HTTPException(status_code=400, detail="X-Tenant-ID is required")
+                tenant_id = _tenant(x_tenant_id)
+                _authorize(dependencies.authorizer, api_key=x_api_key, tenant_id=tenant_id, role="writer")
+                if upload.tenant_id != tenant_id:
+                    raise PermissionError("upload does not belong to tenant")
             completed = dependencies.uploads.complete(upload_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
