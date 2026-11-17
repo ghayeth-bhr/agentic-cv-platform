@@ -52,6 +52,9 @@ unauthenticated until an authorizer is supplied.
 with their source images, so each partition can be passed directly to the existing
 COCO or YOLO exporters.
 
+`DatasetVersionStore` persists validated dataset snapshots in tenant-scoped SQLite
+storage with reopen-safe reads, ordered listing, and idempotent creation.
+
 ## Local development
 
 ```text
@@ -66,6 +69,6 @@ This branch builds on `feature/persistent-vector-index`. It provides a local
 Ollama client, overlay renderer, prompt enhancer, calibration bridge, and optional
 click-refinement WebSocket, plus opt-in tenant authorization, but does not yet
 implement production identity-provider integration, full RBAC policy management,
-or dataset version persistence.
+or production object-storage/export job orchestration.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
