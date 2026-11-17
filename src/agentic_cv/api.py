@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from uuid import UUID
+from typing import Callable
 
-from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from PIL import Image
 from pydantic import BaseModel
 
 from .asset_registry import AssetRegistry
+from .click_refinement import ClickPoint, ClickRefinementService, RefinementSnapshot
 from .contracts import EventEnvelope
 from .outbox import Outbox
 from .uploads import ResumableUploadService
@@ -45,6 +48,12 @@ class SourceResponse(BaseModel):
     content_sha256: str
 
 
+@dataclass(frozen=True, kw_only=True)
+class RefinementApiDependencies:
+    service: ClickRefinementService
+    image_loader: Callable[[str], Image.Image]
+
+
 def _tenant(value: str) -> UUID:
     try:
         return UUID(value)
@@ -57,6 +66,28 @@ class ApiDependencies:
     registry: AssetRegistry
     uploads: ResumableUploadService
     outbox: Outbox
+    refinement: RefinementApiDependencies | None = None
+
+
+def _snapshot_payload(snapshot: RefinementSnapshot) -> dict:
+    return {
+        "type": "snapshot",
+        "session_id": str(snapshot.session_id),
+        "image_id": snapshot.image_id,
+        "revision": snapshot.revision,
+        "points": [
+            {"x": point.x, "y": point.y, "label": point.label}
+            for point in snapshot.points
+        ],
+        "predictions": [
+            {
+                "score": prediction.score,
+                "box": prediction.box,
+                "mask": prediction.mask.astype(bool).tolist(),
+            }
+            for prediction in snapshot.predictions
+        ],
+    }
 
 
 def create_app(dependencies: ApiDependencies) -> FastAPI:
@@ -143,5 +174,42 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
             object_uri=source.object_uri,
             content_sha256=source.content_sha256,
         )
+
+    if dependencies.refinement is not None:
+        refinement = dependencies.refinement
+
+        @app.websocket("/v1/refinement/{image_id}")
+        async def refinement_socket(websocket: WebSocket, image_id: str) -> None:
+            await websocket.accept()
+            try:
+                image = refinement.image_loader(image_id)
+                snapshot = refinement.service.create(image_id=image_id, image=image)
+            except (KeyError, ValueError) as exc:
+                await websocket.close(code=1008, reason=str(exc))
+                return
+            await websocket.send_json(_snapshot_payload(snapshot))
+            try:
+                while True:
+                    message = await websocket.receive_json()
+                    message_type = message.get("type")
+                    if message_type == "click":
+                        try:
+                            snapshot = refinement.service.click(
+                                snapshot.session_id,
+                                expected_revision=message["expected_revision"],
+                                point=ClickPoint(
+                                    x=message["x"], y=message["y"], label=message["label"]
+                                ),
+                            )
+                        except (KeyError, TypeError, ValueError) as exc:
+                            await websocket.send_json({"type": "error", "detail": str(exc)})
+                            continue
+                        await websocket.send_json(_snapshot_payload(snapshot))
+                    elif message_type == "get":
+                        await websocket.send_json(_snapshot_payload(refinement.service.get(snapshot.session_id)))
+                    else:
+                        await websocket.send_json({"type": "error", "detail": "unsupported message type"})
+            except WebSocketDisconnect:
+                return
 
     return app
