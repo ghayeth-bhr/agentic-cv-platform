@@ -111,6 +111,21 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
     app.include_router(create_preview_app(PreviewApiDependencies(store=preview, authorizer=authorizer)).router)
     app.include_router(create_sam3_app(sam3_provider).router)
 
+    @app.get("/")
+    def application_info() -> dict[str, object]:
+        return {
+            "name": "Agentic CV Platform",
+            "status": "ok",
+            "docs": "/docs",
+            "health": {"live": "/health/live", "ready": "/health/ready"},
+            "api": {
+                "assets": "/v1/assets",
+                "search": "/v1/search",
+                "exports": "/v1/dataset-exports",
+                "sam3": "/v1/predict",
+            },
+        }
+
     @app.get("/health/live")
     def liveness() -> dict[str, str]:
         return {"status": "ok"}
