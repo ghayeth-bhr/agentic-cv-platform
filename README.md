@@ -63,7 +63,8 @@ submission, cancellation handling, and completion/failure events.
 
 `DatasetExportWorker.run_once()` polls queued export jobs and processes each through
 the lease-aware workflow; one failed job does not prevent the remaining queue from
-being inspected.
+being inspected. `run_forever()` adds a stoppable polling loop for local worker
+processes.
 
 When configured, the API exposes authenticated `POST /v1/dataset-exports` for job
 submission and `GET /v1/dataset-exports/{job_id}` for tenant-scoped status reads.
