@@ -55,6 +55,9 @@ COCO or YOLO exporters.
 `DatasetVersionStore` persists validated dataset snapshots in tenant-scoped SQLite
 storage with reopen-safe reads, ordered listing, and idempotent creation.
 
+`DatasetExportService` materializes persisted versions into tenant/version-scoped
+COCO or YOLO directories and writes a manifest for each export.
+
 ## Local development
 
 ```text
@@ -69,6 +72,6 @@ This branch builds on `feature/persistent-vector-index`. It provides a local
 Ollama client, overlay renderer, prompt enhancer, calibration bridge, and optional
 click-refinement WebSocket, plus opt-in tenant authorization, but does not yet
 implement production identity-provider integration, full RBAC policy management,
-or production object-storage/export job orchestration.
+cloud object storage, or asynchronous export job orchestration.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
