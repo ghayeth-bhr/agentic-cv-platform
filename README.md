@@ -1,15 +1,15 @@
-# Agentic CV Platform: Local Job State
+# Agentic CV Platform: Local Event Outbox
 
-This branch adds the durable local control-plane state needed to resume work after a process restart. Jobs are stored in SQLite and can be safely created again by an idempotency key without duplicating work.
+This branch adds a durable SQLite outbox for integration events. Producers persist an `EventEnvelope` before a future broker relay publishes it, preventing transient delivery failures from silently losing asset, upload, or workflow events.
 
 ## What this branch provides
 
-- Tenant-scoped job records with JSON payloads.
-- `queued`, `running`, `succeeded`, `failed`, and `cancelled` states.
-- Explicit allowed transitions that reject invalid state changes.
-- Attempt counting when work enters `running`.
-- Failure details and retry transition from `failed` back to `queued`.
-- Idempotent creation for repeated API or worker requests.
+- Durable event envelopes with tenant and aggregate identity.
+- Idempotent insertion by event ID or tenant-scoped idempotency key.
+- Ordered pending-event reads with a bounded batch size.
+- Publish completion timestamps that remove events from pending delivery.
+- Retry attempt counts, last-error details, and retry scheduling metadata.
+- SQLite synchronization suitable for the local single-process mode.
 
 ## Local development
 
@@ -19,10 +19,10 @@ Run the complete test suite:
 uv run pytest -q
 ```
 
-The job-store tests use temporary SQLite files and reopen the database to verify persistence. No broker, workflow server, GPU, or cloud service is required.
+The outbox tests use temporary SQLite files. No Kafka, Redpanda, broker, GPU, or cloud service is required.
 
 ## Branch boundary
 
-This branch depends on `feature/sam3-inference-service`. It provides persistence primitives, not a worker loop, lease expiry, event outbox, or distributed queue. Those behaviors should be added behind this store rather than encoded in the HTTP service.
+This branch builds on `feature/local-job-state`. It persists and exposes delivery state but does not yet run a relay worker, claim leases between processes, or publish to a production broker. The next messaging slice should add a leased relay and dead-letter policy while keeping this outbox as the local source of truth.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
