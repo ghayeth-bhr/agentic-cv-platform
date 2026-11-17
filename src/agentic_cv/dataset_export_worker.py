@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from threading import Event
+from time import sleep
 from uuid import UUID
+from collections.abc import Callable
 
 from .dataset_export_workflow import DatasetExportWorkflow
 from .job_store import JobStore
@@ -29,3 +32,19 @@ class DatasetExportWorker:
                 # Continue so one bad export cannot starve the queue.
                 continue
         return tuple(processed)
+
+    def run_forever(
+        self,
+        *,
+        worker_id: str = "export-worker",
+        poll_interval: float = 1.0,
+        stop_event: Event | None = None,
+        sleep_fn: Callable[[float], None] = sleep,
+    ) -> None:
+        if poll_interval < 0:
+            raise ValueError("poll_interval must not be negative")
+        stop_event = stop_event or Event()
+        while not stop_event.is_set():
+            self.run_once(worker_id=worker_id)
+            if not stop_event.is_set() and poll_interval:
+                sleep_fn(poll_interval)
