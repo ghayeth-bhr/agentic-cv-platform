@@ -9,7 +9,21 @@ This branch adds structured VLM validation for SAM 3 calibration. It validates t
 - Explicit acceptance criteria for calibration.
 - Maximum VLM call budgets with a dedicated exception.
 - Deterministic cache keys including model revision.
-- Client/provider injection for local Ollama or hosted VLM adapters.
+- Client/provider injection with a local Ollama implementation.
+
+## Local Ollama
+
+The adapter targets Ollama at `http://localhost:11434` and defaults to `qwen3-vl:4b`.
+Start Ollama and pull the model before wiring it into calibration:
+
+```text
+ollama pull qwen3-vl:4b
+```
+
+`OllamaVlmClient` sends the rendered overlay as base64 to `/api/chat` and requests
+the structured validation schema. Its timeout, context size, temperature, and
+keep-alive are configurable; tests use a mocked HTTP boundary and do not require
+Ollama or GPU access.
 
 ## Local development
 
@@ -21,6 +35,8 @@ The validator tests use a fake VLM client. No multimodal model, GPU, network cal
 
 ## Branch boundary
 
-This branch builds on `feature/persistent-vector-index`. It validates VLM judgments but does not yet implement a real Ollama/hosted client, overlay artifact generation, prompt enhancement, or direct integration into the calibration sample validator.
+This branch builds on `feature/persistent-vector-index`. It provides a local
+Ollama client and calibration bridge but does not yet implement overlay artifact
+generation, prompt enhancement, or a production worker integration.
 
 The older `frames-extractor` repository is reference material only and is not part of this Git history.
