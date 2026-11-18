@@ -7,10 +7,18 @@ from agentic_cv.model_runtime import (
 )
 
 
-def test_device_defaults_to_cuda(monkeypatch):
+def test_device_defaults_to_cuda_when_available(monkeypatch):
     monkeypatch.delenv("AGENTIC_CV_DEVICE", raising=False)
+    monkeypatch.setattr("agentic_cv.model_runtime._cuda_available", lambda: True)
 
     assert resolve_device() == "cuda"
+
+
+def test_device_defaults_to_cpu_without_cuda(monkeypatch):
+    monkeypatch.delenv("AGENTIC_CV_DEVICE", raising=False)
+    monkeypatch.setattr("agentic_cv.model_runtime._cuda_available", lambda: False)
+
+    assert resolve_device() == "cpu"
 
 
 @pytest.mark.parametrize(
