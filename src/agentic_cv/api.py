@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import io
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Literal
+from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
 from uuid import UUID
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Response, UploadFile, WebSocket, WebSocketDisconnect
 from PIL import Image
 from pydantic import BaseModel, Field
 
@@ -55,6 +58,28 @@ class SourceResponse(BaseModel):
     asset_id: UUID
     object_uri: str
     content_sha256: str
+
+
+class SourceInfo(BaseModel):
+    source_id: UUID
+    asset_id: UUID
+    filename: str
+    media_type: str
+    content_sha256: str
+    created_at: str
+
+
+class AssetSummaryResponse(BaseModel):
+    asset_id: UUID
+    tenant_id: UUID
+    name: str
+    created_at: str
+    sources: list[SourceInfo]
+    thumbnail_url: str | None = None
+
+
+class AssetListResponse(BaseModel):
+    assets: list[AssetSummaryResponse]
 
 
 class DatasetExportRequest(BaseModel):
@@ -238,6 +263,62 @@ def _job_response(job: JobRecord) -> DatasetExportJobResponse:
     )
 
 
+def _path_from_file_uri(uri: str) -> Path | None:
+    try:
+        parsed = urlparse(uri)
+    except Exception:
+        return None
+    if parsed.scheme != "file":
+        return None
+    return Path(url2pathname(unquote(parsed.path)))
+
+
+def _representative_source(sources):
+    if not sources:
+        return None
+    for source in sources:
+        if (source.media_type or "").startswith("image/"):
+            return source
+    for source in sources:
+        if (source.media_type or "").startswith("video/"):
+            return source
+    return sources[0]
+
+
+def _thumbnail_bytes(source) -> bytes | None:
+    path = _path_from_file_uri(source.object_uri)
+    if path is None or not path.exists():
+        return None
+    media_type = (source.media_type or "").lower()
+    try:
+        if media_type.startswith("image/"):
+            with Image.open(path) as img:
+                img = img.convert("RGB")
+                img.thumbnail((512, 512))
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=82)
+                return buf.getvalue()
+        if media_type.startswith("video/"):
+            import cv2  # type: ignore
+
+            capture = cv2.VideoCapture(str(path))
+            try:
+                ok, frame = capture.read()
+            finally:
+                capture.release()
+            if not ok or frame is None:
+                return None
+            frame = frame[:, :, ::-1]
+            img = Image.fromarray(frame)
+            img.thumbnail((512, 512))
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=82)
+            return buf.getvalue()
+    except Exception:
+        return None
+    return None
+
+
 def create_app(dependencies: ApiDependencies) -> FastAPI:
     app = FastAPI(title="Agentic CV platform API", version="1")
 
@@ -259,6 +340,69 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
             name=asset.name,
             created_at=asset.created_at,
         )
+
+    @app.get("/v1/assets", response_model=AssetListResponse)
+    def list_assets(
+        x_tenant_id: str | None = Header(None),
+        tenant_id_q: str | None = Query(None, alias="tenant_id"),
+        x_api_key: str | None = Header(None),
+        authorization: str | None = Header(None),
+    ) -> AssetListResponse:
+        raw_tenant = x_tenant_id or tenant_id_q
+        if raw_tenant is None:
+            raise HTTPException(status_code=400, detail="X-Tenant-ID or tenant_id is required")
+        tenant_id = _tenant(raw_tenant)
+        _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="assets:read")
+        summaries = dependencies.registry.list_assets(tenant_id=tenant_id)
+        assets: list[AssetSummaryResponse] = []
+        for summary in summaries:
+            representative = _representative_source(summary.sources)
+            thumbnail_url = (
+                f"/v1/assets/{summary.asset_id}/thumbnail?tenant_id={tenant_id}"
+                if representative is not None
+                else None
+            )
+            assets.append(AssetSummaryResponse(
+                asset_id=summary.asset_id,
+                tenant_id=summary.tenant_id,
+                name=summary.name,
+                created_at=summary.created_at,
+                sources=[SourceInfo(
+                    source_id=source.source_id,
+                    asset_id=source.asset_id,
+                    filename=source.filename,
+                    media_type=source.media_type,
+                    content_sha256=source.content_sha256,
+                    created_at=source.created_at,
+                ) for source in summary.sources],
+                thumbnail_url=thumbnail_url,
+            ))
+        return AssetListResponse(assets=assets)
+
+    @app.get("/v1/assets/{asset_id}/thumbnail")
+    def asset_thumbnail(
+        asset_id: UUID,
+        x_tenant_id: str | None = Header(None),
+        tenant_id_q: str | None = Query(None, alias="tenant_id"),
+        x_api_key: str | None = Header(None),
+        authorization: str | None = Header(None),
+    ) -> Response:
+        raw_tenant = x_tenant_id or tenant_id_q
+        if raw_tenant is None:
+            raise HTTPException(status_code=400, detail="X-Tenant-ID or tenant_id is required")
+        tenant_id = _tenant(raw_tenant)
+        _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="assets:read")
+        summaries = dependencies.registry.list_assets(tenant_id=tenant_id)
+        summary = next((item for item in summaries if item.asset_id == asset_id), None)
+        if summary is None:
+            raise HTTPException(status_code=404, detail="unknown asset")
+        representative = _representative_source(summary.sources)
+        if representative is None:
+            raise HTTPException(status_code=404, detail="asset has no source")
+        data = _thumbnail_bytes(representative)
+        if data is None:
+            raise HTTPException(status_code=404, detail="thumbnail unavailable")
+        return Response(content=data, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=300"})
 
     @app.post("/v1/assets/{asset_id}/uploads", response_model=UploadResponse, status_code=201)
     def start_upload(

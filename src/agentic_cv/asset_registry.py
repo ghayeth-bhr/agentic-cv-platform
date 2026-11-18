@@ -21,6 +21,10 @@ class AssetRegistryBackend(Protocol):
 
     def create_asset(self, *, tenant_id: UUID, name: str) -> AssetRecord: ...
 
+    def list_assets(self, *, tenant_id: UUID) -> list[AssetSummary]: ...
+
+    def get_source(self, source_id: UUID) -> SourceRecord: ...
+
     def start_upload(
         self,
         *,
@@ -71,6 +75,15 @@ class SourceRecord:
     object_uri: str
     content_sha256: str
     created_at: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class AssetSummary:
+    asset_id: UUID
+    tenant_id: UUID
+    name: str
+    created_at: str
+    sources: tuple[SourceRecord, ...]
 
 
 class AssetRegistry:
@@ -227,6 +240,34 @@ class AssetRegistry:
             )
             self._connection.commit()
             return source
+
+    def list_assets(self, *, tenant_id: UUID) -> list[AssetSummary]:
+        with self._lock:
+            asset_rows = self._connection.execute(
+                "SELECT * FROM assets WHERE tenant_id = ? ORDER BY created_at DESC",
+                (str(tenant_id),),
+            ).fetchall()
+            summaries: list[AssetSummary] = []
+            for row in asset_rows:
+                source_rows = self._connection.execute(
+                    "SELECT * FROM sources WHERE asset_id = ? ORDER BY created_at DESC",
+                    (row["asset_id"],),
+                ).fetchall()
+                summaries.append(AssetSummary(
+                    asset_id=UUID(row["asset_id"]), tenant_id=UUID(row["tenant_id"]),
+                    name=row["name"], created_at=row["created_at"],
+                    sources=tuple(self._source(s) for s in source_rows),
+                ))
+            return summaries
+
+    def get_source(self, source_id: UUID) -> SourceRecord:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM sources WHERE source_id = ?", (str(source_id),)
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown source: {source_id}")
+        return self._source(row)
 
     @staticmethod
     def _source(row: sqlite3.Row) -> SourceRecord:

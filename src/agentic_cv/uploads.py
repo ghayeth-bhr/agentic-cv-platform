@@ -46,6 +46,8 @@ class ResumableUploadService:
         object_path = self.storage.complete(
             upload_id, object_key=upload.object_key, expected_sha256=upload.expected_sha256
         )
-        object_uri = object_path.as_uri() if isinstance(object_path, Path) else object_path
+        object_uri = (
+            object_path.resolve().as_uri() if isinstance(object_path, Path) else object_path
+        )
         source = self.registry.complete_upload(upload_id, object_uri=object_uri)
         return CompletedUpload(source=source, object_path=object_path)
