@@ -22,7 +22,7 @@ from .dataset_store import DatasetVersionStore
 from .embeddings import HuggingFaceEmbeddingConfig, HuggingFaceEmbeddingProvider
 from .job_store import JobStore
 from .object_storage import LocalObjectStorage, ObjectStorage, S3ObjectStorage
-from .outbox import Outbox
+from .outbox import Outbox, OutboxBackend
 from .outbox_dispatcher import EventPublisher, OutboxDispatcher
 from .postgres import PostgresConfig
 from .preview import PreviewStore
@@ -78,7 +78,7 @@ class LocalAppConfig:
 @dataclass
 class LocalAppResources:
     registry: AssetRegistryBackend
-    outbox: Outbox
+    outbox: OutboxBackend
     versions: DatasetVersionStore
     jobs: JobStore
     preview: PreviewStore
@@ -112,7 +112,12 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
         registry = open_postgres_asset_registry(config.postgres)
     else:
         registry = AssetRegistry(str(metadata_dir / "assets.sqlite3"))
-    outbox = Outbox(str(metadata_dir / "outbox.sqlite3"))
+    if config.postgres is not None:
+        from .postgres_outbox import open_postgres_outbox
+
+        outbox = open_postgres_outbox(config.postgres)
+    else:
+        outbox = Outbox(str(metadata_dir / "outbox.sqlite3"))
     versions = DatasetVersionStore(str(metadata_dir / "versions.sqlite3"))
     jobs = JobStore(str(metadata_dir / "jobs.sqlite3"))
     preview = PreviewStore(str(metadata_dir / "preview.sqlite3"))

@@ -7,7 +7,7 @@ import sqlite3
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
 
 from .contracts import EventEnvelope
@@ -32,6 +32,24 @@ class OutboxRecord:
     occurred_at: str
     published_at: str | None
     next_attempt_at: str
+
+
+class OutboxBackend(Protocol):
+    """Backend boundary shared by the SQLite and PostgreSQL outboxes."""
+
+    def close(self) -> None: ...
+
+    def enqueue(self, event: EventEnvelope) -> OutboxRecord: ...
+
+    def get(self, event_id: UUID) -> OutboxRecord: ...
+
+    def pending(self, *, limit: int = 100) -> list[OutboxRecord]: ...
+
+    def mark_published(self, event_id: UUID) -> OutboxRecord: ...
+
+    def mark_failed(
+        self, event_id: UUID, error: str, *, retry_after_seconds: int = 0
+    ) -> OutboxRecord: ...
 
 
 class Outbox:

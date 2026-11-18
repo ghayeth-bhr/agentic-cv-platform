@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
-from .outbox import Outbox, OutboxRecord
+from .outbox import OutboxBackend, OutboxRecord
 
 
 class EventPublisher(Protocol):
@@ -15,7 +15,7 @@ class EventPublisher(Protocol):
 
 @dataclass(frozen=True, kw_only=True)
 class OutboxDispatcher:
-    outbox: Outbox
+    outbox: OutboxBackend
     publisher: EventPublisher
 
     def dispatch_once(
