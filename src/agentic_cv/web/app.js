@@ -97,6 +97,7 @@
     if ($("view-desc")) $("view-desc").textContent = meta.desc;
     if (name === "gallery") loadAssets();
     if (name === "search") loadAssets({ picker: true, quiet: true });
+    if (name === "predict") loadAssets({ picker: true, quiet: true });
   }
 
   document.querySelectorAll(".nav-item").forEach((btn) => {
@@ -245,44 +246,68 @@
 
   function renderAssetPicker(assets) {
     const picker = $("asset-picker");
-    if (!picker) return;
-    const prev = new Set(selectedAssetIds());
-    picker.innerHTML = "";
-    if (!assets || !assets.length) return;
-    for (const asset of assets) {
-      const label = document.createElement("label");
-      label.className = "pick-item";
-      const cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.value = asset.asset_id;
-      if (prev.has(String(asset.asset_id))) cb.checked = true;
-      label.appendChild(cb);
+    if (picker) {
+      const prev = new Set(selectedAssetIds());
+      picker.innerHTML = "";
+      if (assets && assets.length) {
+        for (const asset of assets) {
+          const label = document.createElement("label");
+          label.className = "pick-item";
+          const cb = document.createElement("input");
+          cb.type = "checkbox";
+          cb.value = asset.asset_id;
+          if (prev.has(String(asset.asset_id))) cb.checked = true;
+          label.appendChild(cb);
 
-      if (asset.thumbnail_url) {
-        const img = document.createElement("img");
-        img.className = "pick-thumb";
-        img.src = asset.thumbnail_url;
-        img.alt = "";
-        img.loading = "lazy";
-        img.onerror = () => { img.replaceWith(pickThumbFallback()); };
-        label.appendChild(img);
-      } else {
-        label.appendChild(pickThumbFallback());
+          if (asset.thumbnail_url) {
+            const img = document.createElement("img");
+            img.className = "pick-thumb";
+            img.src = asset.thumbnail_url;
+            img.alt = "";
+            img.loading = "lazy";
+            img.onerror = () => { img.replaceWith(pickThumbFallback()); };
+            label.appendChild(img);
+          } else {
+            label.appendChild(pickThumbFallback());
+          }
+
+          const text = document.createElement("div");
+          text.className = "pick-text";
+          const name = document.createElement("div");
+          name.className = "pick-name";
+          name.textContent = asset.name || "Untitled asset";
+          const id = document.createElement("div");
+          id.className = "pick-id";
+          id.textContent = shortId(asset.asset_id);
+          id.title = asset.asset_id;
+          text.append(name, id);
+          label.appendChild(text);
+          picker.appendChild(label);
+        }
       }
-
-      const text = document.createElement("div");
-      text.className = "pick-text";
-      const name = document.createElement("div");
-      name.className = "pick-name";
-      name.textContent = asset.name || "Untitled asset";
-      const id = document.createElement("div");
-      id.className = "pick-id";
-      id.textContent = shortId(asset.asset_id);
-      id.title = asset.asset_id;
-      text.append(name, id);
-      label.appendChild(text);
-      picker.appendChild(label);
     }
+    renderPredictAssetSelect(assets || []);
+  }
+
+  function renderPredictAssetSelect(assets) {
+    const select = $("predict-asset");
+    if (!select) return;
+    const prev = select.value;
+    select.innerHTML = "";
+    const none = document.createElement("option");
+    none.value = "";
+    none.textContent = assets && assets.length ? "Use uploaded image file" : "No assets available (upload a file)";
+    select.appendChild(none);
+    for (const asset of (assets || [])) {
+      if (!asset || !asset.asset_id) continue;
+      const opt = document.createElement("option");
+      opt.value = asset.asset_id;
+      const kind = asset.sources && asset.sources[0] ? ((asset.sources[0].media_type || "").split("/")[0] || "asset") : "asset";
+      opt.textContent = `${asset.name || "Untitled asset"} (${kind})`;
+      if (asset.thumbnail_url) opt.dataset.thumb = asset.thumbnail_url;
+      select.appendChild(opt);
+    }
+    if (prev && Array.from(select.options).some((o) => o.value === prev)) select.value = prev;
   }
 
   function pickThumbFallback() {
@@ -433,29 +458,58 @@
     });
   }
 
+  async function loadImageForCanvas(src) {
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error("Could not load image for prediction preview"));
+      img.src = src;
+    });
+    return img;
+  }
+
+  if ($("predict-refresh-assets")) $("predict-refresh-assets").addEventListener("click", () => loadAssets({ picker: true }));
+
   if ($("predict-button")) $("predict-button").addEventListener("click", async () => {
     const btn = $("predict-button");
+    const assetId = ($("predict-asset") && $("predict-asset").value) || "";
     const file = $("predict-file").files && $("predict-file").files[0];
     const prompt = ($("predict-prompt").value || "").trim();
     const thresholdRaw = $("predict-threshold").value;
-    if (!file) { setStatus("predict-status", "Choose an image file first.", "error"); return; }
+    if (!assetId && !file) { setStatus("predict-status", "Choose an existing asset or upload an image file.", "error"); return; }
     if (!prompt) { setStatus("predict-status", "Enter a prompt.", "error"); return; }
     setBusy(btn, true);
-    setStatus("predict-status", "Running prediction…", "busy");
+    setStatus("predict-status", assetId ? "Running prediction on selected asset…" : "Running prediction on uploaded image…", "busy");
     if ($("predict-output")) $("predict-output").hidden = true;
     try {
-      const form = new FormData();
-      form.append("image", file);
-      form.append("prompt", prompt);
-      if (thresholdRaw !== "") form.append("threshold", thresholdRaw);
-      const result = await request("/v1/predict", { method: "POST", body: form });
+      let result;
+      let img;
+      let objectUrl = null;
+      if (assetId) {
+        const payload = { prompt };
+        if (thresholdRaw !== "") payload.threshold = Number(thresholdRaw);
+        result = await request(`/v1/assets/${encodeURIComponent(assetId)}/predict`, {
+          method: "POST", headers: headersJSON(true), body: JSON.stringify(payload)
+        });
+        const select = $("predict-asset");
+        const opt = select && select.selectedOptions ? select.selectedOptions[0] : null;
+        const thumbUrl = (opt && opt.dataset && opt.dataset.thumb)
+          ? opt.dataset.thumb
+          : `/v1/assets/${encodeURIComponent(assetId)}/thumbnail?tenant_id=${encodeURIComponent(tenantId())}`;
+        img = await loadImageForCanvas(thumbUrl);
+      } else {
+        const form = new FormData();
+        form.append("image", file);
+        form.append("prompt", prompt);
+        if (thresholdRaw !== "") form.append("threshold", thresholdRaw);
+        result = await request("/v1/predict", { method: "POST", body: form });
+        objectUrl = URL.createObjectURL(file);
+        img = await loadImageForCanvas(objectUrl);
+      }
 
       const predictions = (result && result.predictions) || [];
-      const img = new Image();
-      const url = URL.createObjectURL(file);
-      await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = url; });
       drawPredictions($("predict-canvas"), img, predictions);
-      URL.revokeObjectURL(url);
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
 
       const summary = $("predict-summary");
       summary.innerHTML = "";
@@ -586,12 +640,20 @@
     const payload = searchPayload();
     if (!payload.query) { setStatus("subasset-status", "Enter a search query first.", "error"); return; }
     setBusy(btn, true);
-    setStatus("subasset-status", "Creating sub-asset from search…", "busy");
+    setStatus("subasset-status", "Creating sub-asset from search results…", "busy");
     try {
       const record = await request("/v1/sub-assets/from-search", {
         method: "POST", headers: headersJSON(true), body: JSON.stringify(payload)
       });
-      setStatus("subasset-status", `Sub-asset created: ${record.sub_asset_id} (${(record.result_ids || []).length} results).`, "ok");
+      await loadAssets({ quiet: true });
+      if (record.asset_id) {
+        const count = Number.isFinite(record.source_count) ? record.source_count : (record.result_ids || []).length;
+        setStatus("subasset-status", `Created gallery asset “${record.asset_name || "Sub-asset"}” (${record.asset_id}) with ${count} image source${count === 1 ? "" : "s"}.`, "ok");
+        showView("gallery");
+        setStatus("gallery-status", `Sub-asset created from “${record.query || payload.query}” and added to the gallery.`, "ok");
+      } else {
+        setStatus("subasset-status", `Sub-asset record created: ${record.sub_asset_id} (${(record.result_ids || []).length} results).`, "ok");
+      }
     } catch (err) {
       setStatus("subasset-status", err.message || String(err), "error");
     } finally {

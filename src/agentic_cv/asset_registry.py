@@ -39,6 +39,17 @@ class AssetRegistryBackend(Protocol):
 
     def complete_upload(self, upload_id: UUID, *, object_uri: str) -> SourceRecord: ...
 
+    def add_source(
+        self,
+        *,
+        tenant_id: UUID,
+        asset_id: UUID,
+        filename: str,
+        media_type: str,
+        object_uri: str,
+        content_sha256: str,
+    ) -> SourceRecord: ...
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -237,6 +248,55 @@ class AssetRegistry:
             self._connection.execute(
                 "UPDATE uploads SET status = 'completed' WHERE upload_id = ?",
                 (str(upload_id),),
+            )
+            self._connection.commit()
+            return source
+
+    def add_source(
+        self,
+        *,
+        tenant_id: UUID,
+        asset_id: UUID,
+        filename: str,
+        media_type: str,
+        object_uri: str,
+        content_sha256: str,
+    ) -> SourceRecord:
+        if not filename.strip() or not media_type.strip() or not object_uri.strip():
+            raise ValueError("filename, media_type, and object_uri are required")
+        if len(content_sha256) != 64:
+            raise ValueError("a SHA-256 digest is required")
+        with self._lock:
+            asset = self._connection.execute(
+                "SELECT tenant_id FROM assets WHERE asset_id = ?", (str(asset_id),)
+            ).fetchone()
+            if asset is None:
+                raise KeyError(f"unknown asset: {asset_id}")
+            if asset["tenant_id"] != str(tenant_id):
+                raise PermissionError("asset does not belong to tenant")
+            existing = self._connection.execute(
+                "SELECT * FROM sources WHERE asset_id = ? AND content_sha256 = ?",
+                (str(asset_id), content_sha256),
+            ).fetchone()
+            if existing is not None:
+                return self._source(existing)
+            source = SourceRecord(
+                source_id=uuid4(),
+                tenant_id=tenant_id,
+                asset_id=asset_id,
+                filename=filename,
+                media_type=media_type,
+                object_uri=object_uri,
+                content_sha256=content_sha256,
+                created_at=_utc_now(),
+            )
+            self._connection.execute(
+                "INSERT INTO sources VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    str(source.source_id), str(source.tenant_id), str(source.asset_id),
+                    source.filename, source.media_type, source.object_uri,
+                    source.content_sha256, source.created_at,
+                ),
             )
             self._connection.commit()
             return source
