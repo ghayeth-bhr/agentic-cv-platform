@@ -11,12 +11,25 @@ from .sam3 import Sam3Config
 _VALID_PRECISIONS = frozenset({"float16", "bfloat16", "float32"})
 
 
+def _cuda_available() -> bool:
+    """Return whether torch can use CUDA, without requiring torch to be installed."""
+
+    try:
+        import torch
+    except Exception:
+        return False
+    try:
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
 def resolve_device(value: str | None = None) -> str:
     """Return a validated ``cpu`` / ``cuda`` / ``cuda:<index>`` device string."""
 
     raw = (value if value is not None else os.getenv("AGENTIC_CV_DEVICE", "")).strip().lower()
     if not raw:
-        return "cuda"
+        return "cuda" if _cuda_available() else "cpu"
     if raw == "cpu":
         return raw
     if raw == "cuda" or raw.startswith("cuda:"):
