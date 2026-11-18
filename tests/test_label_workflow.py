@@ -1,0 +1,157 @@
+from pathlib import Path
+from uuid import uuid4
+
+import numpy as np
+import pytest
+from PIL import Image
+
+from agentic_cv.annotation_store import AnnotationRevisionStore
+from agentic_cv.batch_labeling import LabelImage, Sam3BatchLabeler
+from agentic_cv.dataset import DatasetCategory
+from agentic_cv.job_store import JobStore
+from agentic_cv.label_workflow import DurableLabelWorkflow, JobCancelled, LabelWorkflowDependencies
+from agentic_cv.outbox import Outbox
+from agentic_cv.preview import PreviewStore
+from agentic_cv.sam3 import Sam3Prediction
+
+
+class FakeProvider:
+    def __init__(self, fail=False):
+        self.fail = fail
+
+    def predict(self, image, prompt, *, threshold=None, mask_threshold=None):
+        if self.fail:
+            raise RuntimeError("SAM3 unavailable")
+        return [Sam3Prediction(score=0.9, box=(0, 0, 2, 2), mask=np.ones((2, 2), dtype=bool))]
+
+
+def make_workflow(tmp_path, *, fail=False):
+    jobs = JobStore(str(tmp_path / "jobs.sqlite3"))
+    annotations = AnnotationRevisionStore(str(tmp_path / "annotations.sqlite3"))
+    outbox = Outbox(str(tmp_path / "events.sqlite3"))
+    preview = PreviewStore(str(tmp_path / "preview.sqlite3"))
+    labeler = Sam3BatchLabeler(FakeProvider(fail=fail))
+    workflow = DurableLabelWorkflow(LabelWorkflowDependencies(
+        jobs=jobs, annotations=annotations, outbox=outbox, labeler=labeler, preview=preview
+    ))
+    return workflow, jobs, annotations, outbox, preview
+
+
+def image(tmp_path):
+    path = tmp_path / "frame.png"
+    Image.new("RGB", (4, 4), (255, 255, 255)).save(path)
+    return [LabelImage(image_id="frame-1", path=path)]
+
+
+def test_successful_workflow_persists_annotations_and_event(tmp_path, caplog):
+    workflow, jobs, annotations, outbox, preview = make_workflow(tmp_path)
+    tenant_id = uuid4()
+    job = workflow.submit(
+        tenant_id=tenant_id, asset_id="asset-1", prompt="bear", threshold=0.5,
+        task="detection", category_id=1, category_name="bear", idempotency_key="run-1",
+    )
+
+    with caplog.at_level("INFO", logger="agentic_cv.workflow"):
+        result = workflow.execute(
+            job.job_id, images=image(tmp_path), tenant_id=tenant_id, prompt="bear",
+            threshold=0.5, task="detection", category=DatasetCategory(category_id=1, name="bear"),
+        )
+
+    assert len(result.dataset.annotations) == 1
+    assert jobs.get(job.job_id).status == "succeeded"
+    assert annotations.latest(tenant_id=tenant_id, image_id="frame-1", annotation_id="frame-1:0").revision == 1
+    assert outbox.pending()[0].event_type == "LabelRunCompleted"
+    assert [event.image_id for event in preview.list_for_job(tenant_id=tenant_id, job_id=job.job_id)] == ["frame-1"]
+    messages = [r.message for r in caplog.records if r.name == "agentic_cv.workflow"]
+    assert "label workflow started" in messages
+    assert any(r.message == "label workflow completed" and r.status == "succeeded" for r in caplog.records)
+    jobs.close(); annotations.close(); outbox.close(); preview.close()
+
+
+def test_failed_workflow_persists_error_and_failure_event(tmp_path, caplog):
+    workflow, jobs, annotations, outbox, preview = make_workflow(tmp_path, fail=True)
+    tenant_id = uuid4()
+    job = workflow.submit(
+        tenant_id=tenant_id, asset_id="asset-1", prompt="bear", threshold=0.5,
+        task="detection", category_id=1, category_name="bear", idempotency_key="run-1",
+    )
+
+    with caplog.at_level("INFO", logger="agentic_cv.workflow"):
+        with pytest.raises(RuntimeError, match="unavailable"):
+            workflow.execute(
+                job.job_id, images=image(tmp_path), tenant_id=tenant_id, prompt="bear",
+                threshold=0.5, task="detection", category=DatasetCategory(category_id=1, name="bear"),
+            )
+
+    assert jobs.get(job.job_id).status == "failed"
+    assert outbox.pending()[0].event_type == "LabelRunFailed"
+    assert any(r.message == "label workflow failed" and r.status == "failed" for r in caplog.records)
+    jobs.close(); annotations.close(); outbox.close(); preview.close()
+
+
+def test_workflow_rejects_wrong_tenant_before_running(tmp_path):
+    workflow, jobs, annotations, outbox, preview = make_workflow(tmp_path)
+    owner = uuid4()
+    job = workflow.submit(
+        tenant_id=owner, asset_id="asset-1", prompt="bear", threshold=0.5,
+        task="detection", category_id=1, category_name="bear", idempotency_key="run-1",
+    )
+
+    with pytest.raises(PermissionError, match="tenant"):
+        workflow.execute(
+            job.job_id, images=image(tmp_path), tenant_id=uuid4(), prompt="bear",
+            threshold=0.5, task="detection", category=DatasetCategory(category_id=1, name="bear"),
+        )
+
+    assert jobs.get(job.job_id).status == "queued"
+    jobs.close(); annotations.close(); outbox.close(); preview.close()
+
+
+def test_workflow_claims_lease_and_stops_when_cancelled(tmp_path, caplog):
+    workflow, jobs, annotations, outbox, preview = make_workflow(tmp_path)
+    tenant_id = uuid4()
+    job = workflow.submit(
+        tenant_id=tenant_id, asset_id="asset-1", prompt="bear", threshold=0.5,
+        task="detection", category_id=1, category_name="bear", idempotency_key="run-cancel",
+    )
+
+    original_publish = preview.publish
+
+    def cancel_after_first_preview(**kwargs):
+        original_publish(**kwargs)
+        jobs.request_cancel(job.job_id)
+
+    preview.publish = cancel_after_first_preview
+    with caplog.at_level("INFO", logger="agentic_cv.workflow"):
+        with pytest.raises(JobCancelled, match="cancellation"):
+            workflow.execute(
+                job.job_id, images=image(tmp_path) * 2, tenant_id=tenant_id, prompt="bear",
+                threshold=0.5, task="detection", category=DatasetCategory(category_id=1, name="bear"),
+                worker_id="worker-a",
+            )
+
+    cancelled = jobs.get(job.job_id)
+    assert cancelled.status == "cancelled"
+    assert cancelled.lease_owner == "worker-a"
+    assert outbox.pending()[0].event_type == "LabelRunCancelled"
+    assert any(r.message == "label workflow cancelled" and r.status == "cancelled" for r in caplog.records)
+    annotations.close(); outbox.close(); preview.close(); jobs.close()
+
+
+def test_workflow_rejects_pre_cancelled_job(tmp_path):
+    workflow, jobs, annotations, outbox, preview = make_workflow(tmp_path)
+    tenant_id = uuid4()
+    job = workflow.submit(
+        tenant_id=tenant_id, asset_id="asset-1", prompt="bear", threshold=0.5,
+        task="detection", category_id=1, category_name="bear", idempotency_key="run-pre-cancel",
+    )
+    jobs.request_cancel(job.job_id)
+
+    with pytest.raises(JobCancelled, match="before execution"):
+        workflow.execute(
+            job.job_id, images=image(tmp_path), tenant_id=tenant_id, prompt="bear",
+            threshold=0.5, task="detection", category=DatasetCategory(category_id=1, name="bear"),
+        )
+
+    assert jobs.get(job.job_id).status == "cancelled"
+    annotations.close(); outbox.close(); preview.close(); jobs.close()
