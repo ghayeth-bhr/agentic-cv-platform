@@ -59,7 +59,16 @@ button, input, select { font: inherit; }
 .brand { display: flex; align-items: center; gap: 0.55rem; padding: 0.1rem 0.4rem 0.6rem; }
 .brand-mark { color: var(--accent); flex: none; }
 .brand-name { font-weight: 600; font-size: 0.98rem; letter-spacing: 0.01em; }
-.nav { display: flex; flex-direction: column; gap: 0.15rem; }
+.nav { display: flex; flex-direction: column; gap: 0.75rem; }
+.nav-group { display: flex; flex-direction: column; gap: 0.15rem; }
+.nav-group-label {
+  font-size: 0.66rem; font-weight: 600; color: var(--ink-dim); text-transform: uppercase;
+  letter-spacing: 0.08em; padding: 0.15rem 0.6rem 0.2rem; font-family: var(--mono);
+}
+.nav-group-secondary { margin-top: 0.2rem; padding-top: 0.55rem; border-top: 1px solid var(--line-soft); }
+.nav-group-secondary .nav-item { padding: 0.4rem 0.6rem; }
+.nav-group-secondary .nav-label { font-size: 0.84rem; }
+.nav-group-secondary .nav-hint { font-size: 0.68rem; }
 .nav-item {
   display: flex; flex-direction: column; align-items: flex-start; gap: 0.05rem;
   width: 100%; padding: 0.5rem 0.6rem; border: 0; border-radius: var(--radius-sm);

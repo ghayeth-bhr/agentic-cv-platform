@@ -24,30 +24,39 @@
           <span class="brand-name">Agentic CV</span>
         </div>
         <nav class="nav" aria-label="Sections">
-          <button type="button" class="nav-item is-active" data-view="gallery" aria-current="page">
-            <span class="nav-label">Gallery</span>
-            <span class="nav-hint">Assets &amp; media</span>
-          </button>
-          <button type="button" class="nav-item" data-view="upload">
-            <span class="nav-label">Upload</span>
-            <span class="nav-hint">Ingest source</span>
-          </button>
-          <button type="button" class="nav-item" data-view="predict">
-            <span class="nav-label">Predict</span>
-            <span class="nav-hint">SAM3 prompt</span>
-          </button>
-          <button type="button" class="nav-item" data-view="search">
-            <span class="nav-label">Search</span>
-            <span class="nav-hint">Semantic query</span>
-          </button>
-          <button type="button" class="nav-item" data-view="exports">
-            <span class="nav-label">Exports</span>
-            <span class="nav-hint">Dataset jobs</span>
-          </button>
-          <button type="button" class="nav-item" data-view="preview">
-            <span class="nav-label">Preview</span>
-            <span class="nav-hint">Label events</span>
-          </button>
+          <div class="nav-group">
+            <div class="nav-group-label">Assets</div>
+            <button type="button" class="nav-item is-active" data-view="gallery" aria-current="page">
+              <span class="nav-label">Gallery</span>
+              <span class="nav-hint">Manage media</span>
+            </button>
+            <button type="button" class="nav-item" data-view="upload">
+              <span class="nav-label">Upload</span>
+              <span class="nav-hint">Ingest source</span>
+            </button>
+          </div>
+          <div class="nav-group">
+            <div class="nav-group-label">Agent</div>
+            <button type="button" class="nav-item" data-view="predict">
+              <span class="nav-label">Predict / Label</span>
+              <span class="nav-hint">Prompted inference</span>
+            </button>
+            <button type="button" class="nav-item" data-view="search">
+              <span class="nav-label">Search</span>
+              <span class="nav-hint">Find frames</span>
+            </button>
+          </div>
+          <div class="nav-group nav-group-secondary">
+            <div class="nav-group-label">Jobs &amp; Exports</div>
+            <button type="button" class="nav-item" data-view="preview">
+              <span class="nav-label">Label jobs</span>
+              <span class="nav-hint">Preview events</span>
+            </button>
+            <button type="button" class="nav-item" data-view="exports">
+              <span class="nav-label">Exports</span>
+              <span class="nav-hint">After labeling</span>
+            </button>
+          </div>
         </nav>
       </div>
       <div class="sidebar-bottom">
@@ -114,8 +123,8 @@
       <section id="view-predict" class="view" aria-labelledby="predict-heading" hidden>
         <div class="split split-wide">
           <div class="card">
-            <h2 id="predict-heading" class="card-title">Prompted prediction</h2>
-            <p class="card-desc">Run SAM3 on an existing gallery asset or an uploaded image. Choose an asset to avoid re-uploading; for video assets, prediction runs on a representative frame.</p>
+            <h2 id="predict-heading" class="card-title">Agent prediction (prompted SAM3)</h2>
+            <p class="card-desc">Run prompted segmentation on a selected gallery asset. For assets with multiple images/frames, choose a specific source — prediction runs on the selected image. Batch autolabeling jobs and dataset export become available from the Jobs &amp; Exports area as labeling completes.</p>
             <div class="field-row">
               <label class="field field-grow">
                 <span>Prompt</span>
@@ -132,6 +141,10 @@
                 <select id="predict-asset" class="field-grow"></select>
                 <button type="button" class="btn btn-ghost" id="predict-refresh-assets">Refresh</button>
               </div>
+            </label>
+            <label class="field">
+              <span>Image / frame in asset</span>
+              <select id="predict-source"></select>
             </label>
             <label class="field">
               <span>Or upload image file</span>

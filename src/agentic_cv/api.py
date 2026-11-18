@@ -902,6 +902,8 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
             raise HTTPException(status_code=500, detail=f"prediction failed: {exc}") from exc
         width, height = image.size
         image_url = f"/v1/assets/{asset_id}/image?tenant_id={tenant_id}"
+        if request.source_id is not None:
+            image_url += f"&source_id={request.source_id}"
         return _prediction_response(prompt, predictions, image_url=image_url, image_width=width, image_height=height)
 
     @app.get("/v1/assets/{asset_id}/image")
@@ -909,6 +911,7 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
         asset_id: UUID,
         x_tenant_id: str | None = Header(None),
         tenant_id_q: str | None = Query(None, alias="tenant_id"),
+        source_id_q: UUID | None = Query(None, alias="source_id"),
         x_api_key: str | None = Header(None),
         authorization: str | None = Header(None),
     ) -> Response:
@@ -921,7 +924,12 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
         summary = next((item for item in summaries if item.asset_id == asset_id), None)
         if summary is None:
             raise HTTPException(status_code=404, detail="unknown asset")
-        source = _representative_source(summary.sources)
+        if source_id_q is not None:
+            source = next((item for item in summary.sources if item.source_id == source_id_q), None)
+            if source is None:
+                raise HTTPException(status_code=404, detail="unknown source")
+        else:
+            source = _representative_source(summary.sources)
         if source is None:
             raise HTTPException(status_code=404, detail="asset has no source")
         payload = _source_image_bytes(source)
