@@ -194,6 +194,24 @@ MIGRATIONS: tuple[Migration, ...] = (
             "CREATE INDEX IF NOT EXISTS vector_records_asset_idx ON vector_records (asset_id)",
         ),
     ),
+    Migration(
+        version=2,
+        name="outbox_sequence",
+        statements=(
+            "CREATE SEQUENCE IF NOT EXISTS outbox_event_sequence",
+            """
+            ALTER TABLE outbox_events
+                ALTER COLUMN sequence SET DEFAULT nextval('outbox_event_sequence')
+            """,
+            """
+            SELECT setval(
+                'outbox_event_sequence',
+                COALESCE((SELECT MAX(sequence) FROM outbox_events), 0) + 1,
+                false
+            )
+            """,
+        ),
+    ),
 )
 
 
