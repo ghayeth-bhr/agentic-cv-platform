@@ -12,7 +12,7 @@ from agentic_cv.job_store import JobStore
 from agentic_cv.outbox import Outbox
 
 
-def test_worker_processes_all_queued_export_jobs(tmp_path):
+def test_worker_processes_all_queued_export_jobs(tmp_path, caplog):
     versions = DatasetVersionStore(str(tmp_path / "versions.sqlite3"))
     jobs = JobStore(str(tmp_path / "jobs.sqlite3"))
     outbox = Outbox(str(tmp_path / "events.sqlite3"))
@@ -32,15 +32,19 @@ def test_worker_processes_all_queued_export_jobs(tmp_path):
         for index in range(2)
     ]
 
-    inspected = worker.run_once(worker_id="worker-a")
+    with caplog.at_level("INFO", logger="agentic_cv.worker"):
+        inspected = worker.run_once(worker_id="worker-a")
 
     assert inspected == tuple(job.job_id for job in jobs_created)
     assert all(jobs.get(job.job_id).status == "succeeded" for job in jobs_created)
     assert len(outbox.pending()) == 2
+    records = [r for r in caplog.records if r.name == "agentic_cv.worker"]
+    assert any(r.message == "export job attempt started" and r.worker_id == "worker-a" for r in records)
+    assert any(r.message == "export job attempt finished" and r.status == "succeeded" for r in records)
     versions.close(); jobs.close(); outbox.close()
 
 
-def test_worker_run_forever_stops_without_sleeping_after_stop_signal(tmp_path):
+def test_worker_run_forever_stops_without_sleeping_after_stop_signal(tmp_path, caplog):
     versions = DatasetVersionStore(str(tmp_path / "versions.sqlite3"))
     jobs = JobStore(str(tmp_path / "jobs.sqlite3"))
     outbox = Outbox(str(tmp_path / "events.sqlite3"))
@@ -56,9 +60,13 @@ def test_worker_run_forever_stops_without_sleeping_after_stop_signal(tmp_path):
         calls.append(interval)
         stop_event.set()
 
-    worker.run_forever(stop_event=stop_event, poll_interval=0.25, sleep_fn=stop_after_poll)
+    with caplog.at_level("INFO", logger="agentic_cv.worker"):
+        worker.run_forever(stop_event=stop_event, poll_interval=0.25, sleep_fn=stop_after_poll)
 
     assert calls == [0.25]
+    messages = [r.message for r in caplog.records if r.name == "agentic_cv.worker"]
+    assert "export worker loop started" in messages
+    assert "export worker loop stopped" in messages
     versions.close(); jobs.close(); outbox.close()
 
 
