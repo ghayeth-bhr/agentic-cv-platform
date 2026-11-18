@@ -7,11 +7,33 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 from uuid import UUID, uuid4
 
 
 UploadStatus = Literal["active", "completed", "aborted"]
+
+
+class AssetRegistryBackend(Protocol):
+    """Backend boundary shared by the SQLite and PostgreSQL registries."""
+
+    def close(self) -> None: ...
+
+    def create_asset(self, *, tenant_id: UUID, name: str) -> AssetRecord: ...
+
+    def start_upload(
+        self,
+        *,
+        tenant_id: UUID,
+        asset_id: UUID,
+        filename: str,
+        media_type: str,
+        expected_sha256: str,
+    ) -> UploadRecord: ...
+
+    def get_upload(self, upload_id: UUID) -> UploadRecord: ...
+
+    def complete_upload(self, upload_id: UUID, *, object_uri: str) -> SourceRecord: ...
 
 
 def _utc_now() -> str:
