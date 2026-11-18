@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass
 from typing import Literal
 from uuid import UUID
@@ -13,6 +15,8 @@ from .dataset import DatasetCategory
 from .job_store import JobRecord, JobStoreBackend
 from .outbox import OutboxBackend
 from .preview import PreviewBackend
+
+logger = logging.getLogger("agentic_cv.workflow")
 
 
 class JobCancelled(RuntimeError):
@@ -79,6 +83,17 @@ class DurableLabelWorkflow:
         job = self.dependencies.jobs.claim(
             job_id, worker_id=worker_id, lease_seconds=lease_seconds
         )
+        started = time.perf_counter()
+        logger.info(
+            "label workflow started",
+            extra={
+                "worker_id": worker_id,
+                "job_id": str(job_id),
+                "tenant_id": str(tenant_id),
+                "image_count": len(images),
+                "task": task,
+            },
+        )
 
         def checkpoint(image_id: str, processed: int, total: int) -> None:
             current = self.dependencies.jobs.get(job_id)
@@ -92,6 +107,16 @@ class DurableLabelWorkflow:
                     tenant_id=tenant_id, job_id=job_id, image_id=image_id,
                     processed=processed, total=total,
                 )
+            logger.debug(
+                "label workflow progress",
+                extra={
+                    "worker_id": worker_id,
+                    "job_id": str(job_id),
+                    "image_id": image_id,
+                    "processed": processed,
+                    "total": total,
+                },
+            )
 
         try:
             result = self.dependencies.labeler.label(
@@ -115,6 +140,17 @@ class DurableLabelWorkflow:
                     idempotency_key=f"label-completed:{job_id}",
                 )
             )
+            duration_ms = round((time.perf_counter() - started) * 1000, 3)
+            logger.info(
+                "label workflow completed",
+                extra={
+                    "worker_id": worker_id,
+                    "job_id": str(job_id),
+                    "status": "succeeded",
+                    "annotation_count": len(result.dataset.annotations),
+                    "duration_ms": duration_ms,
+                },
+            )
             return result
         except JobCancelled as exc:
             self.dependencies.jobs.transition(job.job_id, "cancelled", error=str(exc))
@@ -128,6 +164,16 @@ class DurableLabelWorkflow:
                     idempotency_key=f"label-cancelled:{job_id}",
                 )
             )
+            duration_ms = round((time.perf_counter() - started) * 1000, 3)
+            logger.info(
+                "label workflow cancelled",
+                extra={
+                    "worker_id": worker_id,
+                    "job_id": str(job_id),
+                    "status": "cancelled",
+                    "duration_ms": duration_ms,
+                },
+            )
             raise
         except Exception as exc:
             self.dependencies.jobs.transition(job.job_id, "failed", error=str(exc))
@@ -140,5 +186,15 @@ class DurableLabelWorkflow:
                     payload={"error": str(exc)},
                     idempotency_key=f"label-failed:{job_id}",
                 )
+            )
+            duration_ms = round((time.perf_counter() - started) * 1000, 3)
+            logger.exception(
+                "label workflow failed",
+                extra={
+                    "worker_id": worker_id,
+                    "job_id": str(job_id),
+                    "status": "failed",
+                    "duration_ms": duration_ms,
+                },
             )
             raise

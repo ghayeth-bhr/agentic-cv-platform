@@ -43,7 +43,7 @@ def image(tmp_path):
     return [LabelImage(image_id="frame-1", path=path)]
 
 
-def test_successful_workflow_persists_annotations_and_event(tmp_path):
+def test_successful_workflow_persists_annotations_and_event(tmp_path, caplog):
     workflow, jobs, annotations, outbox, preview = make_workflow(tmp_path)
     tenant_id = uuid4()
     job = workflow.submit(
@@ -51,20 +51,24 @@ def test_successful_workflow_persists_annotations_and_event(tmp_path):
         task="detection", category_id=1, category_name="bear", idempotency_key="run-1",
     )
 
-    result = workflow.execute(
-        job.job_id, images=image(tmp_path), tenant_id=tenant_id, prompt="bear",
-        threshold=0.5, task="detection", category=DatasetCategory(category_id=1, name="bear"),
-    )
+    with caplog.at_level("INFO", logger="agentic_cv.workflow"):
+        result = workflow.execute(
+            job.job_id, images=image(tmp_path), tenant_id=tenant_id, prompt="bear",
+            threshold=0.5, task="detection", category=DatasetCategory(category_id=1, name="bear"),
+        )
 
     assert len(result.dataset.annotations) == 1
     assert jobs.get(job.job_id).status == "succeeded"
     assert annotations.latest(tenant_id=tenant_id, image_id="frame-1", annotation_id="frame-1:0").revision == 1
     assert outbox.pending()[0].event_type == "LabelRunCompleted"
     assert [event.image_id for event in preview.list_for_job(tenant_id=tenant_id, job_id=job.job_id)] == ["frame-1"]
+    messages = [r.message for r in caplog.records if r.name == "agentic_cv.workflow"]
+    assert "label workflow started" in messages
+    assert any(r.message == "label workflow completed" and r.status == "succeeded" for r in caplog.records)
     jobs.close(); annotations.close(); outbox.close(); preview.close()
 
 
-def test_failed_workflow_persists_error_and_failure_event(tmp_path):
+def test_failed_workflow_persists_error_and_failure_event(tmp_path, caplog):
     workflow, jobs, annotations, outbox, preview = make_workflow(tmp_path, fail=True)
     tenant_id = uuid4()
     job = workflow.submit(
@@ -72,14 +76,16 @@ def test_failed_workflow_persists_error_and_failure_event(tmp_path):
         task="detection", category_id=1, category_name="bear", idempotency_key="run-1",
     )
 
-    with pytest.raises(RuntimeError, match="unavailable"):
-        workflow.execute(
-            job.job_id, images=image(tmp_path), tenant_id=tenant_id, prompt="bear",
-            threshold=0.5, task="detection", category=DatasetCategory(category_id=1, name="bear"),
-        )
+    with caplog.at_level("INFO", logger="agentic_cv.workflow"):
+        with pytest.raises(RuntimeError, match="unavailable"):
+            workflow.execute(
+                job.job_id, images=image(tmp_path), tenant_id=tenant_id, prompt="bear",
+                threshold=0.5, task="detection", category=DatasetCategory(category_id=1, name="bear"),
+            )
 
     assert jobs.get(job.job_id).status == "failed"
     assert outbox.pending()[0].event_type == "LabelRunFailed"
+    assert any(r.message == "label workflow failed" and r.status == "failed" for r in caplog.records)
     jobs.close(); annotations.close(); outbox.close(); preview.close()
 
 
@@ -101,7 +107,7 @@ def test_workflow_rejects_wrong_tenant_before_running(tmp_path):
     jobs.close(); annotations.close(); outbox.close(); preview.close()
 
 
-def test_workflow_claims_lease_and_stops_when_cancelled(tmp_path):
+def test_workflow_claims_lease_and_stops_when_cancelled(tmp_path, caplog):
     workflow, jobs, annotations, outbox, preview = make_workflow(tmp_path)
     tenant_id = uuid4()
     job = workflow.submit(
@@ -116,17 +122,19 @@ def test_workflow_claims_lease_and_stops_when_cancelled(tmp_path):
         jobs.request_cancel(job.job_id)
 
     preview.publish = cancel_after_first_preview
-    with pytest.raises(JobCancelled, match="cancellation"):
-        workflow.execute(
-            job.job_id, images=image(tmp_path) * 2, tenant_id=tenant_id, prompt="bear",
-            threshold=0.5, task="detection", category=DatasetCategory(category_id=1, name="bear"),
-            worker_id="worker-a",
-        )
+    with caplog.at_level("INFO", logger="agentic_cv.workflow"):
+        with pytest.raises(JobCancelled, match="cancellation"):
+            workflow.execute(
+                job.job_id, images=image(tmp_path) * 2, tenant_id=tenant_id, prompt="bear",
+                threshold=0.5, task="detection", category=DatasetCategory(category_id=1, name="bear"),
+                worker_id="worker-a",
+            )
 
     cancelled = jobs.get(job.job_id)
     assert cancelled.status == "cancelled"
     assert cancelled.lease_owner == "worker-a"
     assert outbox.pending()[0].event_type == "LabelRunCancelled"
+    assert any(r.message == "label workflow cancelled" and r.status == "cancelled" for r in caplog.records)
     annotations.close(); outbox.close(); preview.close(); jobs.close()
 
 
