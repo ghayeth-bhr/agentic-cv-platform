@@ -119,6 +119,13 @@ def collect_metrics(*, torch_module: Any | None = None) -> dict[str, Any]:
 class JsonLogFormatter(logging.Formatter):
     """Format log records as single-line JSON objects."""
 
+    _RESERVED = {
+        "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
+        "module", "exc_info", "exc_text", "stack_info", "lineno", "funcName",
+        "created", "msecs", "relativeCreated", "thread", "threadName",
+        "processName", "process", "message", "taskName",
+    }
+
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
             "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
@@ -128,10 +135,14 @@ class JsonLogFormatter(logging.Formatter):
         }
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
-        for key in ("method", "path", "status_code", "duration_ms", "client"):
-            value = getattr(record, key, None)
-            if value is not None:
+        for key, value in record.__dict__.items():
+            if key in self._RESERVED or key in payload or key.startswith("_"):
+                continue
+            try:
+                json.dumps(value)
                 payload[key] = value
+            except TypeError:
+                payload[key] = str(value)
         return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
 
