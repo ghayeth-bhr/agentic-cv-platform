@@ -264,7 +264,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
             "name": "Agentic CV Platform",
             "status": "ok",
             "docs": "/docs",
-            "health": {"live": "/health/live", "ready": "/health/ready"},
+            "health": {"live": "/health/live", "ready": "/health/ready", "alias": "/health"},
             "observability": {"metrics": "/v1/metrics"},
             "api": {
                 "assets": "/v1/assets",
@@ -288,6 +288,11 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
     @app.get("/health/ready")
     def readiness() -> dict[str, str]:
         return {"status": "ready"}
+
+    @app.get("/health")
+    def health() -> dict[str, str]:
+        """Generic health alias for probes expecting /health."""
+        return {"status": "ok"}
 
     @app.get("/v1/metrics")
     def metrics() -> dict[str, object]:

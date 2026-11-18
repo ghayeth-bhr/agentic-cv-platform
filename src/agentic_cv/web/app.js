@@ -3,8 +3,18 @@
 
   const $ = (id) => document.getElementById(id);
 
+  const VIEW_META = {
+    gallery: { title: "Gallery", eyebrow: "Workspace", desc: "Browse uploaded assets and their representative media." },
+    upload: { title: "Upload", eyebrow: "Ingest", desc: "Create an asset and upload an image or video source." },
+    predict: { title: "Predict", eyebrow: "Segment", desc: "Run prompted SAM3 prediction on an image." },
+    search: { title: "Search", eyebrow: "Discover", desc: "Find indexed frames by description and scope to selected assets." },
+    exports: { title: "Exports", eyebrow: "Datasets", desc: "Queue and manage dataset export jobs." },
+    preview: { title: "Preview", eyebrow: "Review", desc: "Replay durable label preview events for a job." },
+  };
+
   function tenantId() {
-    return $("tenant-id").value.trim();
+    const el = $("tenant-id");
+    return el ? el.value.trim() : "";
   }
 
   function headersJSON(withTenant) {
@@ -45,20 +55,60 @@
     el.hidden = false;
   }
 
-  function setBusy(button, busy, label) {
+  function setBusy(button, busy) {
     if (!button) return;
-    button.disabled = busy;
-    if (label) button.dataset.label = label;
-    if (busy) { button.dataset.orig = button.textContent; button.textContent = "Working…"; }
-    else if (button.dataset.orig) { button.textContent = button.dataset.orig; delete button.dataset.orig; }
+    button.disabled = !!busy;
+    if (busy) {
+      if (!button.dataset.orig) button.dataset.orig = button.textContent;
+      button.textContent = "Working…";
+    } else if (button.dataset.orig) {
+      button.textContent = button.dataset.orig;
+      delete button.dataset.orig;
+    }
   }
+
+  function shortId(id) {
+    const s = String(id || "");
+    return s.length > 12 ? s.slice(0, 8) + "…" : s;
+  }
+
+  function formatDate(iso) {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return String(iso);
+    return d.toLocaleString([], { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  }
+
+  // Navigation
+  function showView(name) {
+    const meta = VIEW_META[name] || VIEW_META.gallery;
+    document.querySelectorAll(".nav-item").forEach((btn) => {
+      const active = btn.dataset.view === name;
+      btn.classList.toggle("is-active", active);
+      if (active) btn.setAttribute("aria-current", "page"); else btn.removeAttribute("aria-current");
+    });
+    document.querySelectorAll(".view").forEach((section) => {
+      const active = section.id === `view-${name}`;
+      section.classList.toggle("is-active", active);
+      section.hidden = !active;
+    });
+    if ($("view-title")) $("view-title").textContent = meta.title;
+    if ($("view-eyebrow")) $("view-eyebrow").textContent = meta.eyebrow;
+    if ($("view-desc")) $("view-desc").textContent = meta.desc;
+    if (name === "gallery") loadAssets();
+    if (name === "search") loadAssets({ picker: true, quiet: true });
+  }
+
+  document.querySelectorAll(".nav-item").forEach((btn) => {
+    btn.addEventListener("click", () => showView(btn.dataset.view));
+  });
 
   // Runtime check
   async function checkRuntime() {
     const chip = $("runtime-chip");
     try {
       const info = await request("/api-info");
-      setStatus("runtime-status", info && info.service ? `Ready · ${info.service}` : "Runtime ready");
+      setStatus("runtime-status", info && info.name ? `Ready · ${info.name}` : "Runtime ready");
       if (chip) { chip.classList.add("ready"); chip.classList.remove("error"); }
     } catch {
       setStatus("runtime-status", "Runtime unavailable");
@@ -66,15 +116,179 @@
     }
   }
 
-  // File info helpers
+  // Assets: load, render gallery and picker
+  let cachedAssets = [];
+
+  async function loadAssets(opts = {}) {
+    const picker = !!opts.picker;
+    const quiet = !!opts.quiet;
+    const meta = $("gallery-meta");
+    if (!picker && meta && !quiet) meta.textContent = "Loading assets…";
+    try {
+      const data = await request("/v1/assets", { headers: { "X-Tenant-ID": tenantId() } });
+      cachedAssets = (data && data.assets) || [];
+      renderAssetGallery(cachedAssets);
+      renderAssetPicker(cachedAssets);
+      if (meta) {
+        const n = cachedAssets.length;
+        meta.textContent = n ? `${n} asset${n === 1 ? "" : "s"}` : "No assets yet";
+      }
+      return cachedAssets;
+    } catch (err) {
+      if (!picker && meta) meta.textContent = "Could not load assets";
+      if (!quiet) setStatus("upload-status", "", null);
+      renderAssetGallery([]);
+      renderAssetPicker([]);
+      if (!quiet && $("asset-gallery")) {
+        $("asset-gallery").innerHTML = "";
+        const msg = document.createElement("div");
+        msg.className = "muted";
+        msg.textContent = `Could not load assets: ${err.message || err}`;
+        $("asset-gallery").appendChild(msg);
+      }
+      return [];
+    }
+  }
+
+  function renderAssetGallery(assets) {
+    const grid = $("asset-gallery");
+    if (!grid) return;
+    grid.innerHTML = "";
+    if (!assets || !assets.length) return;
+    for (const asset of assets) {
+      const card = document.createElement("article");
+      card.className = "asset-card";
+
+      const thumb = document.createElement("div");
+      thumb.className = "asset-thumb";
+      if (asset.thumbnail_url) {
+        const img = document.createElement("img");
+        img.src = asset.thumbnail_url;
+        img.alt = asset.name || "Asset thumbnail";
+        img.loading = "lazy";
+        img.onerror = () => {
+          thumb.innerHTML = "";
+          thumb.appendChild(thumbFallback(asset));
+        };
+        thumb.appendChild(img);
+      } else {
+        thumb.appendChild(thumbFallback(asset));
+      }
+      const rep = (asset.sources || [])[0];
+      if (rep && rep.media_type) {
+        const badge = document.createElement("span");
+        badge.className = "thumb-badge";
+        badge.textContent = (rep.media_type || "").split("/")[0] || "media";
+        thumb.appendChild(badge);
+      }
+
+      const body = document.createElement("div");
+      body.className = "asset-body";
+      const name = document.createElement("div");
+      name.className = "asset-name";
+      name.textContent = asset.name || "Untitled asset";
+      name.title = asset.name || "";
+      const meta = document.createElement("div");
+      meta.className = "asset-meta";
+      const srcCount = (asset.sources || []).length;
+      meta.textContent = `${srcCount} source${srcCount === 1 ? "" : "s"} · ${formatDate(asset.created_at)}`;
+      const id = document.createElement("div");
+      id.className = "asset-id";
+      id.textContent = asset.asset_id;
+      id.title = asset.asset_id;
+
+      const actions = document.createElement("div");
+      actions.className = "asset-actions";
+      const copyBtn = document.createElement("button");
+      copyBtn.type = "button";
+      copyBtn.className = "btn btn-secondary btn-xs";
+      copyBtn.textContent = "Copy ID";
+      copyBtn.addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText(String(asset.asset_id)); copyBtn.textContent = "Copied"; setTimeout(() => (copyBtn.textContent = "Copy ID"), 1200); }
+        catch { copyBtn.textContent = asset.asset_id; }
+      });
+      actions.appendChild(copyBtn);
+
+      body.append(name, meta, id, actions);
+      card.append(thumb, body);
+      grid.appendChild(card);
+    }
+  }
+
+  function thumbFallback(asset) {
+    const wrap = document.createElement("div");
+    wrap.className = "thumb-fallback";
+    const rep = (asset.sources || [])[0];
+    const kind = rep ? (rep.media_type || "source") : "no source";
+    wrap.textContent = kind;
+    return wrap;
+  }
+
+  function renderAssetPicker(assets) {
+    const picker = $("asset-picker");
+    if (!picker) return;
+    const prev = new Set(selectedAssetIds());
+    picker.innerHTML = "";
+    if (!assets || !assets.length) return;
+    for (const asset of assets) {
+      const label = document.createElement("label");
+      label.className = "pick-item";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.value = asset.asset_id;
+      if (prev.has(String(asset.asset_id))) cb.checked = true;
+      label.appendChild(cb);
+
+      if (asset.thumbnail_url) {
+        const img = document.createElement("img");
+        img.className = "pick-thumb";
+        img.src = asset.thumbnail_url;
+        img.alt = "";
+        img.loading = "lazy";
+        img.onerror = () => { img.replaceWith(pickThumbFallback()); };
+        label.appendChild(img);
+      } else {
+        label.appendChild(pickThumbFallback());
+      }
+
+      const text = document.createElement("div");
+      text.className = "pick-text";
+      const name = document.createElement("div");
+      name.className = "pick-name";
+      name.textContent = asset.name || "Untitled asset";
+      const id = document.createElement("div");
+      id.className = "pick-id";
+      id.textContent = shortId(asset.asset_id);
+      id.title = asset.asset_id;
+      text.append(name, id);
+      label.appendChild(text);
+      picker.appendChild(label);
+    }
+  }
+
+  function pickThumbFallback() {
+    const d = document.createElement("div");
+    d.className = "pick-thumb-fallback";
+    d.textContent = "—";
+    return d;
+  }
+
+  function selectedAssetIds() {
+    const picker = $("asset-picker");
+    if (!picker) return [];
+    return Array.from(picker.querySelectorAll('input[type="checkbox"]:checked')).map((cb) => cb.value);
+  }
+
+  // File info helper
   function bindFileInfo(inputId, infoId) {
     const input = $(inputId), info = $(infoId);
     if (!input || !info) return;
     input.addEventListener("change", () => {
       const f = input.files && input.files[0];
       if (!f) { info.textContent = "No file selected."; return; }
-      const kb = (f.size / 1024).toFixed(1);
-      info.textContent = `${f.name} · ${kb} KB · ${f.type || "unknown type"}`;
+      const mb = f.size / (1024 * 1024);
+      const size = mb >= 1 ? `${mb.toFixed(2)} MB` : `${(f.size / 1024).toFixed(1)} KB`;
+      info.textContent = `${f.name} · ${size} · ${f.type || "unknown type"}`;
     });
   }
   bindFileInfo("asset-file", "asset-file-info");
@@ -84,14 +298,49 @@
     return Array.from(new Uint8Array(hash)).map((b) => b.toString(16).padStart(2, "0")).join("");
   }
 
-  // 1) Ingest
-  $("upload-button").addEventListener("click", async () => {
+  // Upload
+  function renderUploadResult(asset, source) {
+    const container = $("upload-result");
+    if (!container) return;
+    container.innerHTML = "";
+    container.classList.remove("muted");
+    const card = document.createElement("div");
+    card.className = "upload-result-card";
+
+    const thumb = document.createElement("div");
+    thumb.className = "asset-thumb";
+    if (asset && asset.asset_id) {
+      const img = document.createElement("img");
+      img.src = `/v1/assets/${asset.asset_id}/thumbnail?tenant_id=${encodeURIComponent(tenantId())}`;
+      img.alt = asset.name || "Uploaded asset";
+      img.onerror = () => { thumb.innerHTML = ""; thumb.appendChild(thumbFallback({ sources: source ? [source] : [] })); };
+      thumb.appendChild(img);
+    } else {
+      thumb.appendChild(thumbFallback({ sources: [] }));
+    }
+
+    const body = document.createElement("div");
+    body.className = "asset-body";
+    const name = document.createElement("div");
+    name.className = "asset-name";
+    name.textContent = (asset && asset.name) || "Uploaded asset";
+    const id = document.createElement("div");
+    id.className = "asset-id";
+    id.textContent = asset ? asset.asset_id : "—";
+    const meta = document.createElement("div");
+    meta.className = "asset-meta";
+    meta.textContent = source ? `${source.filename || "source"} · ${(source.media_type || "")}` : "Completed";
+    body.append(name, meta, id);
+    card.append(thumb, body);
+    container.appendChild(card);
+  }
+
+  if ($("upload-button")) $("upload-button").addEventListener("click", async () => {
     const btn = $("upload-button");
     const file = $("asset-file").files && $("asset-file").files[0];
-    const name = $("asset-name").value.trim() || "Untitled collection";
-    if (!file) { setStatus("upload-status", "Choose an image file first.", "error"); return; }
+    const name = ($("asset-name").value || "").trim() || "Untitled asset";
+    if (!file) { setStatus("upload-status", "Choose a file to upload.", "error"); return; }
     setBusy(btn, true);
-    showDetails("upload-details", null);
     try {
       setStatus("upload-status", "Hashing file…", "busy");
       const bytes = await file.arrayBuffer();
@@ -108,18 +357,16 @@
       });
 
       setStatus("upload-status", "Uploading bytes…", "busy");
-      await request(`/v1/uploads/${upload.upload_id}/parts/1`, { method: "PUT", body: file });
+      const partData = new FormData();
+      partData.append("part", file, file.name);
+      await request(`/v1/uploads/${upload.upload_id}/parts/1`, { method: "PUT", body: partData });
 
       setStatus("upload-status", "Completing upload…", "busy");
-      const source = await request(`/v1/uploads/${upload.upload_id}/complete`, { method: "POST" });
+      const source = await request(`/v1/uploads/${upload.upload_id}/complete`, { method: "POST", headers: h });
 
       setStatus("upload-status", "Upload complete.", "ok");
-      showDetails("upload-details", [
-        ["Asset", asset.asset_id],
-        ["Upload", upload.upload_id],
-        ["Source", source.source_id],
-        ["SHA-256", (source.content_sha256 || digest).slice(0, 16) + "…"],
-      ]);
+      renderUploadResult(asset, { filename: file.name, media_type: file.type });
+      await loadAssets({ quiet: true });
     } catch (err) {
       setStatus("upload-status", err.message || String(err), "error");
     } finally {
@@ -127,13 +374,15 @@
     }
   });
 
-  // 2) SAM3 prediction with box overlay
+  if ($("gallery-refresh")) $("gallery-refresh").addEventListener("click", () => loadAssets());
+
+  // Predict
   function drawPredictions(canvas, img, predictions) {
     const ctx = canvas.getContext("2d");
     canvas.width = img.naturalWidth || img.width;
     canvas.height = img.naturalHeight || img.height;
     ctx.drawImage(img, 0, 0);
-    const colors = ["#00c2d1", "#ff6b6b", "#ffd166", "#7bd389", "#c792ea", "#4dabf7"];
+    const colors = ["#18b6c4", "#ff6b6b", "#ffd166", "#7bd389", "#c792ea", "#4dabf7"];
     (predictions || []).forEach((p, i) => {
       const color = colors[i % colors.length];
       const box = p.box || [0, 0, 0, 0];
@@ -143,28 +392,28 @@
       ctx.strokeStyle = color;
       ctx.strokeRect(x1, y1, w, h);
       const label = `#${i + 1} ${(p.score != null ? Number(p.score).toFixed(3) : "")}`;
-      ctx.font = `${Math.max(12, Math.round(canvas.width / 50))}px "IBM Plex Mono", monospace`;
+      ctx.font = `${Math.max(12, Math.round(canvas.width / 55))}px "IBM Plex Mono", monospace`;
       const pad = 4;
       const tw = ctx.measureText(label).width;
       const th = Math.max(14, Math.round(canvas.width / 45));
       const ly = Math.max(th + pad, y1);
       ctx.fillStyle = color;
       ctx.fillRect(x1, ly - th - pad, tw + pad * 2, th + pad);
-      ctx.fillStyle = "#0f1418";
+      ctx.fillStyle = "#041316";
       ctx.fillText(label, x1 + pad, ly - pad / 2);
     });
   }
 
-  $("predict-button").addEventListener("click", async () => {
+  if ($("predict-button")) $("predict-button").addEventListener("click", async () => {
     const btn = $("predict-button");
     const file = $("predict-file").files && $("predict-file").files[0];
-    const prompt = $("predict-prompt").value.trim();
+    const prompt = ($("predict-prompt").value || "").trim();
     const thresholdRaw = $("predict-threshold").value;
     if (!file) { setStatus("predict-status", "Choose an image file first.", "error"); return; }
     if (!prompt) { setStatus("predict-status", "Enter a prompt.", "error"); return; }
     setBusy(btn, true);
     setStatus("predict-status", "Running prediction…", "busy");
-    $("predict-output").hidden = true;
+    if ($("predict-output")) $("predict-output").hidden = true;
     try {
       const form = new FormData();
       form.append("image", file);
@@ -205,9 +454,10 @@
     }
   });
 
-  // 3) Semantic search
+  // Search
   function renderSearchResults(results) {
     const container = $("search-results");
+    if (!container) return;
     container.innerHTML = "";
     if (!results || !results.length) {
       const empty = document.createElement("div");
@@ -254,17 +504,23 @@
   }
 
   function searchPayload() {
-    const query = $("search-query").value.trim();
+    const query = ($("search-query").value || "").trim();
     const limitVal = parseInt($("search-limit").value, 10);
-    const assetIdsRaw = $("search-assets").value.trim();
     const payload = { query, limit: Number.isFinite(limitVal) && limitVal > 0 ? limitVal : 10 };
-    if (assetIdsRaw) {
-      payload.asset_ids = assetIdsRaw.split(",").map((s) => s.trim()).filter(Boolean);
-    }
+    const ids = selectedAssetIds();
+    if (ids.length) payload.asset_ids = ids;
     return payload;
   }
 
-  $("search-button").addEventListener("click", async () => {
+  if ($("search-select-all")) $("search-select-all").addEventListener("click", () => {
+    document.querySelectorAll("#asset-picker input[type='checkbox']").forEach((cb) => (cb.checked = true));
+  });
+  if ($("search-select-none")) $("search-select-none").addEventListener("click", () => {
+    document.querySelectorAll("#asset-picker input[type='checkbox']").forEach((cb) => (cb.checked = false));
+  });
+  if ($("search-refresh-assets")) $("search-refresh-assets").addEventListener("click", () => loadAssets({ picker: true }));
+
+  if ($("search-button")) $("search-button").addEventListener("click", async () => {
     const btn = $("search-button");
     const payload = searchPayload();
     if (!payload.query) { setStatus("search-status", "Enter a search query.", "error"); return; }
@@ -277,14 +533,14 @@
       renderSearchResults(results);
       setStatus("search-status", `${results.length} result${results.length === 1 ? "" : "s"}.`, "ok");
     } catch (err) {
-      $("search-results").innerHTML = "";
+      if ($("search-results")) $("search-results").innerHTML = "";
       setStatus("search-status", err.message || String(err), "error");
     } finally {
       setBusy(btn, false);
     }
   });
 
-  $("subasset-button").addEventListener("click", async () => {
+  if ($("subasset-button")) $("subasset-button").addEventListener("click", async () => {
     const btn = $("subasset-button");
     const payload = searchPayload();
     if (!payload.query) { setStatus("subasset-status", "Enter a search query first.", "error"); return; }
@@ -302,25 +558,24 @@
     }
   });
 
-  // 4) Dataset export
+  // Exports
   function renderExportJob(job) {
     if (!job) { showDetails("export-details", null); return; }
     showDetails("export-details", [
       ["Job", job.job_id],
       ["Kind", job.kind],
       ["Status", job.status],
-      ["Version", job.version_id],
-      ["Format", job.format],
-      ["Created", job.created_at],
-      ["Updated", job.updated_at],
+      ["Attempts", job.attempts],
+      ["Error", job.error],
+      ["Tenant", job.tenant_id],
     ]);
   }
 
-  $("export-button").addEventListener("click", async () => {
+  if ($("export-button")) $("export-button").addEventListener("click", async () => {
     const btn = $("export-button");
-    const versionId = $("version-id").value.trim();
+    const versionId = ($("version-id").value || "").trim();
     const format = $("export-format").value;
-    const idempotencyKey = $("export-key").value.trim() || "browser-export";
+    const idempotencyKey = ($("export-key").value || "").trim() || "browser-export";
     if (!versionId) { setStatus("export-status", "Enter a dataset version ID.", "error"); return; }
     setBusy(btn, true);
     setStatus("export-status", "Queuing export…", "busy");
@@ -330,7 +585,7 @@
         body: JSON.stringify({ version_id: versionId, format, idempotency_key: idempotencyKey })
       });
       renderExportJob(job);
-      $("job-id").value = job.job_id || "";
+      if ($("job-id")) $("job-id").value = job.job_id || "";
       setStatus("export-status", `Export job ${job.status}.`, "ok");
     } catch (err) {
       setStatus("export-status", err.message || String(err), "error");
@@ -339,9 +594,9 @@
     }
   });
 
-  $("job-status-button").addEventListener("click", async () => {
+  if ($("job-status-button")) $("job-status-button").addEventListener("click", async () => {
     const btn = $("job-status-button");
-    const jobId = $("job-id").value.trim();
+    const jobId = ($("job-id").value || "").trim();
     if (!jobId) { setStatus("export-status", "Enter a job ID.", "error"); return; }
     setBusy(btn, true);
     setStatus("export-status", "Fetching job status…", "busy");
@@ -356,9 +611,9 @@
     }
   });
 
-  $("job-cancel-button").addEventListener("click", async () => {
+  if ($("job-cancel-button")) $("job-cancel-button").addEventListener("click", async () => {
     const btn = $("job-cancel-button");
-    const jobId = $("job-id").value.trim();
+    const jobId = ($("job-id").value || "").trim();
     if (!jobId) { setStatus("export-status", "Enter a job ID.", "error"); return; }
     setBusy(btn, true);
     setStatus("export-status", "Requesting cancellation…", "busy");
@@ -375,7 +630,7 @@
     }
   });
 
-  // 5) Preview gallery
+  // Preview gallery (label job events)
   function parseSseEvents(text) {
     const events = [];
     const blocks = String(text || "").split(/\n\n+/);
@@ -403,6 +658,7 @@
   function renderGallery(events) {
     const grid = $("gallery-grid");
     const summary = $("gallery-summary");
+    if (!grid || !summary) return;
     grid.innerHTML = "";
     if (!events || !events.length) {
       summary.hidden = true;
@@ -482,10 +738,10 @@
     }
   }
 
-  $("gallery-load-button").addEventListener("click", async () => {
+  if ($("gallery-load-button")) $("gallery-load-button").addEventListener("click", async () => {
     const btn = $("gallery-load-button");
-    const jobId = $("gallery-job-id").value.trim();
-    const afterRaw = $("gallery-after").value.trim();
+    const jobId = ($("gallery-job-id").value || "").trim();
+    const afterRaw = ($("gallery-after").value || "").trim();
     if (!jobId) { setStatus("gallery-status", "Enter a job ID.", "error"); return; }
     const params = new URLSearchParams();
     if (afterRaw !== "") params.set("after_event_id", afterRaw);
@@ -505,7 +761,7 @@
       const events = parseSseEvents(text);
       renderGallery(events);
       if (!events.length) {
-        setStatus("gallery-status", "No preview events found for this job and tenant. The job may not emit previews, or none match the cursor.", "ok");
+        setStatus("gallery-status", "No preview events found for this job and tenant.", "ok");
       } else {
         setStatus("gallery-status", `Loaded ${events.length} preview event${events.length === 1 ? "" : "s"}.`, "ok");
       }
@@ -517,19 +773,25 @@
     }
   });
 
-  $("gallery-use-export-job-button").addEventListener("click", () => {
-    const exportJobId = $("job-id").value.trim();
+  if ($("gallery-use-export-job-button")) $("gallery-use-export-job-button").addEventListener("click", () => {
+    const exportJobId = ($("job-id") && $("job-id").value.trim()) || "";
     if (!exportJobId) { setStatus("gallery-status", "No export job ID to copy.", "error"); return; }
     $("gallery-job-id").value = exportJobId;
-    setStatus("gallery-status", "Copied export job ID into gallery. Note: export jobs may not emit preview events.", "ok");
+    setStatus("gallery-status", "Copied export job ID. Export jobs may not emit preview events.", "ok");
   });
 
-  $("gallery-clear-button").addEventListener("click", () => {
-    $("gallery-grid").innerHTML = "";
-    $("gallery-summary").hidden = true;
-    $("gallery-summary").innerHTML = "";
+  if ($("gallery-clear-button")) $("gallery-clear-button").addEventListener("click", () => {
+    if ($("gallery-grid")) $("gallery-grid").innerHTML = "";
+    if ($("gallery-summary")) { $("gallery-summary").hidden = true; $("gallery-summary").innerHTML = ""; }
     setStatus("gallery-status", "Gallery cleared.", "ok");
   });
 
+  // Tenant change: reload assets when relevant
+  if ($("tenant-id")) $("tenant-id").addEventListener("change", () => {
+    loadAssets({ quiet: true });
+  });
+
+  // Init
   checkRuntime();
+  loadAssets({ quiet: true });
 })();

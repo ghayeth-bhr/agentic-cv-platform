@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
-from .asset_registry import AssetRecord, SourceRecord, UploadRecord
+from .asset_registry import AssetRecord, AssetSummary, SourceRecord, UploadRecord
 from .postgres import PostgresConfig, apply_migrations, connect
 
 
@@ -168,6 +168,36 @@ class PostgresAssetRegistry:
             )
             self._connection.commit()
             return source
+
+    def list_assets(self, *, tenant_id: UUID) -> list[AssetSummary]:
+        with self._lock:
+            asset_rows = self._connection.execute(
+                "SELECT * FROM assets WHERE tenant_id = %s ORDER BY created_at DESC",
+                (tenant_id,),
+            ).fetchall()
+            summaries: list[AssetSummary] = []
+            for row in asset_rows:
+                source_rows = self._connection.execute(
+                    "SELECT * FROM sources WHERE asset_id = %s ORDER BY created_at DESC",
+                    (row["asset_id"],),
+                ).fetchall()
+                summaries.append(AssetSummary(
+                    asset_id=UUID(str(row["asset_id"])),
+                    tenant_id=UUID(str(row["tenant_id"])),
+                    name=row["name"],
+                    created_at=_iso(row["created_at"]),
+                    sources=tuple(self._source(s) for s in source_rows),
+                ))
+            return summaries
+
+    def get_source(self, source_id: UUID) -> SourceRecord:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM sources WHERE source_id = %s", (source_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown source: {source_id}")
+        return self._source(row)
 
     @staticmethod
     def _upload(row: Any) -> UploadRecord:
