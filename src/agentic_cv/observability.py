@@ -1,0 +1,110 @@
+"""Runtime and GPU observability helpers.
+
+Collects lightweight metrics without requiring optional heavy dependencies.
+Torch/CUDA metrics are reported only when torch is importable and CUDA is
+available; callers can inject a torch-like module for deterministic tests.
+"""
+
+from __future__ import annotations
+
+import os
+import platform
+import sys
+import time
+from typing import Any
+
+
+def _try_import_torch() -> Any | None:
+    try:
+        import torch  # type: ignore
+
+        return torch
+    except Exception:
+        return None
+
+
+def collect_gpu_metrics(torch_module: Any | None = None) -> dict[str, Any]:
+    """Return CUDA/GPU metrics when available, otherwise an unavailable report."""
+    torch = torch_module if torch_module is not None else _try_import_torch()
+    if torch is None:
+        return {"available": False, "reason": "torch_not_installed"}
+    cuda = getattr(torch, "cuda", None)
+    if cuda is None or not cuda.is_available():
+        reason = "cuda_not_available"
+        if cuda is None:
+            reason = "cuda_module_missing"
+        return {"available": False, "reason": reason}
+
+    device_count = int(cuda.device_count())
+    devices = []
+    for index in range(device_count):
+        try:
+            props = cuda.get_device_properties(index)
+            total = int(getattr(props, "total_memory", 0))
+            name = str(getattr(props, "name", f"cuda:{index}"))
+        except Exception:
+            total = 0
+            name = f"cuda:{index}"
+        try:
+            allocated = int(cuda.memory_allocated(index))
+            reserved = int(cuda.memory_reserved(index))
+        except Exception:
+            allocated = 0
+            reserved = 0
+        free = max(total - reserved, 0) if total else None
+        devices.append(
+            {
+                "index": index,
+                "name": name,
+                "memory_bytes": {
+                    "total": total or None,
+                    "allocated": allocated,
+                    "reserved": reserved,
+                    "free": free,
+                },
+            }
+        )
+
+    current_device = None
+    try:
+        current_device = int(cuda.current_device())
+    except Exception:
+        current_device = None
+
+    return {
+        "available": True,
+        "device_count": device_count,
+        "current_device": current_device,
+        "devices": devices,
+    }
+
+
+def collect_runtime_metrics() -> dict[str, Any]:
+    """Return basic process/runtime metrics from the standard library."""
+    metrics: dict[str, Any] = {
+        "python_version": sys.version.split()[0],
+        "platform": platform.platform(),
+        "pid": os.getpid(),
+        "time_unix": time.time(),
+    }
+    try:
+        import resource  # Unix-only; unavailable on Windows
+
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        metrics["resource"] = {
+            "max_rss_kb": int(getattr(usage, "ru_maxrss", 0)),
+            "user_time_s": float(getattr(usage, "ru_utime", 0.0)),
+            "system_time_s": float(getattr(usage, "ru_stime", 0.0)),
+        }
+    except Exception:
+        metrics["resource"] = None
+    return metrics
+
+
+def collect_metrics(*, torch_module: Any | None = None) -> dict[str, Any]:
+    """Collect runtime and GPU metrics for observability endpoints."""
+    return {
+        "status": "ok",
+        "runtime": collect_runtime_metrics(),
+        "gpu": collect_gpu_metrics(torch_module),
+    }
