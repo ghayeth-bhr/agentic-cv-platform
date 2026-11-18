@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image
 
 from .dataset import Annotation, DatasetCategory, DatasetImage, DatasetVersion
-from .sam3 import Sam3Prediction, Sam3Provider
+from .sam3 import Sam3Prediction, Sam3Provider, clip_box
 
 
 BatchTask = Literal["detection", "segmentation"]
@@ -90,6 +90,7 @@ class Sam3BatchLabeler:
                     )
                 )
                 predictions = self.provider.predict(source, prompt, threshold=threshold)
+                width, height = source.width, source.height
             for index, prediction in enumerate(predictions):
                 raw_predictions.append(
                     RawPrediction(
@@ -97,7 +98,12 @@ class Sam3BatchLabeler:
                         box=prediction.box, mask=prediction.mask,
                     )
                 )
-                x1, y1, x2, y2 = prediction.box
+                clipped = clip_box(
+                    prediction.box, width=width, height=height
+                )
+                if clipped is None:
+                    continue
+                x1, y1, x2, y2 = clipped
                 segmentation = mask_polygons(prediction.mask) if task == "segmentation" else ()
                 annotations.append(
                     Annotation(
