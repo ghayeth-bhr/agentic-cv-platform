@@ -4,12 +4,12 @@
   const $ = (id) => document.getElementById(id);
 
   const VIEW_META = {
-    gallery: { title: "Gallery", eyebrow: "Workspace", desc: "Browse uploaded assets and their representative media." },
-    upload: { title: "Upload", eyebrow: "Ingest", desc: "Create an asset and upload an image or video source." },
-    predict: { title: "Predict", eyebrow: "Segment", desc: "Run prompted SAM3 prediction on an image." },
-    search: { title: "Search", eyebrow: "Discover", desc: "Find indexed frames by description and scope to selected assets." },
-    exports: { title: "Exports", eyebrow: "Datasets", desc: "Queue and manage dataset export jobs." },
-    preview: { title: "Preview", eyebrow: "Review", desc: "Replay durable label preview events for a job." },
+    gallery: { title: "Gallery", eyebrow: "Assets", desc: "Manage uploaded assets and their representative media." },
+    upload: { title: "Upload", eyebrow: "Assets", desc: "Create an asset and upload an image or video source." },
+    predict: { title: "Predict / Label", eyebrow: "Agent", desc: "Run prompted prediction or labeling on selected assets and frames." },
+    search: { title: "Search", eyebrow: "Agent", desc: "Find indexed frames by description to scope assets for labeling." },
+    exports: { title: "Exports", eyebrow: "Jobs & Exports", desc: "Export labeled datasets (available after labeling/dataset versions are ready)." },
+    preview: { title: "Label jobs", eyebrow: "Jobs & Exports", desc: "Replay durable label-job preview events and progress." },
   };
 
   function tenantId() {
@@ -303,12 +303,49 @@
       const opt = document.createElement("option");
       opt.value = asset.asset_id;
       const kind = asset.sources && asset.sources[0] ? ((asset.sources[0].media_type || "").split("/")[0] || "asset") : "asset";
-      opt.textContent = `${asset.name || "Untitled asset"} (${kind})`;
+      const count = (asset.sources || []).length;
+      opt.textContent = `${asset.name || "Untitled asset"} (${count} image${count === 1 ? "" : "s"}/${kind})`;
       if (asset.thumbnail_url) opt.dataset.thumb = asset.thumbnail_url;
       select.appendChild(opt);
     }
     if (prev && Array.from(select.options).some((o) => o.value === prev)) select.value = prev;
+    renderPredictSourceSelect(select.value);
   }
+
+  function renderPredictSourceSelect(assetId) {
+    const select = $("predict-source");
+    if (!select) return;
+    const prev = select.value;
+    select.innerHTML = "";
+    if (!assetId) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "Not applicable (upload a file)";
+      select.appendChild(opt);
+      select.disabled = true;
+      return;
+    }
+    select.disabled = false;
+    const asset = (cachedAssets || []).find((a) => String(a.asset_id) === String(assetId));
+    const sources = asset && Array.isArray(asset.sources) ? asset.sources : [];
+    const auto = document.createElement("option");
+    auto.value = "";
+    auto.textContent = sources.length > 1 ? "Representative (auto)" : "Selected source";
+    select.appendChild(auto);
+    sources.forEach((s, i) => {
+      const opt = document.createElement("option");
+      opt.value = s.source_id || "";
+      const label = s.filename || s.source_id || `Source ${i + 1}`;
+      const type = s.media_type ? ` · ${s.media_type}` : "";
+      opt.textContent = `${i + 1}. ${label}${type}`;
+      select.appendChild(opt);
+    });
+    if (prev && Array.from(select.options).some((o) => o.value === prev)) select.value = prev;
+  }
+
+  if ($("predict-asset")) $("predict-asset").addEventListener("change", (e) => {
+    renderPredictSourceSelect(e.target.value);
+  });
 
   function pickThumbFallback() {
     const d = document.createElement("div");
@@ -496,6 +533,8 @@
       if (assetId) {
         const payload = { prompt };
         if (thresholdRaw !== "") payload.threshold = Number(thresholdRaw);
+        const sourceId = ($("predict-source") && $("predict-source").value) || "";
+        if (sourceId) payload.source_id = sourceId;
         result = await request(`/v1/assets/${encodeURIComponent(assetId)}/predict`, {
           method: "POST", headers: headersJSON(true), body: JSON.stringify(payload)
         });
