@@ -120,10 +120,12 @@ def create_app(dependencies: SemanticApiDependencies) -> FastAPI:
     def search(
         request: SearchRequest,
         x_tenant_id: str | None = Header(None),
+        tenant_id_q: str | None = Query(None, alias="tenant_id"),
         x_api_key: str | None = Header(None),
         authorization: str | None = Header(None),
     ) -> SearchResponse:
-        tenant_id = _tenant(x_tenant_id) if x_tenant_id is not None else None
+        raw_tenant = x_tenant_id or tenant_id_q
+        tenant_id = _tenant(raw_tenant) if raw_tenant is not None else None
         _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="search:read")
         _validate_request(request)
         try:

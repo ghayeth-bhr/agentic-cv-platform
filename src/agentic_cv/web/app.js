@@ -569,7 +569,7 @@
     setStatus("search-status", "Searching…", "busy");
     setStatus("subasset-status", "");
     try {
-      const result = await request("/v1/search", { method: "POST", headers: headersJSON(false), body: JSON.stringify(payload) });
+      const result = await request("/v1/search", { method: "POST", headers: headersJSON(true), body: JSON.stringify(payload) });
       const results = (result && result.results) || [];
       renderSearchResults(results);
       setStatus("search-status", `${results.length} result${results.length === 1 ? "" : "s"}.`, "ok");
