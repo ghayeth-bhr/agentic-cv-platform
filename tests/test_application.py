@@ -23,6 +23,22 @@ def test_local_application_assembles_health_and_core_routes(tmp_path):
     assert response.status_code == 201
 
 
+def test_local_application_uses_cpu_model_runtime_from_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENTIC_CV_DEVICE", "cpu")
+    monkeypatch.delenv("AGENTIC_CV_PRECISION", raising=False)
+
+    app = create_local_app(LocalAppConfig(data_dir=tmp_path / "data"))
+
+    with TestClient(app) as client:
+        runtime = client.get("/api-info").json()["model_runtime"]
+
+    assert runtime["device"] == "cpu"
+    assert runtime["precision"] == "float32"
+    assert app.state.resources.embedding_provider.config.device == "cpu"
+    assert app.state.resources.embedding_provider.config.precision == "float32"
+    assert app.state.resources.sam3_provider.config.device == "cpu"
+
+
 def test_local_application_reads_oidc_configuration_from_environment(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENTIC_CV_OIDC_ISSUER", "https://issuer.example")
     monkeypatch.setenv("AGENTIC_CV_OIDC_AUDIENCE", "agentic-cv")

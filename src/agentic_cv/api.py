@@ -21,6 +21,7 @@ from .click_refinement import ClickPoint, ClickRefinementService, RefinementSnap
 from .contracts import EventEnvelope, TaskSpec
 from .dataset_export import ExportFormat
 from .dataset_export_workflow import DatasetExportWorkflow
+from .errors import ModelUnavailableError, install_model_unavailable_handler
 from .job_store import JobRecord
 from .label_workflow import DurableLabelWorkflow
 from .orchestrator import TaskOrchestrationRequest, TaskOrchestrator
@@ -419,6 +420,7 @@ def _prediction_response(
 
 def create_app(dependencies: ApiDependencies) -> FastAPI:
     app = FastAPI(title="Agentic CV platform API", version="1")
+    install_model_unavailable_handler(app)
 
     @app.post("/v1/assets", response_model=AssetResponse, status_code=201)
     def create_asset(
@@ -898,6 +900,8 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
             predictions = provider.predict(image, prompt, threshold=request.threshold)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ModelUnavailableError:
+            raise
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"prediction failed: {exc}") from exc
         width, height = image.size

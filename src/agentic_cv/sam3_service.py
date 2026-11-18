@@ -9,6 +9,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel
 
+from .errors import install_model_unavailable_handler
 from .sam3 import Sam3Prediction, Sam3Provider
 
 
@@ -46,6 +47,7 @@ def create_app(
 ) -> FastAPI:
     service_config = config or Sam3ServiceConfig()
     app = FastAPI(title="Agentic CV SAM3 service", version="1")
+    install_model_unavailable_handler(app)
 
     @app.get("/health/live")
     def liveness() -> dict[str, str]:
