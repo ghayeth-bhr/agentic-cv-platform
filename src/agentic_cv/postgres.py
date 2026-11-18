@@ -288,6 +288,16 @@ MIGRATIONS: tuple[Migration, ...] = (
             """,
         ),
     ),
+    Migration(
+        version=6,
+        name="vector_records_text_asset_id",
+        statements=(
+            """
+            ALTER TABLE vector_records
+                ALTER COLUMN asset_id TYPE TEXT USING asset_id::text
+            """,
+        ),
+    ),
 )
 
 

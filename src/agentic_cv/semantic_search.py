@@ -41,6 +41,20 @@ def _normalize(vector: Sequence[float]) -> np.ndarray:
     return array / norm
 
 
+class VectorIndex(Protocol):
+    def upsert(self, record: ImageRecord, embedding: Sequence[float]) -> None: ...
+
+    def remove(self, record_id: str) -> None: ...
+
+    def search(
+        self,
+        query_embedding: Sequence[float],
+        *,
+        asset_ids: set[str] | None = None,
+        limit: int = 20,
+    ) -> list[SearchResult]: ...
+
+
 class LocalVectorIndex:
     """Small exact-search index for local mode; replaceable by pgvector/Qdrant later."""
 
@@ -87,7 +101,7 @@ class LocalVectorIndex:
 
 
 class SemanticSearchService:
-    def __init__(self, provider: EmbeddingProvider, index: LocalVectorIndex) -> None:
+    def __init__(self, provider: EmbeddingProvider, index: VectorIndex) -> None:
         self.provider = provider
         self.index = index
 

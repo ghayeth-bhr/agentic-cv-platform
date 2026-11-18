@@ -30,7 +30,7 @@ from .preview_api import PreviewApiDependencies, create_app as create_preview_ap
 from .sam3 import LocalSam3Provider, Sam3Config, Sam3Provider
 from .sam3_service import create_app as create_sam3_app
 from .semantic_api import SemanticApiDependencies, create_app as create_semantic_app
-from .semantic_search import EmbeddingProvider, LocalVectorIndex, SemanticSearchService
+from .semantic_search import EmbeddingProvider, LocalVectorIndex, SemanticSearchService, VectorIndex
 from .sub_assets import SubAssetBackend, SubAssetStore
 from .uploads import ResumableUploadService
 
@@ -83,6 +83,7 @@ class LocalAppResources:
     jobs: JobStoreBackend
     preview: PreviewBackend
     sub_assets: SubAssetBackend
+    vector_index: VectorIndex
     embedding_provider: EmbeddingProvider
     sam3_provider: Sam3Provider
     outbox_dispatcher: OutboxDispatcher | None = None
@@ -92,8 +93,8 @@ class LocalAppResources:
             self.registry, self.outbox, self.versions, self.jobs, self.preview, self.sub_assets,
         ):
             resource.close()
-        for provider in (self.embedding_provider, self.sam3_provider):
-            close = getattr(provider, "close", None)
+        for component in (self.vector_index, self.embedding_provider, self.sam3_provider):
+            close = getattr(component, "close", None)
             if close is not None:
                 close()
         if self.outbox_dispatcher is not None:
@@ -151,9 +152,16 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
         HuggingFaceEmbeddingConfig()
     )
     sam3_provider = config.sam3_provider or LocalSam3Provider(Sam3Config())
+    if config.postgres is not None:
+        from .postgres_pgvector import open_postgres_vector_index
+
+        vector_index = open_postgres_vector_index(config.postgres)
+    else:
+        vector_index = LocalVectorIndex()
     resources = LocalAppResources(
         registry=registry, outbox=outbox, versions=versions, jobs=jobs, preview=preview,
-        sub_assets=sub_assets, embedding_provider=embedding_provider, sam3_provider=sam3_provider,
+        sub_assets=sub_assets, vector_index=vector_index,
+        embedding_provider=embedding_provider, sam3_provider=sam3_provider,
     )
     export_service = DatasetExportService(versions, config.data_dir / "exports")
     export_workflow = DatasetExportWorkflow(
@@ -188,7 +196,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
     )
     app.include_router(
         create_semantic_app(SemanticApiDependencies(
-            search=SemanticSearchService(embedding_provider, LocalVectorIndex()),
+            search=SemanticSearchService(embedding_provider, vector_index),
             sub_assets=sub_assets, authorizer=authorizer,
         )).router
     )
