@@ -7,6 +7,7 @@ import sqlite3
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 from .dataset import Annotation, DatasetCategory, DatasetImage, DatasetVersion
@@ -24,6 +25,23 @@ class DatasetVersionRecord:
     dataset: DatasetVersion
     idempotency_key: str
     created_at: str
+
+
+class DatasetVersionBackend(Protocol):
+    def close(self) -> None: ...
+
+    def create(
+        self,
+        *,
+        tenant_id: UUID,
+        name: str,
+        dataset: DatasetVersion,
+        idempotency_key: str,
+    ) -> DatasetVersionRecord: ...
+
+    def get(self, *, tenant_id: UUID, version_id: UUID) -> DatasetVersionRecord: ...
+
+    def list(self, *, tenant_id: UUID) -> list[DatasetVersionRecord]: ...
 
 
 class DatasetVersionStore:

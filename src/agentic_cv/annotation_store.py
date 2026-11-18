@@ -7,6 +7,7 @@ import sqlite3
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 from .dataset import Annotation
@@ -29,6 +30,27 @@ class AnnotationRevision:
     revision: int
     author_id: str
     created_at: str
+
+
+class AnnotationRevisionBackend(Protocol):
+    def close(self) -> None: ...
+
+    def save(
+        self,
+        *,
+        tenant_id: UUID,
+        annotation: Annotation,
+        author_id: str,
+        expected_revision: int = 0,
+    ) -> AnnotationRevision: ...
+
+    def latest(
+        self, *, tenant_id: UUID, image_id: str, annotation_id: str
+    ) -> AnnotationRevision: ...
+
+    def history(
+        self, *, tenant_id: UUID, image_id: str, annotation_id: str
+    ) -> list[AnnotationRevision]: ...
 
 
 class AnnotationRevisionStore:
