@@ -33,5 +33,7 @@ verbatim so the root README can describe the current product instead of the hist
 New branches use a short, tailored `docs/branches/<branch-name>.md` document
 instead of appending to the root README. Current phase records:
 [`fix-runtime-foundation.md`](fix-runtime-foundation.md) (P0),
-[`label-execution-engine.md`](label-execution-engine.md) (P1), and
-[`assets-experience.md`](assets-experience.md) (P2).
+[`label-execution-engine.md`](label-execution-engine.md) (P1),
+[`assets-experience.md`](assets-experience.md) (P2),
+[`agent-chat.md`](agent-chat.md) (P3), and
+[`manual-refinement-ui.md`](manual-refinement-ui.md) (P4).

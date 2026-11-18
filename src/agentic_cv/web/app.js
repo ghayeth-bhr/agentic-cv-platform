@@ -38,6 +38,12 @@
     uploadFiles: [],
     agentSession: null,
     agentPollToken: 0,
+    review: {
+      open: false, versionId: null, dataset: null, panel: null, images: [],
+      index: -1, image: null, objectUrl: null, socket: null, snapshot: null,
+      mode: "positive", status: null, listEl: null, save: null, canvas: null,
+      imageEl: null, labelEl: null,
+    },
   };
 
   function tenantHeaders(json) {
@@ -152,6 +158,7 @@
     if ($("view-title")) $("view-title").textContent = meta.title;
     if ($("view-eyebrow")) $("view-eyebrow").textContent = meta.eyebrow;
     if ($("view-desc")) $("view-desc").textContent = meta.desc;
+    if (name !== "datasets") closeReview();
     if (name === "assets") loadAssets();
     if (name === "agent") initAgentView();
     if (name === "datasets") loadDatasets();
@@ -1128,7 +1135,366 @@
   });
 
   // Datasets
+  function reviewStatus(message, kind) {
+    const el = state.review.status;
+    if (!el) return;
+    el.textContent = message || "";
+    if (kind) el.dataset.kind = kind; else delete el.dataset.kind;
+  }
+
+  function closeReview() {
+    const review = state.review;
+    if (review.socket) {
+      review.socket.onclose = null;
+      review.socket.close();
+    }
+    if (review.objectUrl) URL.revokeObjectURL(review.objectUrl);
+    if (review.panel) review.panel.hidden = true;
+    state.review = {
+      open: false, versionId: null, dataset: null, panel: null, images: [],
+      index: -1, image: null, objectUrl: null, socket: null, snapshot: null,
+      mode: "positive", status: null, listEl: null, save: null, canvas: null,
+      imageEl: null, labelEl: null,
+    };
+  }
+
+  async function openDatasetReview(dataset, card) {
+    const panel = card.querySelector('[data-review-panel="true"]');
+    if (!panel) return;
+    if (state.review.open && state.review.versionId === String(dataset.version_id)) {
+      closeReview();
+      return;
+    }
+    closeReview();
+    panel.hidden = false;
+    panel.replaceChildren();
+    state.review.open = true;
+    state.review.versionId = String(dataset.version_id);
+    state.review.dataset = dataset;
+    state.review.panel = panel;
+
+    const head = node("div", "review-head");
+    const copy = node("div");
+    copy.append(
+      node("h3", "card-title", "Review labels"),
+      node(
+        "p",
+        "card-desc",
+        "Pick an image, click the object you want to correct, then accept the mask. The correction becomes a new annotation revision and a fresh dataset version."
+      )
+    );
+    const close = node("button", "btn btn-ghost btn-small", "Close");
+    close.type = "button";
+    close.addEventListener("click", closeReview);
+    head.append(copy, close);
+
+    const status = node("div", "status");
+    status.dataset.reviewStatus = "true";
+    state.review.status = status;
+    panel.append(head, status);
+
+    const body = node("div", "review-body");
+    const listCol = node("div", "review-list-col");
+    const list = node("div", "review-image-list");
+    list.dataset.reviewList = "true";
+    state.review.listEl = list;
+    listCol.append(node("p", "review-list-title", "Images in this version"), list);
+
+    const workspace = node("div", "review-workspace");
+    const stage = node("div", "review-stage");
+    const imageEl = node("img", "review-image");
+    imageEl.alt = "Selected dataset image";
+    const canvas = node("canvas", "review-canvas");
+    canvas.setAttribute("aria-label", "Label mask overlay");
+    stage.append(imageEl, canvas);
+    const labelEl = node("p", "review-image-caption", "Select an image to begin.");
+    state.review.imageEl = imageEl;
+    state.review.canvas = canvas;
+    state.review.labelEl = labelEl;
+    canvas.addEventListener("click", handleReviewCanvasClick);
+
+    const controls = node("div", "review-controls");
+    const modes = node("div", "review-modes");
+    const positive = node("button", "btn btn-small btn-secondary is-active", "Positive point");
+    const negative = node("button", "btn btn-small btn-ghost", "Negative point");
+    positive.type = "button";
+    negative.type = "button";
+    const setMode = (mode, active, other) => {
+      state.review.mode = mode;
+      active.classList.add("is-active");
+      active.classList.remove("btn-ghost");
+      active.classList.add("btn-secondary");
+      other.classList.remove("is-active", "btn-secondary");
+      other.classList.add("btn-ghost");
+    };
+    positive.addEventListener("click", () => setMode("positive", positive, negative));
+    negative.addEventListener("click", () => setMode("negative", negative, positive));
+    modes.append(positive, negative);
+
+    const save = node("button", "btn btn-primary", "Save corrected mask");
+    save.type = "button";
+    save.disabled = true;
+    state.review.save = save;
+    save.addEventListener("click", acceptReview);
+    const hint = node(
+      "p",
+      "review-hint",
+      "A click ranks the SAM 3 masks for this image's category. Negative clicks push a mask away; if no preview appears, try another point."
+    );
+    controls.append(modes, save, hint);
+    workspace.append(stage, labelEl, controls);
+    body.append(listCol, workspace);
+    panel.appendChild(body);
+
+    reviewStatus("Loading images…", "busy");
+    try {
+      const data = await request(
+        `/v1/datasets/${encodeURIComponent(dataset.version_id)}/images`,
+        { headers: tenantHeaders(false) }
+      );
+      const images = (data && data.images) || [];
+      if (!images.length) {
+        reviewStatus("This dataset has no images to review.", "error");
+        return;
+      }
+      state.review.images = images;
+      list.replaceChildren();
+      images.forEach((image, index) => {
+        const button = node("button", "review-image-item");
+        button.type = "button";
+        const name = String(image.file_name || "image").split("/").pop();
+        button.append(
+          node("span", "review-image-name", cleanMessage(name)),
+          node(
+            "span",
+            "review-image-count",
+            `${image.annotations.length} label${image.annotations.length === 1 ? "" : "s"}`
+          )
+        );
+        button.addEventListener("click", () => selectReviewImage(index));
+        list.appendChild(button);
+      });
+      await selectReviewImage(0);
+    } catch (err) {
+      reviewStatus(cleanMessage(err.message || err), "error");
+    }
+  }
+
+  async function selectReviewImage(index) {
+    const review = state.review;
+    if (!review.open || index < 0 || index >= review.images.length) return;
+    review.index = index;
+    const image = review.images[index];
+    review.image = image;
+    if (review.socket) {
+      review.socket.onclose = null;
+      review.socket.close();
+      review.socket = null;
+    }
+    review.snapshot = null;
+    if (review.save) review.save.disabled = true;
+    if (review.objectUrl) URL.revokeObjectURL(review.objectUrl);
+    review.objectUrl = null;
+    Array.from(review.listEl ? review.listEl.children : []).forEach((item, itemIndex) => {
+      item.classList.toggle("is-active", itemIndex === index);
+    });
+    const name = String(image.file_name || "image").split("/").pop();
+    if (review.labelEl) {
+      review.labelEl.textContent = `${cleanMessage(name)} · ${image.width}×${image.height} · ${image.annotations.length} existing label${image.annotations.length === 1 ? "" : "s"}`;
+    }
+    reviewStatus("Loading image…", "busy");
+    try {
+      const path = `/v1/datasets/${encodeURIComponent(review.dataset.version_id)}/images/${encodeURIComponent(image.image_id)}/file`;
+      const response = await fetch(path, { headers: tenantHeaders(false) });
+      if (!response.ok) throw new Error(`Image request failed (${response.status})`);
+      const blob = await response.blob();
+      if (!review.open || review.index !== index) return;
+      review.objectUrl = URL.createObjectURL(blob);
+      await new Promise((resolve, reject) => {
+        review.imageEl.onload = resolve;
+        review.imageEl.onerror = () => reject(new Error("Could not display this image"));
+        review.imageEl.src = review.objectUrl;
+      });
+      if (!review.open || review.index !== index) return;
+      drawReviewOverlay();
+      openReviewSocket();
+    } catch (err) {
+      reviewStatus(cleanMessage(err.message || err), "error");
+    }
+  }
+
+  function openReviewSocket() {
+    const review = state.review;
+    if (!review.open || !review.image) return;
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const path = `/v1/refinement/${encodeURIComponent(review.dataset.version_id)}/${encodeURIComponent(review.image.image_id)}?tenant_id=${encodeURIComponent(DEFAULT_TENANT)}`;
+    const socket = new WebSocket(`${protocol}//${window.location.host}${path}`);
+    review.socket = socket;
+    reviewStatus("Connecting to the refinement service…", "busy");
+    socket.addEventListener("open", () => {
+      if (review.socket !== socket) return;
+      reviewStatus("Click the object to preview a corrected mask.", "busy");
+    });
+    socket.addEventListener("message", (event) => {
+      if (review.socket !== socket) return;
+      let message = null;
+      try { message = JSON.parse(event.data); } catch { return; }
+      if (message.type === "error") {
+        reviewStatus(cleanMessage(message.detail || "Refinement failed"), "error");
+        return;
+      }
+      if (message.type !== "snapshot") return;
+      review.snapshot = message;
+      const hasMask = !!(message.predictions && message.predictions.length);
+      if (review.save) review.save.disabled = !hasMask;
+      drawReviewOverlay();
+      if (hasMask) {
+        reviewStatus("Mask preview ready. Accept it or add another point.", "ok");
+      } else if (!message.revision) {
+        reviewStatus("Click the object to preview a corrected mask.", "busy");
+      } else {
+        reviewStatus("No mask found at that point. Try another point.", "error");
+      }
+    });
+    socket.addEventListener("close", () => {
+      if (review.socket !== socket) return;
+      review.socket = null;
+      if (review.open) {
+        reviewStatus("Refinement connection closed. Select the image again to reconnect.", "error");
+      }
+    });
+  }
+
+  function drawReviewOverlay() {
+    const review = state.review;
+    const canvas = review.canvas;
+    const imageEl = review.imageEl;
+    if (!canvas || !imageEl || !imageEl.complete || !imageEl.naturalWidth) return;
+    const width = imageEl.naturalWidth;
+    const height = imageEl.naturalHeight;
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, width, height);
+
+    const drawPolygons = (segmentation, fill, stroke) => {
+      (segmentation || []).forEach((coords) => {
+        if (!coords || coords.length < 6) return;
+        ctx.beginPath();
+        ctx.moveTo(coords[0], coords[1]);
+        for (let i = 2; i + 1 < coords.length; i += 2) ctx.lineTo(coords[i], coords[i + 1]);
+        ctx.closePath();
+        ctx.fillStyle = fill;
+        ctx.fill();
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = Math.max(1, width / 500);
+        ctx.stroke();
+      });
+    };
+
+    (review.image && review.image.annotations ? review.image.annotations : []).forEach((annotation) => {
+      drawPolygons(annotation.segmentation, "rgba(24,182,196,0.18)", "rgba(95,211,222,0.85)");
+    });
+
+    const prediction = review.snapshot && review.snapshot.predictions
+      ? review.snapshot.predictions[0]
+      : null;
+    if (prediction && prediction.mask && prediction.mask.length) {
+      const maskCanvas = document.createElement("canvas");
+      maskCanvas.width = prediction.mask[0].length;
+      maskCanvas.height = prediction.mask.length;
+      const maskCtx = maskCanvas.getContext("2d");
+      const pixels = maskCtx.createImageData(maskCanvas.width, maskCanvas.height);
+      for (let y = 0; y < maskCanvas.height; y += 1) {
+        for (let x = 0; x < maskCanvas.width; x += 1) {
+          if (!prediction.mask[y][x]) continue;
+          const offset = (y * maskCanvas.width + x) * 4;
+          pixels.data[offset] = 63;
+          pixels.data[offset + 1] = 185;
+          pixels.data[offset + 2] = 80;
+          pixels.data[offset + 3] = 140;
+        }
+      }
+      maskCtx.putImageData(pixels, 0, 0);
+      ctx.drawImage(maskCanvas, 0, 0, width, height);
+      if (prediction.box) {
+        const [x1, y1, x2, y2] = prediction.box;
+        ctx.strokeStyle = "rgba(63,185,80,0.95)";
+        ctx.lineWidth = Math.max(2, width / 300);
+        ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+      }
+    }
+  }
+
+  function handleReviewCanvasClick(event) {
+    const review = state.review;
+    if (!review.open || !review.snapshot || !review.socket || review.socket.readyState !== WebSocket.OPEN) return;
+    const rect = review.canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const x = (event.clientX - rect.left) * (review.canvas.width / rect.width);
+    const y = (event.clientY - rect.top) * (review.canvas.height / rect.height);
+    review.socket.send(JSON.stringify({
+      type: "click",
+      expected_revision: review.snapshot.revision,
+      x,
+      y,
+      label: review.mode,
+    }));
+    if (review.save) review.save.disabled = true;
+    reviewStatus("Finding the best mask for that point…", "busy");
+  }
+
+  async function acceptReview() {
+    const review = state.review;
+    const snapshot = review.snapshot;
+    if (!review.open || !snapshot || !snapshot.predictions || !snapshot.predictions.length) return;
+    const dataset = review.dataset;
+    const image = review.image;
+    const save = review.save;
+    setBusy(save, true, "Saving…");
+    reviewStatus("Saving the annotation revision…", "busy");
+    try {
+      const existing = image.annotations && image.annotations.length ? image.annotations[0] : null;
+      const accepted = await request(
+        `/v1/refinements/${encodeURIComponent(snapshot.session_id)}/accept`,
+        {
+          method: "POST",
+          headers: tenantHeaders(true),
+          body: JSON.stringify({
+            annotation_id: existing ? existing.annotation_id : null,
+            prediction_index: 0,
+            refinement_revision: snapshot.revision,
+          }),
+        }
+      );
+      reviewStatus(`Revision ${accepted.revision} saved. Building an updated dataset…`, "busy");
+      const rebuilt = await request(
+        `/v1/datasets/${encodeURIComponent(dataset.version_id)}/rebuild`,
+        {
+          method: "POST",
+          headers: tenantHeaders(true),
+          body: JSON.stringify({
+            name: `${dataset.name || "Dataset"} — refined`,
+            idempotency_key: `ui-refine-${dataset.version_id}-${accepted.revision}-${snapshot.session_id}`,
+          }),
+        }
+      );
+      closeReview();
+      await loadDatasets();
+      setStatus(
+        "datasets-status",
+        `Correction saved as revision ${accepted.revision}. Updated dataset version is ready to export.`,
+        "ok"
+      );
+    } catch (err) {
+      reviewStatus(cleanMessage(err.message || err), "error");
+    } finally {
+      setBusy(save, false);
+    }
+  }
+
   async function loadDatasets() {
+    closeReview();
     const list = $("datasets-list");
     const meta = $("datasets-meta");
     if (!list) return;
@@ -1164,6 +1530,10 @@
       node("p", "dataset-meta", `${dataset.image_count} image${dataset.image_count === 1 ? "" : "s"} · ${dataset.annotation_count} annotation${dataset.annotation_count === 1 ? "" : "s"} · ${formatDate(dataset.created_at)}`)
     );
     const actions = node("div", "actions");
+    const reviewButton = node("button", "btn btn-secondary btn-small", "Review labels");
+    reviewButton.type = "button";
+    reviewButton.addEventListener("click", () => openDatasetReview(dataset, card));
+    actions.appendChild(reviewButton);
     const exportButton = node("button", "btn btn-secondary btn-small", "Export COCO");
     exportButton.type = "button";
     exportButton.disabled = !dataset.annotation_count;
@@ -1182,6 +1552,10 @@
     const status = node("div", "status");
     status.dataset.datasetStatus = "true";
     card.appendChild(status);
+    const reviewPanel = node("div", "review-panel");
+    reviewPanel.dataset.reviewPanel = "true";
+    reviewPanel.hidden = true;
+    card.appendChild(reviewPanel);
     return card;
   }
 
