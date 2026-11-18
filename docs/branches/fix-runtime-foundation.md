@@ -57,7 +57,7 @@ Ollama was not running during the check; that is an environment issue, not a cod
 - `uv sync --extra ml` selects PyPI wheels. Windows CUDA users must install the `+cu124` wheels explicitly (documented in the root README).
 - Ollama is still required for the future agent/VLM phases; P0 only diagnoses it.
 - No agent chat, label execution, dataset builder, export download, or refinement UI exists yet.
-- Repository hygiene (merge to `main`, default branch, branch pruning) is **proposed and waiting for owner approval**.
+- Repository hygiene: owner approved option A. `main` was fast-forwarded to `2855e2b` and 41 merged feature branches were pruned. The GitHub **default branch is still `feature/platform-foundation-contracts`** and must be changed to `main` manually (no `gh`/token available here). See `docs/REPO_HYGIENE.md`.
 
 ## Next boundary
 
