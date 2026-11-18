@@ -260,6 +260,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
             search=semantic_search,
             sub_assets=sub_assets,
             indexer=semantic_indexer,
+            registry=registry,
             authorizer=authorizer,
         )).router
     )

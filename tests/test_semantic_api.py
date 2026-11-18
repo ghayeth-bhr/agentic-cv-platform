@@ -34,8 +34,9 @@ def test_search_returns_safe_metadata_without_local_paths(tmp_path):
     response = client.post("/v1/search", json={"query": "bear", "asset_ids": ["asset-a"]})
 
     assert response.status_code == 200
-    assert response.json()["results"] == [{"record_id": "frame-1", "asset_id": "asset-a", "score": 0.95}]
+    assert response.json()["results"] == [{"record_id": "frame-1", "asset_id": "asset-a", "score": 0.95, "image_url": None}]
     assert "secret" not in response.text
+    assert "image_path" not in response.text
     store.close()
 
 

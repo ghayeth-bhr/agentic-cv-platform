@@ -92,6 +92,16 @@ class PgVectorIndex:
                 self._connection.rollback()
                 raise
 
+    def get_record(self, record_id: str) -> ImageRecord | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT record_id, asset_id::text AS asset_id, image_path FROM vector_records WHERE record_id = %s",
+                (record_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return ImageRecord(record_id=row["record_id"], asset_id=str(row["asset_id"]), image_path=Path(row["image_path"]))
+
     def search(
         self,
         query_embedding: Sequence[float],
