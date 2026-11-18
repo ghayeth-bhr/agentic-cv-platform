@@ -20,6 +20,7 @@ def _utc_now() -> datetime:
 @dataclass(frozen=True, kw_only=True)
 class OutboxRecord:
     event_id: UUID
+    sequence: int
     event_type: str
     tenant_id: UUID
     aggregate_type: str
@@ -42,6 +43,7 @@ class Outbox:
             """
             CREATE TABLE IF NOT EXISTS outbox_events (
                 event_id TEXT PRIMARY KEY,
+                sequence INTEGER NOT NULL,
                 event_type TEXT NOT NULL,
                 tenant_id TEXT NOT NULL,
                 aggregate_type TEXT NOT NULL,
@@ -57,7 +59,19 @@ class Outbox:
             )
             """
         )
+        self._ensure_sequence_column()
         self._connection.commit()
+
+    def _ensure_sequence_column(self) -> None:
+        """Backfill insertion order for outboxes created before the column existed."""
+        columns = {
+            row["name"]
+            for row in self._connection.execute("PRAGMA table_info(outbox_events)")
+        }
+        if "sequence" in columns:
+            return
+        self._connection.execute("ALTER TABLE outbox_events ADD COLUMN sequence INTEGER")
+        self._connection.execute("UPDATE outbox_events SET sequence = rowid")
 
     def close(self) -> None:
         with self._lock:
@@ -78,16 +92,19 @@ class Outbox:
                 ).fetchone()
             if existing is not None:
                 return self._record(existing)
+            sequence = self._connection.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM outbox_events"
+            ).fetchone()[0]
             self._connection.execute(
                 """
                 INSERT INTO outbox_events (
-                    event_id, event_type, tenant_id, aggregate_type, aggregate_id,
+                    event_id, sequence, event_type, tenant_id, aggregate_type, aggregate_id,
                     payload, idempotency_key, attempts, last_error, occurred_at,
                     published_at, next_attempt_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, ?)
                 """,
                 (
-                    str(event.event_id), event.event_type, str(event.tenant_id),
+                    str(event.event_id), sequence, event.event_type, str(event.tenant_id),
                     event.aggregate_type, str(event.aggregate_id), json.dumps(value["payload"], sort_keys=True),
                     event.idempotency_key, event.occurred_at.isoformat(), now,
                 ),
@@ -112,7 +129,7 @@ class Outbox:
                 """
                 SELECT * FROM outbox_events
                 WHERE published_at IS NULL AND next_attempt_at <= ?
-                ORDER BY occurred_at, event_id LIMIT ?
+                ORDER BY occurred_at, sequence LIMIT ?
                 """,
                 (_utc_now().isoformat(), limit),
             ).fetchall()
@@ -154,7 +171,7 @@ class Outbox:
     @staticmethod
     def _record(row: sqlite3.Row) -> OutboxRecord:
         return OutboxRecord(
-            event_id=UUID(row["event_id"]), event_type=row["event_type"],
+            event_id=UUID(row["event_id"]), sequence=row["sequence"], event_type=row["event_type"],
             tenant_id=UUID(row["tenant_id"]), aggregate_type=row["aggregate_type"],
             aggregate_id=UUID(row["aggregate_id"]), payload=json.loads(row["payload"]),
             idempotency_key=row["idempotency_key"], attempts=row["attempts"],
