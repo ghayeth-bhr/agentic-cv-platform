@@ -16,6 +16,15 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from .agent import (
+    AgentService,
+    AgentServiceDependencies,
+    TaskPlanner,
+    planner_from_environment,
+)
+from .agent_api import AgentApiDependencies, create_app as create_agent_app
+from .agent_store import AgentSessionBackend, AgentSessionStore
+from .agent_worker import AgentWorker
 from .api import ApiDependencies, CalibrationApiDependencies, DatasetApiDependencies, ExportApiDependencies, LabelApiDependencies, create_app as create_core_app
 from .observability import collect_metrics
 from .annotation_store import AnnotationRevisionBackend, AnnotationRevisionStore
@@ -63,6 +72,8 @@ class LocalAppConfig:
     embedding_provider: EmbeddingProvider | None = None
     sam3_provider: Sam3Provider | None = None
     postgres: PostgresConfig | None = None
+    agent_planner: TaskPlanner | None = None
+    calibration_timeout_sec: float = 120.0
     start_workers: bool = True
     worker_poll_interval: float = 0.25
 
@@ -89,9 +100,16 @@ class LocalAppConfig:
         event_publisher = None
         if os.getenv("AGENTIC_CV_RABBITMQ_HOST"):
             event_publisher = RabbitMqPublisher(RabbitMqConfig.from_environment())
+        try:
+            calibration_timeout = float(
+                os.getenv("AGENTIC_CV_CALIBRATION_TIMEOUT_SEC", "120")
+            )
+        except ValueError:
+            calibration_timeout = 120.0
         return cls(
             data_dir=data_dir, authorizer=authorizer, object_storage=object_storage,
             event_publisher=event_publisher, postgres=PostgresConfig.from_environment(),
+            calibration_timeout_sec=calibration_timeout,
         )
 
 
@@ -107,11 +125,13 @@ class LocalAppResources:
     vector_index: VectorIndex
     embedding_provider: EmbeddingProvider
     sam3_provider: Sam3Provider
+    agent_sessions: AgentSessionBackend
     outbox_dispatcher: OutboxDispatcher | None = None
 
     def close(self) -> None:
         for resource in (
             self.registry, self.outbox, self.versions, self.jobs, self.preview, self.sub_assets, self.annotations,
+            self.agent_sessions,
         ):
             resource.close()
         for component in (self.vector_index, self.embedding_provider, self.sam3_provider):
@@ -153,6 +173,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
         jobs = open_postgres_job_store(config.postgres)
     else:
         jobs = JobStore(str(metadata_dir / "jobs.sqlite3"))
+    agent_sessions = AgentSessionStore(str(metadata_dir / "agent-sessions.sqlite3"))
     if config.postgres is not None:
         from .postgres_preview import open_postgres_preview_store
 
@@ -195,6 +216,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
         registry=registry, outbox=outbox, versions=versions, jobs=jobs, preview=preview,
         sub_assets=sub_assets, annotations=annotations, vector_index=vector_index,
         embedding_provider=embedding_provider, sam3_provider=sam3_provider,
+        agent_sessions=agent_sessions,
     )
     export_service = DatasetExportService(versions, config.data_dir / "exports")
     export_workflow = DatasetExportWorkflow(
@@ -220,6 +242,21 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
         images_root=config.data_dir / "dataset-images",
     )
     export_worker = DatasetExportWorker(jobs=jobs, workflow=export_workflow)
+    agent_service = AgentService(
+        AgentServiceDependencies(
+            store=agent_sessions,
+            registry=registry,
+            labels=label_workflow,
+            jobs=jobs,
+            dataset_builder=dataset_builder,
+            export_workflow=export_workflow,
+            images=label_images,
+            sam3_provider=sam3_provider,
+            planner=config.agent_planner or planner_from_environment(),
+            calibration_timeout_sec=config.calibration_timeout_sec,
+        )
+    )
+    agent_worker = AgentWorker(service=agent_service)
     outbox_dispatcher = (
         OutboxDispatcher(outbox=outbox, publisher=config.event_publisher)
         if config.event_publisher is not None
@@ -239,6 +276,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
                     (label_worker.run_forever, "label-worker"),
                     (index_worker.run_forever, "index-worker"),
                     (export_worker.run_forever, "export-worker"),
+                    (agent_worker.run_forever, "agent-worker"),
                 ):
                     thread = Thread(
                         target=target,
@@ -325,6 +363,11 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
             authorizer=authorizer,
         )).router
     )
+    app.include_router(
+        create_agent_app(
+            AgentApiDependencies(service=agent_service, authorizer=authorizer)
+        ).router
+    )
     app.include_router(create_preview_app(PreviewApiDependencies(store=preview, authorizer=authorizer)).router)
     app.include_router(create_sam3_app(sam3_provider).router)
 
@@ -349,6 +392,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
                 "labels": "/v1/label-jobs",
                 "calibration": "/v1/calibration/run",
                 "orchestrate": "/v1/orchestrate",
+                "agent": "/v1/agent/sessions",
                 "sam3": "/v1/predict",
                 "asset_predict": "/v1/assets/{asset_id}/predict",
             },

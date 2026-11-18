@@ -154,14 +154,67 @@
       </section>
 
       <section id="view-agent" class="view" aria-labelledby="agent-heading" hidden>
-        <div class="card empty-state-card">
-          <p class="view-eyebrow">Next phase</p>
-          <h2 id="agent-heading" class="card-title">Agent</h2>
-          <p class="card-desc">The chat that turns a task into a calibrated labeling run is being wired in the next phase. Assets, indexing, and search are ready for it.</p>
-          <div class="agent-preview" aria-hidden="true">
-            <div class="agent-bubble">Create a segmentation dataset of workers wearing yellow vests.</div>
-            <div class="agent-bubble agent-bubble-reply">The agent will confirm the task, calibrate the prompt on a sample, then label the selected assets and package a dataset.</div>
-          </div>
+        <div class="agent-layout">
+          <section class="agent-chat card" aria-labelledby="agent-heading">
+            <div class="agent-chat-head">
+              <div>
+                <p class="view-eyebrow">Conversation</p>
+                <h2 id="agent-heading" class="card-title">Describe the dataset you need</h2>
+                <p class="card-desc">Pick an asset and describe what to label. The agent plans the task, asks you to confirm it, calibrates on a sample, then labels the whole asset and packages a dataset.</p>
+              </div>
+              <button type="button" class="btn btn-ghost" id="agent-new">New task</button>
+            </div>
+
+            <div id="agent-messages" class="agent-messages" aria-live="polite">
+              <div class="agent-empty-chat" id="agent-empty-chat">
+                Start with a task such as “Create a segmentation dataset of workers wearing yellow vests.”
+              </div>
+            </div>
+
+            <div class="agent-compose">
+              <label class="field">
+                <span>Asset</span>
+                <select id="agent-asset"></select>
+              </label>
+              <label class="field">
+                <span>Task</span>
+                <textarea id="agent-message" rows="3" placeholder="e.g. Create a segmentation dataset of workers wearing yellow vests."></textarea>
+              </label>
+              <div class="actions">
+                <button type="button" class="btn btn-primary" id="agent-plan">Plan task</button>
+              </div>
+              <div id="agent-status" class="status" role="status" aria-live="polite"></div>
+            </div>
+          </section>
+
+          <aside class="agent-run card" aria-live="polite">
+            <div class="detail-placeholder" id="agent-run-empty">
+              <div class="detail-placeholder-mark" aria-hidden="true">02</div>
+              <h2>No active run</h2>
+              <p>Plan a task to see the confirmed specification, calibration, labeling progress, and the downloadable dataset.</p>
+            </div>
+
+            <div id="agent-run-content" hidden>
+              <div class="agent-run-head">
+                <div>
+                  <p class="view-eyebrow">Run</p>
+                  <h2 id="agent-run-title" class="card-title">Task plan</h2>
+                </div>
+                <span id="agent-run-pill" class="status-pill">planning</span>
+              </div>
+
+              <div id="agent-spec" class="agent-spec"></div>
+              <ol id="agent-progress" class="agent-progress"></ol>
+              <div id="agent-run-error" class="agent-error" hidden></div>
+
+              <div class="agent-run-actions">
+                <button type="button" class="btn btn-primary" id="agent-confirm">Confirm and calibrate</button>
+                <button type="button" class="btn btn-secondary" id="agent-retry" hidden>Run at 0.50</button>
+                <button type="button" class="btn btn-ghost" id="agent-cancel" hidden>Cancel run</button>
+                <a class="btn btn-primary" id="agent-download" href="#" hidden>Download dataset</a>
+              </div>
+            </div>
+          </aside>
         </div>
       </section>
 

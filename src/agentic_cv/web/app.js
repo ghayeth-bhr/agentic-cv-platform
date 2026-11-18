@@ -14,7 +14,7 @@
     },
     agent: {
       title: "Agent",
-      eyebrow: "Next phase",
+      eyebrow: "Workspace",
       desc: "Turn a natural-language task into a calibrated, whole-asset labeling run.",
     },
     datasets: {
@@ -36,6 +36,8 @@
     searchPayload: null,
     searchResults: [],
     uploadFiles: [],
+    agentSession: null,
+    agentPollToken: 0,
   };
 
   function tenantHeaders(json) {
@@ -110,6 +112,30 @@
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  async function downloadWithTenant(path, filename) {
+    const response = await fetch(path, { headers: tenantHeaders(false) });
+    if (!response.ok) {
+      const text = await response.text();
+      let detail = `Download failed (${response.status})`;
+      try {
+        const body = text ? JSON.parse(text) : null;
+        if (body && (body.detail || body.message)) detail = body.detail || body.message;
+      } catch {
+        if (text) detail = text;
+      }
+      throw new Error(cleanMessage(detail));
+    }
+    const blob = await response.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.download = filename || "dataset.zip";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 2000);
+  }
+
   // Navigation
   function showView(name) {
     const meta = VIEW_META[name] || VIEW_META.assets;
@@ -127,6 +153,7 @@
     if ($("view-eyebrow")) $("view-eyebrow").textContent = meta.eyebrow;
     if ($("view-desc")) $("view-desc").textContent = meta.desc;
     if (name === "assets") loadAssets();
+    if (name === "agent") initAgentView();
     if (name === "datasets") loadDatasets();
     if (name === "jobs") loadJobs();
   }
@@ -672,6 +699,434 @@
     }
   });
 
+  // Agent
+  const AGENT_SESSION_KEY = "agentic-cv-agent-session";
+  const AGENT_ACTIVE = new Set(["calibrating", "labeling", "exporting"]);
+  const AGENT_STATUS_LABEL = {
+    awaiting_confirmation: "Awaiting confirmation",
+    calibrating: "Calibrating",
+    needs_attention: "Needs attention",
+    labeling: "Labeling",
+    exporting: "Packaging dataset",
+    complete: "Dataset ready",
+    failed: "Failed",
+    cancelled: "Cancelled",
+  };
+
+  function agentStatusLabel(status) {
+    return AGENT_STATUS_LABEL[status] || status || "Planning";
+  }
+
+  function agentPillStatus(status) {
+    if (status === "complete") return "succeeded";
+    if (status === "failed" || status === "cancelled" || status === "needs_attention") return "failed";
+    if (AGENT_ACTIVE.has(status)) return "running";
+    return status;
+  }
+
+  function renderAgentAssets(session) {
+    const select = $("agent-asset");
+    if (!select) return;
+    const previous = select.value
+      || (session && session.asset_id)
+      || (state.selectedAsset && state.selectedAsset.asset_id)
+      || "";
+    select.innerHTML = "";
+    if (!state.assets.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "No assets yet — upload media first";
+      select.appendChild(option);
+      select.disabled = true;
+    } else {
+      state.assets.forEach((asset) => {
+        const option = document.createElement("option");
+        option.value = String(asset.asset_id);
+        const count = (asset.sources || []).length;
+        option.textContent = `${assetName(asset)} · ${count} source${count === 1 ? "" : "s"}`;
+        select.appendChild(option);
+      });
+      if (previous) {
+        const match = state.assets.find((asset) => String(asset.asset_id) === String(previous));
+        if (match) select.value = String(match.asset_id);
+      }
+      select.disabled = !!session;
+    }
+    if ($("agent-message")) $("agent-message").disabled = !!session;
+    if ($("agent-plan")) $("agent-plan").disabled = !!session || !state.assets.length;
+  }
+
+  function renderAgentMessages(session) {
+    const list = $("agent-messages");
+    if (!list) return;
+    list.innerHTML = "";
+    if (!session || !session.messages || !session.messages.length) {
+      const empty = node("div", "agent-empty-chat");
+      empty.textContent = "Start with a task such as “Create a segmentation dataset of workers wearing yellow vests.”";
+      list.appendChild(empty);
+      return;
+    }
+    session.messages.forEach((message) => {
+      const row = node("div", `agent-message agent-message-${message.role === "user" ? "user" : "agent"}`);
+      const bubble = node("div", "agent-bubble", cleanMessage(message.content));
+      row.append(node("div", "agent-message-role", message.role === "user" ? "You" : "Agent"), bubble);
+      list.appendChild(row);
+    });
+    list.scrollTop = list.scrollHeight;
+  }
+
+  function agentSpecRow(term, value) {
+    const dt = node("dt", null, term);
+    const dd = node("dd", null, value);
+    return [dt, dd];
+  }
+
+  function renderAgentSpec(session) {
+    const box = $("agent-spec");
+    if (!box) return;
+    box.innerHTML = "";
+    const spec = session && session.spec;
+    if (!spec) return;
+    const grid = node("dl", "agent-spec-grid");
+    const prompt = session.prompt || (spec.target_objects || []).join(" and ");
+    [
+      ["Task", spec.task_type],
+      ["Prompt", prompt],
+      ["Calibration", `${spec.sample_size} sample image${spec.sample_size === 1 ? "" : "s"} · ${spec.max_iterations} attempt${spec.max_iterations === 1 ? "" : "s"}`],
+      ["Asset", session.asset_name],
+      ["Planner", session.planner_mode === "ollama" ? "Local model" : "Local rules"],
+    ].forEach(([term, value]) => {
+      const [dt, dd] = agentSpecRow(term, value);
+      grid.append(dt, dd);
+    });
+    box.appendChild(grid);
+    if (session.planner_note) {
+      box.appendChild(node("p", "agent-note", cleanMessage(session.planner_note)));
+    }
+  }
+
+  function agentStep(title, detail, state) {
+    const row = node("li", "agent-step");
+    row.dataset.state = state;
+    const mark = node("span", "agent-step-mark", state === "done" ? "✓" : state === "error" ? "!" : state === "active" ? "•" : "");
+    const text = node("div", "agent-step-text");
+    text.append(node("strong", null, title), node("span", null, detail));
+    row.append(mark, text);
+    return row;
+  }
+
+  function renderAgentProgress(session) {
+    const list = $("agent-progress");
+    if (!list) return;
+    list.innerHTML = "";
+    const hasSpec = !!session.spec;
+    list.appendChild(agentStep("Task plan", hasSpec ? "Specification ready" : "Waiting for a task", hasSpec ? "done" : "pending"));
+
+    let calibrationState = "pending";
+    let calibrationDetail = "Runs after confirmation";
+    if (session.status === "needs_attention") {
+      calibrationState = "error";
+      calibrationDetail = "No threshold met the sample agreement";
+    } else if (session.status === "failed" && !session.threshold) {
+      calibrationState = "error";
+      calibrationDetail = cleanMessage(session.error || "Calibration stopped");
+    } else if (session.threshold != null) {
+      calibrationState = "done";
+      calibrationDetail = `Threshold ${Number(session.threshold).toFixed(2)}`;
+    } else if (session.status === "calibrating") {
+      calibrationState = "active";
+      calibrationDetail = "Testing thresholds on a sample";
+    }
+    list.appendChild(agentStep("Calibration", calibrationDetail, calibrationState));
+
+    let labelState = "pending";
+    let labelDetail = "Starts after confirmation";
+    const labelStatus = session.label_status;
+    if (labelStatus === "succeeded") {
+      labelState = "done";
+      labelDetail = "Whole-asset labeling finished";
+    } else if (labelStatus === "failed") {
+      labelState = "error";
+      labelDetail = "Labeling failed";
+    } else if (labelStatus === "cancelled") {
+      labelState = "error";
+      labelDetail = "Labeling cancelled";
+    } else if (labelStatus === "queued" || labelStatus === "running") {
+      labelState = "active";
+      labelDetail = labelStatus === "queued" ? "Queued for the label worker" : "Labeling images in the background";
+    } else if (session.status === "calibrating") {
+      labelDetail = "Starts after calibration";
+    }
+    list.appendChild(agentStep("Whole-asset labeling", labelDetail, labelState));
+
+    const datasetState = session.dataset ? "done" : session.status === "exporting" ? "active" : "pending";
+    const datasetDetail = session.dataset
+      ? `${session.dataset.image_count} image${session.dataset.image_count === 1 ? "" : "s"} · ${session.dataset.annotation_count} annotation${session.dataset.annotation_count === 1 ? "" : "s"}`
+      : session.status === "exporting" ? "Building from label revisions" : "Builds from the latest annotations";
+    list.appendChild(agentStep("Dataset version", datasetDetail, datasetState));
+
+    let exportState = "pending";
+    let exportDetail = "Runs after the dataset is built";
+    if (session.export_status === "succeeded") {
+      exportState = "done";
+      exportDetail = "COCO archive ready to download";
+    } else if (session.export_status === "failed") {
+      exportState = "error";
+      exportDetail = "Export failed";
+    } else if (session.export_status === "cancelled") {
+      exportState = "error";
+      exportDetail = "Export cancelled";
+    } else if (session.export_status === "queued" || session.export_status === "running") {
+      exportState = "active";
+      exportDetail = "Packaging the COCO archive";
+    }
+    list.appendChild(agentStep("Download package", exportDetail, exportState));
+  }
+
+  function applyAgentSession(session) {
+    state.agentSession = session;
+    try { localStorage.setItem(AGENT_SESSION_KEY, String(session.session_id)); } catch { /* local storage is optional */ }
+    const empty = $("agent-run-empty");
+    const content = $("agent-run-content");
+    if (empty) empty.hidden = true;
+    if (content) content.hidden = false;
+    renderAgentAssets(session);
+    renderAgentMessages(session);
+    renderAgentSpec(session);
+    renderAgentProgress(session);
+
+    if ($("agent-run-title")) $("agent-run-title").textContent = session.prompt || session.asset_name || "Task plan";
+    const pill = $("agent-run-pill");
+    if (pill) {
+      pill.textContent = agentStatusLabel(session.status);
+      pill.dataset.status = agentPillStatus(session.status);
+    }
+
+    const confirm = $("agent-confirm");
+    if (confirm) {
+      confirm.hidden = session.status !== "awaiting_confirmation";
+      confirm.disabled = false;
+    }
+    const retry = $("agent-retry");
+    if (retry) {
+      retry.hidden = session.status !== "needs_attention";
+      retry.disabled = false;
+    }
+    const cancel = $("agent-cancel");
+    if (cancel) {
+      const cancellable = !["complete", "failed", "cancelled"].includes(session.status);
+      cancel.hidden = !cancellable;
+      cancel.disabled = false;
+    }
+    const download = $("agent-download");
+    if (download) {
+      const ready = !!session.download_path;
+      download.hidden = !ready;
+      if (ready) download.href = session.download_path;
+      else download.removeAttribute("href");
+    }
+
+    const error = $("agent-run-error");
+    if (error) {
+      error.hidden = !session.error;
+      error.textContent = session.error ? cleanMessage(session.error) : "";
+    }
+
+    const label = agentStatusLabel(session.status);
+    if (session.error) setStatus("agent-status", cleanMessage(session.error), "error");
+    else if (session.status === "complete") setStatus("agent-status", "Dataset ready. Download the COCO archive from the run panel.", "ok");
+    else if (AGENT_ACTIVE.has(session.status)) setStatus("agent-status", `${label}…`, "busy");
+    else if (session.status === "needs_attention") setStatus("agent-status", "Calibration needs attention. Retry at 0.50 or start a new task.", "error");
+    else if (session.status === "awaiting_confirmation") setStatus("agent-status", "Task planned. Confirm the specification to start.", "ok");
+    else if (session.status === "cancelled") setStatus("agent-status", "Run cancelled.", "error");
+  }
+
+  function resetAgent() {
+    state.agentPollToken += 1;
+    state.agentSession = null;
+    try { localStorage.removeItem(AGENT_SESSION_KEY); } catch { /* local storage is optional */ }
+    const empty = $("agent-run-empty");
+    const content = $("agent-run-content");
+    if (empty) empty.hidden = false;
+    if (content) content.hidden = true;
+    ["agent-spec", "agent-progress", "agent-run-error"].forEach((id) => {
+      const el = $(id);
+      if (el) { el.innerHTML = ""; if (id === "agent-run-error") el.hidden = true; }
+    });
+    ["agent-confirm", "agent-retry", "agent-cancel", "agent-download"].forEach((id) => {
+      const el = $(id);
+      if (el) el.hidden = true;
+    });
+    renderAgentMessages(null);
+    renderAgentAssets(null);
+    const input = $("agent-message");
+    if (input) input.value = "";
+    setStatus("agent-status", "", "");
+  }
+
+  async function refreshAgentSession() {
+    const session = state.agentSession;
+    if (!session) return;
+    try {
+      const fresh = await request(`/v1/agent/sessions/${encodeURIComponent(session.session_id)}`, {
+        headers: tenantHeaders(false),
+      });
+      applyAgentSession(fresh);
+    } catch (err) {
+      setStatus("agent-status", `Could not refresh the run: ${cleanMessage(err.message || err)}`, "error");
+    }
+  }
+
+  function startAgentPolling() {
+    const token = ++state.agentPollToken;
+    async function tick() {
+      if (token !== state.agentPollToken) return;
+      const session = state.agentSession;
+      if (!session) return;
+      try {
+        const fresh = await request(`/v1/agent/sessions/${encodeURIComponent(session.session_id)}`, {
+          headers: tenantHeaders(false),
+        });
+        if (token !== state.agentPollToken) return;
+        applyAgentSession(fresh);
+        if (AGENT_ACTIVE.has(fresh.status)) setTimeout(tick, 700);
+      } catch (err) {
+        if (token !== state.agentPollToken) return;
+        setStatus("agent-status", `Could not refresh the run: ${cleanMessage(err.message || err)}`, "error");
+        setTimeout(tick, 2000);
+      }
+    }
+    setTimeout(tick, 200);
+  }
+
+  async function restoreAgentSession() {
+    let sessionId = null;
+    try { sessionId = localStorage.getItem(AGENT_SESSION_KEY); } catch { sessionId = null; }
+    if (!sessionId) return;
+    try {
+      const session = await request(`/v1/agent/sessions/${encodeURIComponent(sessionId)}`, {
+        headers: tenantHeaders(false),
+      });
+      applyAgentSession(session);
+      if (AGENT_ACTIVE.has(session.status)) startAgentPolling();
+    } catch {
+      try { localStorage.removeItem(AGENT_SESSION_KEY); } catch { /* local storage is optional */ }
+    }
+  }
+
+  async function initAgentView() {
+    if (!state.assets.length) await loadAssets({ quiet: true });
+    if (state.agentSession) {
+      applyAgentSession(state.agentSession);
+      if (AGENT_ACTIVE.has(state.agentSession.status)) startAgentPolling();
+      return;
+    }
+    renderAgentAssets(null);
+    await restoreAgentSession();
+  }
+
+  async function planAgentTask() {
+    const button = $("agent-plan");
+    const assetId = $("agent-asset") ? $("agent-asset").value : "";
+    const message = (($("agent-message") && $("agent-message").value) || "").trim();
+    if (!assetId) {
+      setStatus("agent-status", "Upload and select an asset before planning a task.", "error");
+      return;
+    }
+    if (!message) {
+      setStatus("agent-status", "Describe what the agent should label.", "error");
+      return;
+    }
+    setBusy(button, true, "Planning…");
+    setStatus("agent-status", "Planning the task…", "busy");
+    try {
+      const session = await request("/v1/agent/sessions", {
+        method: "POST",
+        headers: tenantHeaders(true),
+        body: JSON.stringify({ asset_id: assetId, message }),
+      });
+      applyAgentSession(session);
+      setStatus("agent-status", "Task planned. Confirm the specification to start.", "ok");
+    } catch (err) {
+      setStatus("agent-status", cleanMessage(err.message || err), "error");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function confirmAgentTask(threshold) {
+    const session = state.agentSession;
+    if (!session) return;
+    const button = threshold == null ? $("agent-confirm") : $("agent-retry");
+    const original = button ? button.textContent : "";
+    if (button) {
+      button.disabled = true;
+      button.textContent = threshold == null ? "Calibrating…" : "Starting…";
+    }
+    setStatus(
+      "agent-status",
+      threshold == null ? "Calibrating on a sample. This can take a moment…" : "Starting at the fixed threshold…",
+      "busy",
+    );
+    try {
+      const body = threshold == null ? {} : { threshold };
+      const fresh = await request(`/v1/agent/sessions/${encodeURIComponent(session.session_id)}/confirm`, {
+        method: "POST",
+        headers: tenantHeaders(true),
+        body: JSON.stringify(body),
+      });
+      applyAgentSession(fresh);
+      if (AGENT_ACTIVE.has(fresh.status)) startAgentPolling();
+    } catch (err) {
+      setStatus("agent-status", cleanMessage(err.message || err), "error");
+      await refreshAgentSession();
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = original;
+      }
+    }
+  }
+
+  async function cancelAgentTask() {
+    const session = state.agentSession;
+    if (!session) return;
+    const button = $("agent-cancel");
+    setBusy(button, true, "Cancelling…");
+    try {
+      const fresh = await request(`/v1/agent/sessions/${encodeURIComponent(session.session_id)}/cancel`, {
+        method: "POST",
+        headers: tenantHeaders(false),
+      });
+      state.agentPollToken += 1;
+      applyAgentSession(fresh);
+      setStatus("agent-status", "Run cancelled.", "error");
+    } catch (err) {
+      setStatus("agent-status", cleanMessage(err.message || err), "error");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  if ($("agent-plan")) $("agent-plan").addEventListener("click", planAgentTask);
+  if ($("agent-confirm")) $("agent-confirm").addEventListener("click", () => confirmAgentTask(null));
+  if ($("agent-retry")) $("agent-retry").addEventListener("click", () => confirmAgentTask(0.5));
+  if ($("agent-cancel")) $("agent-cancel").addEventListener("click", cancelAgentTask);
+  if ($("agent-new")) $("agent-new").addEventListener("click", resetAgent);
+  if ($("agent-download")) $("agent-download").addEventListener("click", async (event) => {
+    event.preventDefault();
+    const session = state.agentSession;
+    if (!session || !session.download_path) return;
+    try {
+      const name = ((session.dataset && session.dataset.name) || "dataset")
+        .replace(/[^a-z0-9._-]+/gi, "-");
+      await downloadWithTenant(session.download_path, `${name}.zip`);
+      setStatus("agent-status", "Dataset download started.", "ok");
+    } catch (err) {
+      setStatus("agent-status", cleanMessage(err.message || err), "error");
+    }
+  });
+
   // Datasets
   async function loadDatasets() {
     const list = $("datasets-list");
@@ -686,7 +1141,7 @@
         const empty = node("div", "empty-state");
         empty.append(
           node("strong", null, "No dataset versions yet."),
-          node("p", null, "Create one from a succeeded labeling job. The Agent will do this automatically in the next phase.")
+          node("p", null, "Run the Agent on an asset to build a dataset automatically.")
         );
         list.appendChild(empty);
       } else {
@@ -759,7 +1214,10 @@
           status.textContent = "COCO export ready. Download starting…";
           status.dataset.kind = "ok";
         }
-        window.location.assign(`/v1/dataset-exports/${encodeURIComponent(job.job_id)}/download`);
+        await downloadWithTenant(
+          `/v1/dataset-exports/${encodeURIComponent(job.job_id)}/download`,
+          `${(dataset.name || "dataset").replace(/[^a-z0-9._-]+/gi, "-")}.zip`,
+        );
       } else {
         if (status) {
           status.textContent = `Export ${job.status}${job.error ? `: ${cleanMessage(job.error)}` : ""}`;
