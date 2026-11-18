@@ -4,60 +4,178 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Agentic CV Platform</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand"><span class="brand-mark">CV</span><span>Agentic CV <b>Studio</b></span></div>
-    <div class="runtime"><span class="status-dot"></span><span id="runtime-status">Checking local runtime</span><a href="/docs" target="_blank">API docs</a></div>
-  </header>
+  <div class="app-frame">
+    <header class="masthead">
+      <div class="masthead-brand">
+        <svg class="brand-mark" width="28" height="28" viewBox="0 0 28 28" aria-hidden="true">
+          <rect x="1" y="1" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <rect x="6" y="6" width="7" height="7" fill="currentColor"/>
+          <rect x="15" y="6" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <rect x="6" y="15" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <line x1="15" y1="18.5" x2="22" y2="18.5" stroke="currentColor" stroke-width="1.5"/>
+        </svg>
+        <div>
+          <h1 class="wordmark">Agentic CV Platform</h1>
+          <p class="wordmark-sub">Local vision workbench</p>
+        </div>
+      </div>
+      <div class="masthead-controls">
+        <label class="tenant-field">
+          <span>Tenant</span>
+          <input id="tenant-id" type="text" value="00000000-0000-0000-0000-000000000001" spellcheck="false" autocomplete="off">
+        </label>
+        <div class="runtime-chip" id="runtime-chip" aria-live="polite">
+          <span class="runtime-indicator" id="runtime-indicator"></span>
+          <span id="runtime-status">Checking runtime</span>
+        </div>
+        <a class="text-link" href="/docs" target="_blank" rel="noopener">API reference</a>
+      </div>
+    </header>
 
-  <main class="shell">
-    <section class="intro">
-      <p class="eyebrow">LOCAL-FIRST WORKBENCH</p>
-      <h1>Turn raw frames into <em>training data.</em></h1>
-      <p class="lede">Upload an asset, inspect SAM3 predictions, search your collection, and send a version to export without leaving your local machine.</p>
-    </section>
+    <main class="workbench">
+      <section class="panel panel-ingest" aria-labelledby="ingest-title">
+        <header class="panel-header">
+          <h2 id="ingest-title">Ingest asset</h2>
+          <p>Register an asset and upload an image into tenant storage.</p>
+        </header>
+        <div class="panel-body">
+          <label class="field">
+            <span>Asset name</span>
+            <input id="asset-name" type="text" value="Untitled collection" autocomplete="off">
+          </label>
+          <label class="field">
+            <span>Image file</span>
+            <input id="asset-file" type="file" accept="image/png,image/jpeg,image/webp">
+          </label>
+          <div id="asset-file-info" class="file-info muted">No file selected.</div>
+          <div class="actions">
+            <button id="upload-button" type="button" class="btn btn-primary">Upload asset</button>
+          </div>
+          <div id="upload-status" class="status" role="status" aria-live="polite"></div>
+          <dl id="upload-details" class="detail-list" hidden></dl>
+        </div>
+      </section>
 
-    <section class="workspace-grid">
-      <article class="panel upload-panel">
-        <div class="panel-heading"><div><span class="step">01</span><h2>Bring in an asset</h2></div><span class="panel-icon">↥</span></div>
-        <p class="panel-copy">Create a collection and upload an image or frame.</p>
-        <label>Tenant ID<input id="tenant-id" value="00000000-0000-0000-0000-000000000001"></label>
-        <label>Asset name<input id="asset-name" value="MVP wildlife set"></label>
-        <label class="file-drop"><span class="file-symbol">＋</span><span><b id="file-label">Choose an image</b><small>PNG, JPG, or JPEG</small></span><input id="asset-file" type="file" accept="image/png,image/jpeg"></label>
-        <button id="upload-button" class="primary">Upload asset <span>→</span></button>
-        <p id="upload-status" class="inline-status" aria-live="polite"></p>
-      </article>
+      <section class="panel panel-segment" aria-labelledby="segment-title">
+        <header class="panel-header">
+          <h2 id="segment-title">Segment with SAM3</h2>
+          <p>Run a prompt-guided prediction against a local image.</p>
+        </header>
+        <div class="panel-body">
+          <div class="field-row">
+            <label class="field field-grow">
+              <span>Prompt</span>
+              <input id="predict-prompt" type="text" value="object" autocomplete="off">
+            </label>
+            <label class="field">
+              <span>Score threshold</span>
+              <input id="predict-threshold" type="number" min="0" max="1" step="0.05" placeholder="default">
+            </label>
+          </div>
+          <label class="field">
+            <span>Image file</span>
+            <input id="predict-file" type="file" accept="image/png,image/jpeg,image/webp">
+          </label>
+          <div class="actions">
+            <button id="predict-button" type="button" class="btn btn-primary">Run prediction</button>
+          </div>
+          <div id="predict-status" class="status" role="status" aria-live="polite"></div>
+          <div id="predict-output" class="visual-output" hidden>
+            <div class="canvas-wrap">
+              <canvas id="predict-canvas"></canvas>
+            </div>
+            <div id="predict-summary" class="result-summary"></div>
+            <details class="raw-details">
+              <summary>Raw response</summary>
+              <pre id="predict-raw" class="code-block"></pre>
+            </details>
+          </div>
+        </div>
+      </section>
 
-      <article class="panel inspect-panel">
-        <div class="panel-heading"><div><span class="step">02</span><h2>Inspect with SAM3</h2></div><span class="panel-icon">⌁</span></div>
-        <p class="panel-copy">Send a local image to the segmentation service.</p>
-        <label>Object prompt<input id="predict-prompt" value="person"></label>
-        <label class="file-drop compact"><span class="file-symbol">＋</span><span><b id="predict-file-label">Choose an image</b><small>Prediction input</small></span><input id="predict-file" type="file" accept="image/png,image/jpeg"></label>
-        <button id="predict-button" class="secondary">Run prediction <span>↗</span></button>
-        <div id="predict-result" class="result-box empty">Prediction output will appear here.</div>
-      </article>
-    </section>
+      <section class="panel panel-search" aria-labelledby="search-title">
+        <header class="panel-header">
+          <h2 id="search-title">Semantic search</h2>
+          <p>Query indexed frames by description and scope to assets.</p>
+        </header>
+        <div class="panel-body">
+          <label class="field">
+            <span>Query</span>
+            <input id="search-query" type="text" placeholder="e.g. person carrying a box" autocomplete="off">
+          </label>
+          <div class="field-row">
+            <label class="field field-grow">
+              <span>Asset IDs (comma-separated, optional)</span>
+              <input id="search-assets" type="text" placeholder="asset-id-1, asset-id-2" autocomplete="off">
+            </label>
+            <label class="field">
+              <span>Limit</span>
+              <input id="search-limit" type="number" min="1" value="10">
+            </label>
+          </div>
+          <div class="actions">
+            <button id="search-button" type="button" class="btn btn-primary">Search</button>
+            <button id="subasset-button" type="button" class="btn btn-secondary">Create sub-asset from results</button>
+          </div>
+          <div id="search-status" class="status" role="status" aria-live="polite"></div>
+          <div id="search-results" class="results-area"></div>
+          <div id="subasset-status" class="status" role="status" aria-live="polite"></div>
+        </div>
+      </section>
 
-    <section class="lower-grid">
-      <article class="panel search-panel">
-        <div class="panel-heading"><div><span class="step">03</span><h2>Find similar frames</h2></div><span class="panel-icon">⌕</span></div>
-        <div class="search-row"><input id="search-query" placeholder="e.g. workers near a concrete wall"><button id="search-button" class="icon-button" title="Search">→</button></div>
-        <div id="search-result" class="result-box empty">Semantic results will appear here.</div>
-      </article>
-      <article class="panel export-panel">
-        <div class="panel-heading"><div><span class="step">04</span><h2>Export a version</h2></div><span class="panel-icon">⇩</span></div>
-        <p class="panel-copy">Queue a validated dataset for training.</p>
-        <label>Dataset version ID<input id="version-id" placeholder="UUID from your version store"></label>
-        <div class="split-fields"><label>Format<select id="export-format"><option value="coco">COCO</option><option value="yolo-detection">YOLO detection</option><option value="yolo-segmentation">YOLO segmentation</option></select></label><label>Idempotency key<input id="export-key" value="browser-export-1"></label></div>
-        <button id="export-button" class="secondary">Queue export <span>→</span></button>
-        <p id="export-status" class="inline-status" aria-live="polite"></p>
-      </article>
-    </section>
+      <section class="panel panel-export" aria-labelledby="export-title">
+        <header class="panel-header">
+          <h2 id="export-title">Dataset export</h2>
+          <p>Queue, inspect, or cancel an export job for a dataset version.</p>
+        </header>
+        <div class="panel-body">
+          <label class="field">
+            <span>Dataset version ID</span>
+            <input id="version-id" type="text" placeholder="UUID" spellcheck="false" autocomplete="off">
+          </label>
+          <div class="field-row">
+            <label class="field">
+              <span>Format</span>
+              <select id="export-format">
+                <option value="coco">COCO</option>
+                <option value="yolo-detection">YOLO detection</option>
+                <option value="yolo-segmentation">YOLO segmentation</option>
+              </select>
+            </label>
+            <label class="field field-grow">
+              <span>Idempotency key</span>
+              <input id="export-key" type="text" value="browser-export-1" autocomplete="off">
+            </label>
+          </div>
+          <div class="actions">
+            <button id="export-button" type="button" class="btn btn-primary">Queue export</button>
+          </div>
+          <hr class="divider">
+          <label class="field">
+            <span>Job ID (for status or cancel)</span>
+            <input id="job-id" type="text" placeholder="UUID" spellcheck="false" autocomplete="off">
+          </label>
+          <div class="actions">
+            <button id="job-status-button" type="button" class="btn btn-secondary">Check status</button>
+            <button id="job-cancel-button" type="button" class="btn btn-secondary">Cancel job</button>
+          </div>
+          <div id="export-status" class="status" role="status" aria-live="polite"></div>
+          <dl id="export-details" class="detail-list" hidden></dl>
+        </div>
+      </section>
+    </main>
 
-    <footer><span>Agentic CV Platform</span><span>Local runtime · <a href="/api-info">runtime info</a></span></footer>
-  </main>
+    <footer class="site-footer">
+      <span>Agentic CV Platform</span>
+      <span>Runtime: <a href="/api-info">/api-info</a> · Health: <a href="/health/ready">/health/ready</a></span>
+    </footer>
+  </div>
   <script src="/static/app.js"></script>
 </body>
 </html>
