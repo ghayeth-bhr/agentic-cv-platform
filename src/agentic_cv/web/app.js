@@ -207,7 +207,26 @@
         try { await navigator.clipboard.writeText(String(asset.asset_id)); copyBtn.textContent = "Copied"; setTimeout(() => (copyBtn.textContent = "Copy ID"), 1200); }
         catch { copyBtn.textContent = asset.asset_id; }
       });
-      actions.appendChild(copyBtn);
+      const indexBtn = document.createElement("button");
+      indexBtn.type = "button";
+      indexBtn.className = "btn btn-secondary btn-xs";
+      indexBtn.textContent = "Index for search";
+      indexBtn.addEventListener("click", async () => {
+        setBusy(indexBtn, true);
+        setStatus("gallery-status", `Indexing ${asset.name || "asset"} for semantic search…`, "busy");
+        try {
+          const result = await request(`/v1/assets/${encodeURIComponent(asset.asset_id)}/index`, {
+            method: "POST",
+            headers: { "X-Tenant-ID": tenantId() },
+          });
+          setStatus("gallery-status", result.detail || `Indexed ${result.indexed_records || 0} record(s).`, "ok");
+        } catch (err) {
+          setStatus("gallery-status", err.message || String(err), "error");
+        } finally {
+          setBusy(indexBtn, false);
+        }
+      });
+      actions.append(copyBtn, indexBtn);
 
       body.append(name, meta, id, actions);
       card.append(thumb, body);
@@ -364,9 +383,19 @@
       setStatus("upload-status", "Completing upload…", "busy");
       const source = await request(`/v1/uploads/${upload.upload_id}/complete`, { method: "POST", headers: h });
 
-      setStatus("upload-status", "Upload complete.", "ok");
       renderUploadResult(asset, { filename: file.name, media_type: file.type });
       await loadAssets({ quiet: true });
+
+      setStatus("upload-status", "Upload complete. Indexing for semantic search…", "busy");
+      try {
+        const idx = await request(`/v1/assets/${encodeURIComponent(asset.asset_id)}/index`, {
+          method: "POST",
+          headers: { "X-Tenant-ID": tenantId() },
+        });
+        setStatus("upload-status", `Upload complete. ${idx.detail || "Indexed for search."}`, "ok");
+      } catch (idxErr) {
+        setStatus("upload-status", `Upload complete. Semantic indexing unavailable: ${idxErr.message || idxErr}`, "error");
+      }
     } catch (err) {
       setStatus("upload-status", err.message || String(err), "error");
     } finally {

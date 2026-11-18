@@ -1,4 +1,4 @@
-"""HTTP API for semantic search and logical sub-asset creation."""
+"""HTTP API for semantic search, indexing, and logical sub-asset creation."""
 
 from __future__ import annotations
 
@@ -8,9 +8,10 @@ from uuid import UUID
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
+from .auth import Authorizer
+from .semantic_indexing import AssetIndexResult, AssetSemanticIndexer
 from .semantic_search import SearchResult, SemanticSearchService
 from .sub_assets import SubAssetBackend
-from .auth import Authorizer
 
 
 class SearchRequest(BaseModel):
@@ -36,10 +37,18 @@ class SubAssetResponse(BaseModel):
     result_ids: tuple[str, ...]
 
 
+class IndexAssetResponse(BaseModel):
+    asset_id: UUID
+    indexed_records: int
+    sources_indexed: int
+    detail: str
+
+
 @dataclass(frozen=True, kw_only=True)
 class SemanticApiDependencies:
     search: SemanticSearchService
     sub_assets: SubAssetBackend
+    indexer: AssetSemanticIndexer | None = None
     authorizer: Authorizer | None = None
 
 
@@ -109,6 +118,30 @@ def create_app(dependencies: SemanticApiDependencies) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return _result_response(results)
+
+    @app.post("/v1/assets/{asset_id}/index", response_model=IndexAssetResponse)
+    def index_asset(
+        asset_id: UUID,
+        x_tenant_id: str = Header(...),
+        x_api_key: str | None = Header(None),
+        authorization: str | None = Header(None),
+    ) -> IndexAssetResponse:
+        tenant_id = _tenant(x_tenant_id)
+        _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="assets:write")
+        if dependencies.indexer is None:
+            raise HTTPException(status_code=503, detail="semantic indexing is not configured")
+        try:
+            result = dependencies.indexer.index_asset(tenant_id=tenant_id, asset_id=asset_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return IndexAssetResponse(
+            asset_id=result.asset_id,
+            indexed_records=result.indexed_records,
+            sources_indexed=result.sources_indexed,
+            detail=result.detail,
+        )
 
     @app.post("/v1/sub-assets/from-search", response_model=SubAssetResponse, status_code=201)
     def create_sub_asset(

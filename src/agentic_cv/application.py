@@ -33,12 +33,14 @@ from .orchestrator import TaskOrchestrator
 from .outbox import Outbox, OutboxBackend
 from .outbox_dispatcher import EventPublisher, OutboxDispatcher
 from .postgres import PostgresConfig
+from .persistent_vectors import SqliteVectorIndex
 from .preview import PreviewBackend, PreviewStore
 from .preview_api import PreviewApiDependencies, create_app as create_preview_app
 from .sam3 import LocalSam3Provider, Sam3Config, Sam3Provider
 from .sam3_service import create_app as create_sam3_app
 from .semantic_api import SemanticApiDependencies, create_app as create_semantic_app
-from .semantic_search import EmbeddingProvider, LocalVectorIndex, SemanticSearchService, VectorIndex
+from .semantic_indexing import AssetSemanticIndexer
+from .semantic_search import EmbeddingProvider, SemanticSearchService, VectorIndex
 from .sub_assets import SubAssetBackend, SubAssetStore
 from .uploads import ResumableUploadService
 
@@ -172,7 +174,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
 
         vector_index = open_postgres_vector_index(config.postgres)
     else:
-        vector_index = LocalVectorIndex()
+        vector_index = SqliteVectorIndex(str(metadata_dir / "vectors.sqlite3"))
     resources = LocalAppResources(
         registry=registry, outbox=outbox, versions=versions, jobs=jobs, preview=preview,
         sub_assets=sub_assets, annotations=annotations, vector_index=vector_index,
@@ -249,10 +251,16 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
             orchestrator=TaskOrchestrator(),
         )).router
     )
+    semantic_search = SemanticSearchService(embedding_provider, vector_index)
+    semantic_indexer = AssetSemanticIndexer(
+        registry=registry, search=semantic_search, data_dir=config.data_dir,
+    )
     app.include_router(
         create_semantic_app(SemanticApiDependencies(
-            search=SemanticSearchService(embedding_provider, vector_index),
-            sub_assets=sub_assets, authorizer=authorizer,
+            search=semantic_search,
+            sub_assets=sub_assets,
+            indexer=semantic_indexer,
+            authorizer=authorizer,
         )).router
     )
     app.include_router(create_preview_app(PreviewApiDependencies(store=preview, authorizer=authorizer)).router)
