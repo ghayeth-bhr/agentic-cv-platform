@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api import ApiDependencies, ExportApiDependencies, create_app as create_core_app
-from .asset_registry import AssetRegistry
+from .asset_registry import AssetRegistry, AssetRegistryBackend
 from .auth import Authorizer, OidcJwtAuthorizer, Principal, StaticApiKeyAuthorizer
 from .broker import RabbitMqConfig, RabbitMqPublisher
 from .dataset_export import DatasetExportService
@@ -24,6 +24,7 @@ from .job_store import JobStore
 from .object_storage import LocalObjectStorage, ObjectStorage, S3ObjectStorage
 from .outbox import Outbox
 from .outbox_dispatcher import EventPublisher, OutboxDispatcher
+from .postgres import PostgresConfig
 from .preview import PreviewStore
 from .preview_api import PreviewApiDependencies, create_app as create_preview_app
 from .sam3 import LocalSam3Provider, Sam3Config, Sam3Provider
@@ -43,6 +44,7 @@ class LocalAppConfig:
     event_publisher: EventPublisher | None = None
     embedding_provider: EmbeddingProvider | None = None
     sam3_provider: Sam3Provider | None = None
+    postgres: PostgresConfig | None = None
 
     @classmethod
     def from_environment(cls, data_dir: Path) -> "LocalAppConfig":
@@ -69,13 +71,13 @@ class LocalAppConfig:
             event_publisher = RabbitMqPublisher(RabbitMqConfig.from_environment())
         return cls(
             data_dir=data_dir, authorizer=authorizer, object_storage=object_storage,
-            event_publisher=event_publisher,
+            event_publisher=event_publisher, postgres=PostgresConfig.from_environment(),
         )
 
 
 @dataclass
 class LocalAppResources:
-    registry: AssetRegistry
+    registry: AssetRegistryBackend
     outbox: Outbox
     versions: DatasetVersionStore
     jobs: JobStore
@@ -104,7 +106,12 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
     config.data_dir.mkdir(parents=True, exist_ok=True)
     metadata_dir = config.data_dir / "metadata"
     metadata_dir.mkdir(exist_ok=True)
-    registry = AssetRegistry(str(metadata_dir / "assets.sqlite3"))
+    if config.postgres is not None:
+        from .postgres_asset_registry import open_postgres_asset_registry
+
+        registry = open_postgres_asset_registry(config.postgres)
+    else:
+        registry = AssetRegistry(str(metadata_dir / "assets.sqlite3"))
     outbox = Outbox(str(metadata_dir / "outbox.sqlite3"))
     versions = DatasetVersionStore(str(metadata_dir / "versions.sqlite3"))
     jobs = JobStore(str(metadata_dir / "jobs.sqlite3"))

@@ -70,7 +70,6 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=1,
         name="platform_schema",
         statements=(
-            "CREATE EXTENSION IF NOT EXISTS vector",
             """
             CREATE TABLE IF NOT EXISTS assets (
                 asset_id UUID PRIMARY KEY,
@@ -218,6 +217,10 @@ def apply_migrations(
         raise ValueError("schema must match [a-z_][a-z0-9_]{0,62}")
     ordered = _validated(migrations)
     connection.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
+    # The vector extension is database-wide and must not be owned by a
+    # per-tenant schema: dropping that schema would leave it dangling.
+    connection.execute("SET search_path TO public")
+    connection.execute("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public")
     connection.execute(f"SET search_path TO {schema}, public")
     connection.execute(
         f"""
@@ -229,7 +232,7 @@ def apply_migrations(
         """
     )
     applied = {
-        row[0]
+        row["version"] if hasattr(row, "keys") else row[0]
         for row in connection.execute(
             f"SELECT version FROM {_migration_table(schema)}"
         ).fetchall()
@@ -263,7 +266,7 @@ def _validated(migrations: Iterable[Migration]) -> tuple[Migration, ...]:
     return ordered
 
 
-def connect(config: PostgresConfig) -> Any:
+def connect(config: PostgresConfig, *, row_factory: Any = None) -> Any:
     """Open a PostgreSQL connection scoped to the configured schema."""
     try:
         import psycopg
@@ -272,6 +275,6 @@ def connect(config: PostgresConfig) -> Any:
             "PostgreSQL support requires the optional driver: "
             "install with `uv sync --extra postgres`"
         ) from exc
-    connection = psycopg.connect(config.dsn)
+    connection = psycopg.connect(config.dsn, row_factory=row_factory)
     connection.execute(f"SET search_path TO {config.schema}")
     return connection
