@@ -86,3 +86,79 @@ def test_metrics_endpoint_and_api_info(tmp_path):
         assert "runtime" in body
         assert "gpu" in body
         assert isinstance(body["gpu"].get("available"), bool)
+
+import json
+import logging
+
+from agentic_cv.observability import JsonLogFormatter, configure_logging
+
+
+def _cleanup_agentic_cv_logger():
+    logger = logging.getLogger("agentic_cv")
+    logger.handlers = [h for h in logger.handlers if not getattr(h, "_agentic_cv_logging", False)]
+    logger.setLevel(logging.NOTSET)
+    logger.propagate = True
+
+
+def test_json_log_formatter_includes_structured_fields():
+    formatter = JsonLogFormatter()
+    record = logging.LogRecord(
+        name="agentic_cv.http",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="request completed",
+        args=(),
+        exc_info=None,
+    )
+    record.method = "GET"
+    record.path = "/health/ready"
+    record.status_code = 200
+    record.duration_ms = 1.23
+
+    payload = json.loads(formatter.format(record))
+    assert payload["level"] == "INFO"
+    assert payload["logger"] == "agentic_cv.http"
+    assert payload["message"] == "request completed"
+    assert payload["method"] == "GET"
+    assert payload["path"] == "/health/ready"
+    assert payload["status_code"] == 200
+    assert payload["duration_ms"] == 1.23
+    assert "timestamp" in payload
+
+
+def test_configure_logging_scopes_agentic_cv_logger_and_supports_json(monkeypatch):
+    monkeypatch.delenv("AGENTIC_CV_LOG_LEVEL", raising=False)
+    monkeypatch.delenv("AGENTIC_CV_LOG_FORMAT", raising=False)
+    try:
+        logger = configure_logging(level="DEBUG", fmt="json")
+        assert logger.name == "agentic_cv"
+        assert logger.level == logging.DEBUG
+        assert logger.propagate is False
+        handlers = [h for h in logger.handlers if getattr(h, "_agentic_cv_logging", False)]
+        assert len(handlers) == 1
+        assert isinstance(handlers[0].formatter, JsonLogFormatter)
+
+        # repeated configuration should not stack handlers
+        configure_logging(level="INFO", fmt="json")
+        handlers = [h for h in logger.handlers if getattr(h, "_agentic_cv_logging", False)]
+        assert len(handlers) == 1
+        assert logger.level == logging.INFO
+    finally:
+        _cleanup_agentic_cv_logger()
+
+
+def test_request_middleware_logs_completion(tmp_path, caplog):
+    app = create_local_app(LocalAppConfig(data_dir=tmp_path))
+    with caplog.at_level(logging.INFO, logger="agentic_cv.http"):
+        with TestClient(app) as client:
+            response = client.get("/health/ready")
+            assert response.status_code == 200
+
+    records = [r for r in caplog.records if r.name == "agentic_cv.http" and r.message == "request completed"]
+    assert records, "expected request completion log"
+    record = records[-1]
+    assert getattr(record, "method", None) == "GET"
+    assert getattr(record, "path", None) == "/health/ready"
+    assert getattr(record, "status_code", None) == 200
+    assert isinstance(getattr(record, "duration_ms", None), (int, float))

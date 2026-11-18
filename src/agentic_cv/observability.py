@@ -1,16 +1,22 @@
-"""Runtime and GPU observability helpers.
+"""Runtime, GPU, and logging observability helpers.
 
 Collects lightweight metrics without requiring optional heavy dependencies.
 Torch/CUDA metrics are reported only when torch is importable and CUDA is
 available; callers can inject a torch-like module for deterministic tests.
+
+Logging helpers configure the ``agentic_cv`` logger namespace (opt-in via env
+or explicit arguments) and provide a small JSON formatter for structured logs.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import platform
 import sys
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -108,3 +114,69 @@ def collect_metrics(*, torch_module: Any | None = None) -> dict[str, Any]:
         "runtime": collect_runtime_metrics(),
         "gpu": collect_gpu_metrics(torch_module),
     }
+
+
+class JsonLogFormatter(logging.Formatter):
+    """Format log records as single-line JSON objects."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload: dict[str, Any] = {
+            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+        for key in ("method", "path", "status_code", "duration_ms", "client"):
+            value = getattr(record, key, None)
+            if value is not None:
+                payload[key] = value
+        return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+
+def _resolve_level(level: str | int | None) -> int:
+    if level is None:
+        env = os.getenv("AGENTIC_CV_LOG_LEVEL")
+        if env:
+            level = env
+        else:
+            return logging.INFO
+    if isinstance(level, int):
+        return level
+    name = str(level).upper()
+    return int(getattr(logging, name, logging.INFO))
+
+
+def configure_logging(level: str | int | None = None, fmt: str | None = None) -> logging.Logger:
+    """Configure the ``agentic_cv`` logger namespace.
+
+    Reads ``AGENTIC_CV_LOG_LEVEL`` and ``AGENTIC_CV_LOG_FORMAT`` (``json`` or
+    ``text``) when explicit arguments are not provided. Configuration is scoped
+    to the ``agentic_cv`` logger to avoid overriding host/uvicorn logging.
+    """
+
+    logger = logging.getLogger("agentic_cv")
+    resolved_level = _resolve_level(level)
+    resolved_fmt = (fmt or os.getenv("AGENTIC_CV_LOG_FORMAT") or "text").lower()
+
+    # Avoid stacking duplicate handlers on repeated calls (e.g. tests/reloads).
+    if not any(getattr(handler, "_agentic_cv_logging", False) for handler in logger.handlers):
+        handler = logging.StreamHandler(stream=sys.stderr)
+        handler._agentic_cv_logging = True  # type: ignore[attr-defined]
+        if resolved_fmt == "json":
+            handler.setFormatter(JsonLogFormatter())
+        else:
+            handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+        logger.addHandler(handler)
+    else:
+        for handler in logger.handlers:
+            if getattr(handler, "_agentic_cv_logging", False):
+                if resolved_fmt == "json":
+                    handler.setFormatter(JsonLogFormatter())
+                else:
+                    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+
+    logger.setLevel(resolved_level)
+    logger.propagate = False
+    return logger
