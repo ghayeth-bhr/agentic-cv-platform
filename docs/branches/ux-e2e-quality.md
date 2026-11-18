@@ -72,8 +72,12 @@ UI depends on.
 4 passed, 1 warning in 1.19s
 
 .\.venv\Scripts\python -m pytest -q
-252 passed, 10 skipped, 1 warning in 44.31s
+253 passed, 10 skipped, 1 warning in 49.70s
 ```
+
+The branch also merges the P0 automatic CPU fallback, so a fresh
+`uv sync --extra ml` on a CPU-only torch build reports a green doctor instead of
+requesting CUDA.
 
 The 10 skips are the opt-in PostgreSQL tests. The browser tests skip when the
 Playwright Chromium binary is absent.
