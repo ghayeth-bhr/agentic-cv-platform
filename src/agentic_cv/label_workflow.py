@@ -10,8 +10,8 @@ from .annotation_store import AnnotationRevisionStore
 from .batch_labeling import BatchLabelResult, LabelImage, Sam3BatchLabeler
 from .contracts import EventEnvelope
 from .dataset import DatasetCategory
-from .job_store import JobRecord, JobStore
-from .outbox import Outbox
+from .job_store import JobRecord, JobStoreBackend
+from .outbox import OutboxBackend
 from .preview import PreviewStore
 
 
@@ -21,9 +21,9 @@ class JobCancelled(RuntimeError):
 
 @dataclass(frozen=True, kw_only=True)
 class LabelWorkflowDependencies:
-    jobs: JobStore
+    jobs: JobStoreBackend
     annotations: AnnotationRevisionStore
-    outbox: Outbox
+    outbox: OutboxBackend
     labeler: Sam3BatchLabeler
     preview: PreviewStore | None = None
 

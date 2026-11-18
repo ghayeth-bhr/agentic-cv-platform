@@ -212,6 +212,33 @@ MIGRATIONS: tuple[Migration, ...] = (
             """,
         ),
     ),
+    Migration(
+        version=3,
+        name="jobs_sequence",
+        statements=(
+            "CREATE SEQUENCE IF NOT EXISTS jobs_sequence",
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS sequence BIGINT",
+            """
+            UPDATE jobs SET sequence = ordered.rn
+            FROM (
+                SELECT job_id, row_number() OVER (ORDER BY created_at, job_id) AS rn
+                FROM jobs WHERE sequence IS NULL
+            ) AS ordered
+            WHERE jobs.job_id = ordered.job_id
+            """,
+            """
+            ALTER TABLE jobs
+                ALTER COLUMN sequence SET DEFAULT nextval('jobs_sequence')
+            """,
+            """
+            SELECT setval(
+                'jobs_sequence',
+                COALESCE((SELECT MAX(sequence) FROM jobs), 0) + 1,
+                false
+            )
+            """,
+        ),
+    ),
 )
 
 
