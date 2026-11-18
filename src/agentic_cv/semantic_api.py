@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import mimetypes
 from dataclasses import dataclass
-from uuid import UUID
-
+from pathlib import Path
 from urllib.parse import quote
+from uuid import UUID
 
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -40,6 +42,9 @@ class SubAssetResponse(BaseModel):
     parent_asset_ids: tuple[str, ...]
     query: str
     result_ids: tuple[str, ...]
+    asset_id: UUID | None = None
+    asset_name: str | None = None
+    source_count: int = 0
 
 
 class IndexAssetResponse(BaseModel):
@@ -83,6 +88,48 @@ def _result_response(results: list[SearchResult], *, tenant_id: UUID | None) -> 
             for result in results
         ]
     )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _materialize_search_asset(
+    *,
+    registry: AssetRegistryBackend,
+    tenant_id: UUID,
+    query: str,
+    results: list[SearchResult],
+) -> tuple[UUID, str, int]:
+    if not results:
+        raise ValueError("search returned no results to save as a sub-asset")
+    name = f"Sub-asset: {query.strip()[:80] or 'search results'}"
+    asset = registry.create_asset(tenant_id=tenant_id, name=name)
+    added: list[str] = []
+    for index, result in enumerate(results, start=1):
+        image_path = Path(result.image_path)
+        if not image_path.exists():
+            continue
+        media_type = mimetypes.guess_type(image_path.name)[0] or "image/jpeg"
+        digest = _sha256_file(image_path)
+        suffix = image_path.suffix or ".jpg"
+        filename = f"result-{index:03d}{suffix}"
+        registry.add_source(
+            tenant_id=tenant_id,
+            asset_id=asset.asset_id,
+            filename=filename,
+            media_type=media_type,
+            object_uri=image_path.resolve().as_uri(),
+            content_sha256=digest,
+        )
+        added.append(result.record_id)
+    if not added:
+        raise ValueError("search result images are unavailable on disk")
+    return asset.asset_id, asset.name, len(added)
 
 
 def _validate_request(request: SearchRequest) -> None:
@@ -210,6 +257,14 @@ def create_app(dependencies: SemanticApiDependencies) -> FastAPI:
             record = dependencies.sub_assets.create_from_results(
                 tenant_id=tenant_id, query=request.query, results=results
             )
+            asset_id = None
+            asset_name = None
+            source_count = 0
+            registry = dependencies.registry or (dependencies.indexer.registry if dependencies.indexer else None)
+            if registry is not None:
+                asset_id, asset_name, source_count = _materialize_search_asset(
+                    registry=registry, tenant_id=tenant_id, query=request.query, results=results
+                )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return SubAssetResponse(
@@ -217,6 +272,9 @@ def create_app(dependencies: SemanticApiDependencies) -> FastAPI:
             parent_asset_ids=record.parent_asset_ids,
             query=record.query,
             result_ids=record.result_ids,
+            asset_id=asset_id,
+            asset_name=asset_name,
+            source_count=source_count,
         )
 
     return app

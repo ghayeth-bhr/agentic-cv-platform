@@ -249,6 +249,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
             labels=LabelApiDependencies(workflow=label_workflow),
             calibration=CalibrationApiDependencies(provider=sam3_provider),
             orchestrator=TaskOrchestrator(),
+            sam3=sam3_provider,
         )).router
     )
     semantic_search = SemanticSearchService(embedding_provider, vector_index)
@@ -283,6 +284,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
                 "calibration": "/v1/calibration/run",
                 "orchestrate": "/v1/orchestrate",
                 "sam3": "/v1/predict",
+                "asset_predict": "/v1/assets/{asset_id}/predict",
             },
         }
 

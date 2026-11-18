@@ -199,6 +199,60 @@ class PostgresAssetRegistry:
             raise KeyError(f"unknown source: {source_id}")
         return self._source(row)
 
+    def add_source(
+        self,
+        *,
+        tenant_id: UUID,
+        asset_id: UUID,
+        filename: str,
+        media_type: str,
+        object_uri: str,
+        content_sha256: str,
+    ) -> SourceRecord:
+        if not filename.strip() or not media_type.strip() or not object_uri.strip():
+            raise ValueError("filename, media_type, and object_uri are required")
+        if len(content_sha256) != 64:
+            raise ValueError("a SHA-256 digest is required")
+        with self._lock:
+            asset = self._connection.execute(
+                "SELECT tenant_id FROM assets WHERE asset_id = %s", (asset_id,)
+            ).fetchone()
+            if asset is None:
+                raise KeyError(f"unknown asset: {asset_id}")
+            if asset["tenant_id"] != tenant_id:
+                raise PermissionError("asset does not belong to tenant")
+            existing = self._connection.execute(
+                "SELECT * FROM sources WHERE asset_id = %s AND content_sha256 = %s",
+                (asset_id, content_sha256),
+            ).fetchone()
+            if existing is not None:
+                return self._source(existing)
+            source = SourceRecord(
+                source_id=uuid4(),
+                tenant_id=tenant_id,
+                asset_id=asset_id,
+                filename=filename,
+                media_type=media_type,
+                object_uri=object_uri,
+                content_sha256=content_sha256,
+                created_at=_utc_now(),
+            )
+            self._connection.execute(
+                """
+                INSERT INTO sources (
+                    source_id, tenant_id, asset_id, filename, media_type,
+                    object_uri, content_sha256, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    source.source_id, source.tenant_id, source.asset_id, source.filename,
+                    source.media_type, source.object_uri, source.content_sha256,
+                    source.created_at,
+                ),
+            )
+            self._connection.commit()
+            return source
+
     @staticmethod
     def _upload(row: Any) -> UploadRecord:
         return UploadRecord(

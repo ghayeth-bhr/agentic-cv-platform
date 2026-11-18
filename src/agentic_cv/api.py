@@ -25,7 +25,7 @@ from .job_store import JobRecord
 from .label_workflow import DurableLabelWorkflow
 from .orchestrator import TaskOrchestrationRequest, TaskOrchestrator
 from .outbox import Outbox
-from .sam3 import Sam3Provider
+from .sam3 import Sam3Prediction, Sam3Provider
 from .uploads import ResumableUploadService
 
 
@@ -136,6 +136,7 @@ class ApiDependencies:
     labels: LabelApiDependencies | None = None
     calibration: CalibrationApiDependencies | None = None
     orchestrator: TaskOrchestrator | None = None
+    sam3: Sam3Provider | None = None
 
 
 def _authorize(
@@ -205,6 +206,23 @@ class CalibrationResponse(BaseModel):
     threshold: float | None
     attempts: list[CalibrationAttemptResponse]
     reason: str | None = None
+
+
+class AssetPredictRequest(BaseModel):
+    prompt: str
+    threshold: float | None = None
+    source_id: UUID | None = None
+
+
+class Sam3PredictionResponse(BaseModel):
+    score: float
+    box: tuple[float, float, float, float]
+    mask: list[list[bool]]
+
+
+class Sam3PredictResponse(BaseModel):
+    prompt: str
+    predictions: list[Sam3PredictionResponse]
 
 
 def _task_spec_response(spec: TaskSpec) -> TaskSpecResponse:
@@ -317,6 +335,42 @@ def _thumbnail_bytes(source) -> bytes | None:
     except Exception:
         return None
     return None
+
+
+def _load_source_image(source) -> Image.Image | None:
+    path = _path_from_file_uri(source.object_uri)
+    if path is None or not path.exists():
+        return None
+    media_type = (source.media_type or "").lower()
+    try:
+        if media_type.startswith("image/"):
+            with Image.open(path) as img:
+                return img.convert("RGB")
+        if media_type.startswith("video/"):
+            import cv2  # type: ignore
+
+            capture = cv2.VideoCapture(str(path))
+            try:
+                ok, frame = capture.read()
+            finally:
+                capture.release()
+            if not ok or frame is None:
+                return None
+            frame = frame[:, :, ::-1]
+            return Image.fromarray(frame).convert("RGB")
+    except Exception:
+        return None
+    return None
+
+
+def _prediction_response(prompt: str, predictions: list[Sam3Prediction]) -> Sam3PredictResponse:
+    return Sam3PredictResponse(
+        prompt=prompt,
+        predictions=[
+            Sam3PredictionResponse(score=prediction.score, box=prediction.box, mask=prediction.mask.astype(bool).tolist())
+            for prediction in predictions
+        ],
+    )
 
 
 def create_app(dependencies: ApiDependencies) -> FastAPI:
@@ -764,5 +818,44 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                 reason=result.reason,
             )
 
+    @app.post("/v1/assets/{asset_id}/predict", response_model=Sam3PredictResponse)
+    def predict_asset(
+        asset_id: UUID,
+        request: AssetPredictRequest,
+        x_tenant_id: str = Header(...),
+        x_api_key: str | None = Header(None),
+        authorization: str | None = Header(None),
+    ) -> Sam3PredictResponse:
+        tenant_id = _tenant(x_tenant_id)
+        _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="assets:read")
+        provider = dependencies.sam3 or (dependencies.calibration.provider if dependencies.calibration else None)
+        if provider is None:
+            raise HTTPException(status_code=503, detail="SAM3 prediction is not configured")
+        prompt = (request.prompt or "").strip()
+        if not prompt:
+            raise HTTPException(status_code=422, detail="prompt must not be empty")
+        summaries = dependencies.registry.list_assets(tenant_id=tenant_id)
+        summary = next((item for item in summaries if item.asset_id == asset_id), None)
+        if summary is None:
+            raise HTTPException(status_code=404, detail="unknown asset")
+        source = None
+        if request.source_id is not None:
+            source = next((item for item in summary.sources if item.source_id == request.source_id), None)
+            if source is None:
+                raise HTTPException(status_code=404, detail="unknown source")
+        else:
+            source = _representative_source(summary.sources)
+        if source is None:
+            raise HTTPException(status_code=422, detail="asset has no usable source")
+        image = _load_source_image(source)
+        if image is None:
+            raise HTTPException(status_code=422, detail="asset source image could not be loaded")
+        try:
+            predictions = provider.predict(image, prompt, threshold=request.threshold)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"prediction failed: {exc}") from exc
+        return _prediction_response(prompt, predictions)
 
     return app
