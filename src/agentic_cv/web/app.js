@@ -31,6 +31,8 @@
 
   const state = {
     assets: [],
+    assetsLoading: false,
+    assetsError: null,
     selectedAsset: null,
     lineage: new Map(),
     searchPayload: null,
@@ -114,6 +116,43 @@
     return el;
   }
 
+  function statePanel(kind, title, detail, actionLabel, action) {
+    const panel = node("div", `empty-state state-panel state-panel-${kind}`);
+    panel.dataset.state = kind;
+    panel.setAttribute("role", kind === "error" ? "alert" : "status");
+    panel.appendChild(node("strong", null, title));
+    if (detail) panel.appendChild(node("p", null, detail));
+    if (actionLabel && action) {
+      const button = node("button", "btn btn-secondary btn-small", actionLabel);
+      button.type = "button";
+      button.addEventListener("click", action);
+      panel.appendChild(button);
+    }
+    return panel;
+  }
+
+  function setBusyRegion(id, busy) {
+    const el = $(id);
+    if (el) el.setAttribute("aria-busy", busy ? "true" : "false");
+  }
+
+  function assetSkeletons(count) {
+    const fragment = document.createDocumentFragment();
+    for (let index = 0; index < count; index += 1) {
+      const card = node("div", "asset-card skeleton-card");
+      card.setAttribute("aria-hidden", "true");
+      const thumb = node("div", "asset-thumb skeleton-block");
+      const body = node("div", "asset-body");
+      body.append(
+        node("div", "skeleton-line skeleton-line-title"),
+        node("div", "skeleton-line skeleton-line-meta")
+      );
+      card.append(thumb, body);
+      fragment.appendChild(card);
+    }
+    return fragment;
+  }
+
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
@@ -185,7 +224,17 @@
   async function loadAssets(opts = {}) {
     const quiet = !!opts.quiet;
     const meta = $("assets-meta");
+    state.assetsLoading = true;
+    state.assetsError = null;
+    setBusyRegion("asset-gallery", true);
     if (meta && !quiet) meta.textContent = "Loading assets…";
+    if (!state.assets.length) {
+      const grid = $("asset-gallery");
+      if (grid) {
+        grid.innerHTML = "";
+        grid.appendChild(assetSkeletons(3));
+      }
+    }
     try {
       const [assetData, lineageData] = await Promise.all([
         request("/v1/assets", { headers: tenantHeaders(false) }),
@@ -202,6 +251,9 @@
           (asset) => String(asset.asset_id) === String(state.selectedAsset.asset_id)
         ) || null;
       }
+      state.assetsLoading = false;
+      state.assetsError = null;
+      setBusyRegion("asset-gallery", false);
       renderAssets();
       renderAssetDetail();
       syncSearchScopeOptions();
@@ -209,10 +261,15 @@
       if (meta) meta.textContent = n ? `${n} asset${n === 1 ? "" : "s"}` : "No assets yet";
       return state.assets;
     } catch (err) {
-      if (meta) meta.textContent = "Could not load assets";
-      if (!quiet) setStatus("gallery-status", err.message || String(err), "error");
+      const message = cleanMessage(err.message || err);
+      state.assetsLoading = false;
+      state.assetsError = message;
       state.assets = [];
+      state.selectedAsset = null;
       state.lineage = new Map();
+      setBusyRegion("asset-gallery", false);
+      if (meta) meta.textContent = "Could not load assets";
+      if (!quiet) setStatus("gallery-status", message, "error");
       renderAssets();
       renderAssetDetail();
       syncSearchScopeOptions();
@@ -239,15 +296,51 @@
       return assetName(asset).toLowerCase().includes(filter);
     });
     grid.innerHTML = "";
-    if (!assets.length) {
-      const empty = node("div", "empty-state");
-      empty.append(
-        node("strong", null, state.assets.length ? "No matching assets." : "No assets yet."),
-        node("p", null, state.assets.length
-          ? "Try a different filter, or clear it to see the whole library."
-          : "Use Upload media to add your first photos or videos.")
+    if (state.assetsLoading && !state.assets.length) {
+      grid.appendChild(assetSkeletons(3));
+      return;
+    }
+    if (state.assetsError) {
+      grid.appendChild(
+        statePanel(
+          "error",
+          "Could not load assets.",
+          state.assetsError,
+          "Try again",
+          () => loadAssets()
+        )
       );
-      grid.appendChild(empty);
+      return;
+    }
+    if (!assets.length) {
+      if (state.assets.length) {
+        grid.appendChild(
+          statePanel(
+            "empty",
+            "No matching assets.",
+            "Try a different filter, or clear it to see the whole library.",
+            "Clear filter",
+            () => {
+              const input = $("asset-filter");
+              if (input) input.value = "";
+              renderAssets();
+            }
+          )
+        );
+      } else {
+        grid.appendChild(
+          statePanel(
+            "empty",
+            "No assets yet.",
+            "Upload photos or videos to start searching and labeling.",
+            "Upload media",
+            () => {
+              showUploadPanel(true);
+              if ($("asset-name")) $("asset-name").focus();
+            }
+          )
+        );
+      }
       return;
     }
     assets.forEach((asset) => {
@@ -739,7 +832,19 @@
       || (state.selectedAsset && state.selectedAsset.asset_id)
       || "";
     select.innerHTML = "";
-    if (!state.assets.length) {
+    if (state.assetsLoading && !state.assets.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "Loading assets…";
+      select.appendChild(option);
+      select.disabled = true;
+    } else if (state.assetsError) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "Assets unavailable";
+      select.appendChild(option);
+      select.disabled = true;
+    } else if (!state.assets.length) {
       const option = document.createElement("option");
       option.value = "";
       option.textContent = "No assets yet — upload media first";
@@ -1022,7 +1127,11 @@
   }
 
   async function initAgentView() {
-    if (!state.assets.length) await loadAssets({ quiet: true });
+    if (!state.assets.length) {
+      state.assetsLoading = true;
+      renderAgentAssets(null);
+      await loadAssets({ quiet: true });
+    }
     if (state.agentSession) {
       applyAgentSession(state.agentSession);
       if (AGENT_ACTIVE.has(state.agentSession.status)) startAgentPolling();
@@ -1030,6 +1139,15 @@
     }
     renderAgentAssets(null);
     await restoreAgentSession();
+    if (!state.agentSession && !state.assets.length) {
+      setStatus(
+        "agent-status",
+        state.assetsError
+          ? `Could not load assets: ${state.assetsError}`
+          : "No assets yet. Upload media in Assets before planning a task.",
+        "error"
+      );
+    }
   }
 
   async function planAgentTask() {
@@ -1500,23 +1618,35 @@
     if (!list) return;
     if (meta) meta.textContent = "Loading dataset versions…";
     setStatus("datasets-status", "");
+    setBusyRegion("datasets-list", true);
+    list.innerHTML = "";
+    list.appendChild(statePanel("loading", "Loading dataset versions…"));
     try {
       const datasets = await request("/v1/datasets", { headers: tenantHeaders(false) });
       list.innerHTML = "";
+      setBusyRegion("datasets-list", false);
       if (!datasets || !datasets.length) {
-        const empty = node("div", "empty-state");
-        empty.append(
-          node("strong", null, "No dataset versions yet."),
-          node("p", null, "Run the Agent on an asset to build a dataset automatically.")
+        list.appendChild(
+          statePanel(
+            "empty",
+            "No dataset versions yet.",
+            "Run the Agent on an asset to build a dataset automatically.",
+            "Open Agent",
+            () => showView("agent")
+          )
         );
-        list.appendChild(empty);
       } else {
         datasets.forEach((dataset) => list.appendChild(renderDatasetCard(dataset)));
       }
       if (meta) meta.textContent = `${(datasets || []).length} dataset version${(datasets || []).length === 1 ? "" : "s"}`;
     } catch (err) {
-      setStatus("datasets-status", cleanMessage(err.message || err), "error");
+      const message = cleanMessage(err.message || err);
+      setStatus("datasets-status", message, "error");
+      setBusyRegion("datasets-list", false);
       list.innerHTML = "";
+      list.appendChild(
+        statePanel("error", "Could not load dataset versions.", message, "Try again", loadDatasets)
+      );
       if (meta) meta.textContent = "Could not load datasets";
     }
   }
@@ -1625,24 +1755,36 @@
     if (!list) return;
     if (meta) meta.textContent = "Loading jobs…";
     setStatus("jobs-status", "");
+    setBusyRegion("jobs-list", true);
+    list.innerHTML = "";
+    list.appendChild(statePanel("loading", "Loading background jobs…"));
     try {
       const data = await request("/v1/jobs", { headers: tenantHeaders(false) });
       const jobs = (data && data.jobs) || [];
       list.innerHTML = "";
+      setBusyRegion("jobs-list", false);
       if (!jobs.length) {
-        const empty = node("div", "empty-state");
-        empty.append(
-          node("strong", null, "No background jobs yet."),
-          node("p", null, "Uploading an asset queues a search-indexing job.")
+        list.appendChild(
+          statePanel(
+            "empty",
+            "No background jobs yet.",
+            "Uploading an asset queues a search-indexing job. Labeling and exports appear here too.",
+            "Open Assets",
+            () => showView("assets")
+          )
         );
-        list.appendChild(empty);
       } else {
         jobs.slice().reverse().forEach((job) => list.appendChild(renderJobCard(job)));
       }
       if (meta) meta.textContent = `${jobs.length} job${jobs.length === 1 ? "" : "s"}`;
     } catch (err) {
-      setStatus("jobs-status", cleanMessage(err.message || err), "error");
+      const message = cleanMessage(err.message || err);
+      setStatus("jobs-status", message, "error");
+      setBusyRegion("jobs-list", false);
       list.innerHTML = "";
+      list.appendChild(
+        statePanel("error", "Could not load background jobs.", message, "Try again", loadJobs)
+      );
       if (meta) meta.textContent = "Could not load jobs";
     }
   }
