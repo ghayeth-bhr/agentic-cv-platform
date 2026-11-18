@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +12,7 @@ import numpy as np
 from PIL import Image
 
 from .errors import ModelUnavailableError
+from .model_resources import ModelResourceManager
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -28,6 +30,20 @@ class Sam3Config:
             value = getattr(self, name)
             if not 0 <= value <= 1:
                 raise ValueError(f"{name} must be between 0 and 1")
+
+
+def clip_box(
+    box: tuple[float, float, float, float], *, width: int, height: int
+) -> tuple[float, float, float, float] | None:
+    """Clip an xyxy box to image bounds, returning ``None`` if it is empty."""
+
+    x1 = max(0.0, min(float(box[0]), float(width)))
+    y1 = max(0.0, min(float(box[1]), float(height)))
+    x2 = max(0.0, min(float(box[2]), float(width)))
+    y2 = max(0.0, min(float(box[3]), float(height)))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return (x1, y1, x2, y2)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -56,12 +72,31 @@ class LocalSam3Provider:
         config: Sam3Config | None = None,
         *,
         loader: Callable[[Sam3Config], tuple[Any, Any, Any]] | None = None,
+        resources: ModelResourceManager | None = None,
+        resource_name: str = "sam3",
+        estimated_vram_mb: int = 2048,
     ) -> None:
         self.config = config or Sam3Config()
         self._loader = loader
         self._model: Any | None = None
         self._processor: Any | None = None
         self._torch: Any | None = None
+        self._resources = resources
+        self._resource_name = resource_name
+        self._local_lock = threading.RLock()
+        if resources is not None:
+            resources.register(
+                resource_name, self, estimated_mb=estimated_vram_mb
+            )
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._model is not None
+
+    def _guard(self):
+        if self._resources is not None:
+            return self._resources.lease(self._resource_name)
+        return self._local_lock
 
     def _load(self) -> None:
         if self._model is not None:
@@ -120,36 +155,58 @@ class LocalSam3Provider:
         if not 0 <= threshold <= 1 or not 0 <= mask_threshold <= 1:
             raise ValueError("thresholds must be between 0 and 1")
 
-        self._load()
-        inputs = self._processor(images=image.convert("RGB"), text=prompt, return_tensors="pt").to(
-            self.config.device
-        )
-        if self.config.precision == "float16" and "pixel_values" in inputs:
-            inputs["pixel_values"] = inputs["pixel_values"].half()
-        context = self._torch.inference_mode() if self._torch is not None else nullcontext()
-        with context:
-            outputs = self._model(**inputs)
-        results = self._processor.post_process_instance_segmentation(
-            outputs,
-            threshold=threshold,
-            mask_threshold=mask_threshold,
-            target_sizes=inputs["original_sizes"].tolist(),
-        )[0]
-        return [
-            Sam3Prediction(
-                score=float(score),
-                box=tuple(float(value) for value in box),
-                mask=mask.cpu().numpy(),
+        with self._guard():
+            self._load()
+            inputs = self._processor(
+                images=image.convert("RGB"), text=prompt, return_tensors="pt"
+            ).to(self.config.device)
+            if self.config.precision == "float16" and "pixel_values" in inputs:
+                inputs["pixel_values"] = inputs["pixel_values"].half()
+            context = (
+                self._torch.inference_mode()
+                if self._torch is not None
+                else nullcontext()
             )
-            for mask, box, score in zip(results["masks"], results["boxes"], results["scores"])
-        ]
+            with context:
+                outputs = self._model(**inputs)
+            results = self._processor.post_process_instance_segmentation(
+                outputs,
+                threshold=threshold,
+                mask_threshold=mask_threshold,
+                target_sizes=inputs["original_sizes"].tolist(),
+            )[0]
+            predictions = []
+            for mask, box, score in zip(
+                results["masks"], results["boxes"], results["scores"]
+            ):
+                clipped = clip_box(
+                    tuple(float(value) for value in box),
+                    width=image.width,
+                    height=image.height,
+                )
+                if clipped is None:
+                    continue
+                predictions.append(
+                    Sam3Prediction(
+                        score=float(score),
+                        box=clipped,
+                        mask=mask.cpu().numpy(),
+                    )
+                )
+            return predictions
 
     def close(self) -> None:
-        self._model = None
-        self._processor = None
-        if self._torch is not None and self._torch.cuda.is_available():
-            self._torch.cuda.empty_cache()
-        self._torch = None
+        guard = (
+            self._resources.lock
+            if self._resources is not None
+            else self._local_lock
+        )
+        with guard:
+            self._model = None
+            self._processor = None
+            if self._torch is not None and self._torch.cuda.is_available():
+                self._torch.cuda.empty_cache()
+            self._torch = None
 
 
 def _install_hint() -> str:

@@ -35,5 +35,6 @@ instead of appending to the root README. Current phase records:
 [`fix-runtime-foundation.md`](fix-runtime-foundation.md) (P0),
 [`label-execution-engine.md`](label-execution-engine.md) (P1),
 [`assets-experience.md`](assets-experience.md) (P2),
-[`agent-chat.md`](agent-chat.md) (P3), and
-[`manual-refinement-ui.md`](manual-refinement-ui.md) (P4).
+[`agent-chat.md`](agent-chat.md) (P3),
+[`manual-refinement-ui.md`](manual-refinement-ui.md) (P4), and
+[`gpu-resource-manager.md`](gpu-resource-manager.md) (P5).

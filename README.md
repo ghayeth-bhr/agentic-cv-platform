@@ -2,7 +2,7 @@
 
 A local-first platform for managing image/video assets, searching them semantically, and building detection/segmentation datasets with prompted SAM 3 labeling.
 
-This repository now contains a working local product path: **Assets** for upload/index/search/sub-assets, an **Agent** chat that plans a task, calibrates a threshold, labels the whole asset, builds a dataset version, and offers a downloadable COCO archive, and a **Review labels** flow that turns a positive/negative click into an annotation revision and a fresh dataset version. P0 (`fix/runtime-foundation`) made the runtime honest and diagnosable. P1 (`feature/label-execution-engine`) added durable label execution, dataset builds, and COCO/YOLO archives. P2 (`feature/assets-experience`) replaced the UUID-driven workbench with one workspace. P3 (`feature/agent-chat`) connects the chat to the existing execution engine and adds durable sessions, a planner with a visible local fallback, calibration timeouts, cancellation, and browser download. P4 (`feature/manual-refinement-ui`) wires the click refinement service to dataset images, annotation revisions, and a rebuilt/exportable dataset version.
+This repository now contains a working local product path: **Assets** for upload/index/search/sub-assets, an **Agent** chat that plans a task, calibrates a threshold, labels the whole asset, builds a dataset version, and offers a downloadable COCO archive, and a **Review labels** flow that turns a positive/negative click into an annotation revision and a fresh dataset version. P0 (`fix/runtime-foundation`) made the runtime honest and diagnosable. P1 (`feature/label-execution-engine`) added durable label execution, dataset builds, and COCO/YOLO archives. P2 (`feature/assets-experience`) replaced the UUID-driven workbench with one workspace. P3 (`feature/agent-chat`) connects the chat to the existing execution engine and adds durable sessions, a planner with a visible local fallback, calibration timeouts, cancellation, and browser download. P4 (`feature/manual-refinement-ui`) wires the click refinement service to dataset images, annotation revisions, and a rebuilt/exportable dataset version. P5 (`feature/gpu-resource-manager`) serializes local model inference, unloads models under memory pressure, and records a real 20-image whole-journey measurement on the 6 GB laptop.
 
 ## Current status
 
@@ -30,6 +30,8 @@ This repository now contains a working local product path: **Assets** for upload
 | Real 20-image SAM 3 run: 20/20 annotations, 1.96 GB peak VRAM, 54 s total | Measured in P3 |
 | Review labels: click a dataset image, preview a mask, accept a revision, rebuild and export | Added in P4 |
 | Manual refinement covered by HTTP and Playwright end-to-end tests | Added in P4 |
+| Shared GPU model lock, memory-pressure unload, idle unload, `/api-info` model status | Added in P5 |
+| Real 20-image HTTP journey: upload → index → agent label → COCO download → refine → rebuilt export, 4.20 GB peak VRAM, no OOM | Measured in P5 |
 
 The original root README was a 950-line concatenation of 23 branch READMEs. Those are preserved verbatim in [`docs/branches/`](docs/branches/README.md).
 
@@ -124,7 +126,7 @@ The execution plan is tracked in the audit document supplied by the owner (P0–
 - **P2** `feature/assets-experience`: single-workspace default, multi-file/chunked uploads, auto-index jobs, asset detail page, in-asset search, sub-asset lineage. Implemented in this branch; covered by a Playwright upload → index → search → sub-asset journey.
 - **P3** `feature/agent-chat`: session persistence, LLM task-spec agent, calibrated pipeline, chat UI, dataset download. Implemented in this branch; covered by HTTP and browser end-to-end tests.
 - **P4** `feature/manual-refinement-ui`: point-click refinement wired to revisions. Implemented in this branch; a Playwright journey proves mask preview, acceptance, dataset rebuild, and a corrected COCO export.
-- **P5** `feature/gpu-resource-manager`: model serialization, lazy load/unload, batching, measured performance.
+- **P5** `feature/gpu-resource-manager`: shared model lock, lazy load/unload under memory pressure, measured performance. Implemented in this branch; the real 20-image HTTP journey completed on the 6 GB laptop without OOM. See [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
 - **P6** `feature/ux-e2e-quality`: Playwright journeys, empty/loading/error states, contract tests.
 
 No phase counts as complete until its feature is reachable from the browser and covered by an HTTP-level test.
@@ -152,6 +154,7 @@ FastAPI app (application.py)
 ├── postgres_pgvector.py   opt-in pgvector index
 ├── sam3.py                lazy local SAM 3 provider
 ├── embeddings.py          lazy SigLIP embeddings
+├── model_resources.py     shared GPU lock, memory-pressure/idle unload, status
 ├── label_workflow.py      durable label-job state machine
 ├── label_worker.py        queued label-job polling + expired-lease recovery
 ├── index_worker.py        durable auto-index jobs + expired-lease recovery
@@ -215,7 +218,7 @@ Heavy dependencies are lazy or injectable. Default `pytest` runs with fakes and 
 .venv\Scripts\python -m pytest -q
 ```
 
-Current local result: **239 passed, 10 skipped, 1 warning** (Starlette/httpx deprecation). The 10 skips are the opt-in PostgreSQL tests. The P1 tests include an HTTP-only fake-SAM journey through upload, labeling, dataset creation, COCO/YOLO export, zip download, cancellation, and expired-lease recovery. The P3 tests add a chat → confirm → calibration → label → dataset → browser-download journey, plus calibration-timeout, cancellation, fixed-threshold fallback, planner fallback, Ollama thinking-field compatibility, and durable-session coverage. The P4 tests add an HTTP refinement → revision → rebuild → corrected COCO export check and a browser click → mask preview → accept → rebuilt export journey.
+Current local result: **246 passed, 10 skipped, 1 warning** (Starlette/httpx deprecation). The 10 skips are the opt-in PostgreSQL tests. The P1 tests include an HTTP-only fake-SAM journey through upload, labeling, dataset creation, COCO/YOLO export, zip download, cancellation, and expired-lease recovery. The P3 tests add a chat → confirm → calibration → label → dataset → browser-download journey, plus calibration-timeout, cancellation, fixed-threshold fallback, planner fallback, Ollama thinking-field compatibility, and durable-session coverage. The P4 tests add an HTTP refinement → revision → rebuild → corrected COCO export check and a browser click → mask preview → accept → rebuilt export journey. The P5 tests add shared-lock serialization, memory-pressure/idle unload, CPU no-torch status, provider reload, and SAM 3 box clipping.
 
 The browser tests drive a real uvicorn server with fake providers. They skip if the Playwright browser binary is not installed:
 
@@ -225,6 +228,8 @@ The browser tests drive a real uvicorn server with fake providers. They skip if 
 ```
 
 The P4 browser journey runs the Agent, opens **Review labels**, checks that the mask overlay draws, accepts the correction, rebuilds the dataset, downloads the corrected COCO archive, verifies the new bounding box with `pycocotools`, and asserts that no UUID appears in visible text.
+
+The P5 unit/HTTP tests cover shared-model serialization, memory-pressure unload, idle unload, CPU/no-torch behavior, provider reload after unload, and clipping of out-of-bounds SAM 3 boxes. The real measurement is manual: [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) records the commands and observed numbers. On the RTX 4050 Laptop (6 GB), a 20-image real-image HTTP journey took 39.33 s to index, 40.29 s to calibrate/label/build/export, peaked at 4202.8 MB allocated / 4390.0 MB reserved, and completed without OOM.
 
 The P3 real-model manual run was executed on the owner's RTX 4050 Laptop (6 GB VRAM) with CUDA `torch 2.6.0+cu124` and cached `facebook/sam3`. It uploaded 20 generated images through the real HTTP API, calibrated at threshold 0.30 with 5/5 sample agreement, labeled all 20 images, and downloaded a COCO archive with 20 images and 20 annotations. Calibration plus the first model load took 38.49 s, the label job took 13.75 s, total wall time was 53.97 s, and peak allocated VRAM was 1.96 GB. The real Ollama planner (`qwen3-vl:4b`) returned a valid `TaskSpec` in 9.37 s. These are local measurements, not production benchmarks.
 
@@ -243,6 +248,10 @@ Default runtime uses SQLite; `AGENTIC_CV_POSTGRES_DSN` enables PostgreSQL stores
 |---|---|---|
 | `AGENTIC_CV_DEVICE` | `cuda` | `cpu`, `cuda`, or `cuda:<index>` |
 | `AGENTIC_CV_PRECISION` | `float16` (`float32` on CPU) | `float16`, `bfloat16`, `float32` |
+| `AGENTIC_CV_MODEL_HEADROOM_MB` | `512` | Extra free VRAM required before loading a model |
+| `AGENTIC_CV_MODEL_IDLE_UNLOAD_SEC` | `300` | Idle seconds before a model is evicted |
+| `AGENTIC_CV_EMBEDDING_VRAM_MB` | `2304` | SigLIP2 footprint used by the unload policy |
+| `AGENTIC_CV_SAM3_VRAM_MB` | `2048` | SAM 3 footprint used by the unload policy |
 | `AGENTIC_CV_POSTGRES_DSN` | unset | opt-in PostgreSQL + pgvector |
 | `AGENTIC_CV_AGENT_PLANNER` | `ollama` | set `rules` to skip the text model entirely |
 | `AGENTIC_CV_TEXT_MODEL` | `qwen3-vl:4b` | Ollama model used for task-spec JSON |
@@ -281,7 +290,8 @@ The release demo in the owner's section 7 also calls for a YOLO download from th
 - The Agent chat downloads COCO. YOLO exports exist behind `/v1/dataset-exports`; the chat does not yet offer a format switch, and the review flow exports COCO from the Datasets list.
 - `agentic-cv serve` executes label, index, export, and agent-advance jobs. The separate `agentic-cv worker` command still runs only the export worker.
 - Label jobs cancelled mid-run can leave partial annotation revisions; dataset creation requires a succeeded job, so partial runs are not packaged.
-- The Agent and Assets browser tests use fake SAM 3/embedding providers and a deterministic planner. The separate P3 manual run exercised real SAM 3 and the real Ollama planner; it does not establish quality on your production photos or a full 6 GB laptop UI session.
+- The Agent and Assets browser tests use fake SAM 3/embedding providers and a deterministic planner. Real-model evidence is a separate HTTP journey, not a full browser journey: the P5 run used 20 real cached video frames, real SigLIP2/SAM 3, real workers, click refinement, and export, and peaked at 4.2 GB on the 6 GB laptop. It does not establish label quality on your production photos.
+- P5 serializes model inference and unloads under pressure, but it does not reserve VRAM in the driver. Another GPU-heavy process can still cause an OOM, and inference remains one image at a time rather than batched.
 - The P3 planner asks Ollama for strict JSON. If the model is down or returns invalid JSON, the chat visibly falls back to deterministic rules.
 - Sub-assets copy the matched search images into a new asset; they are snapshots, not live filters over the parent asset.
 - SAM 3 is subject to Meta's SAM License and gated weights; this repository is not legal advice or a hosted-product clearance. See `docs/branches/sam-3-licensing-and-hosted-product-review-roadmap-item-10-complete.md`.
@@ -289,7 +299,9 @@ The release demo in the owner's section 7 also calls for a YOLO download from th
 
 ## Branch documentation
 
-- Current P4 branch: [`docs/branches/manual-refinement-ui.md`](docs/branches/manual-refinement-ui.md)
+- Current P5 branch: [`docs/branches/gpu-resource-manager.md`](docs/branches/gpu-resource-manager.md)
+- P5 measurements: [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)
+- P4 branch record: [`docs/branches/manual-refinement-ui.md`](docs/branches/manual-refinement-ui.md)
 - P3 branch record: [`docs/branches/agent-chat.md`](docs/branches/agent-chat.md)
 - P2 branch record: [`docs/branches/assets-experience.md`](docs/branches/assets-experience.md)
 - P1 branch record: [`docs/branches/label-execution-engine.md`](docs/branches/label-execution-engine.md)

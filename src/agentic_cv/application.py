@@ -50,6 +50,7 @@ from .job_store import JobStore, JobStoreBackend
 from .label_images import LabelImageResolver
 from .label_worker import LabelWorker
 from .label_workflow import DurableLabelWorkflow, LabelWorkflowDependencies
+from .model_resources import ModelResourceManager
 from .model_runtime import ModelRuntimeSettings
 from .object_storage import LocalObjectStorage, ObjectStorage, S3ObjectStorage
 from .orchestrator import TaskOrchestrator
@@ -66,6 +67,28 @@ from .semantic_indexing import AssetSemanticIndexer
 from .semantic_search import EmbeddingProvider, SemanticSearchService, VectorIndex
 from .sub_assets import SubAssetBackend, SubAssetStore
 from .uploads import ResumableUploadService
+
+
+def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(minimum, value)
+
+
+def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return max(minimum, value)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -133,6 +156,7 @@ class LocalAppResources:
     embedding_provider: EmbeddingProvider
     sam3_provider: Sam3Provider
     agent_sessions: AgentSessionBackend
+    model_resources: ModelResourceManager
     outbox_dispatcher: OutboxDispatcher | None = None
 
     def close(self) -> None:
@@ -145,6 +169,7 @@ class LocalAppResources:
             close = getattr(component, "close", None)
             if close is not None:
                 close()
+        self.model_resources.close_all()
         if self.outbox_dispatcher is not None:
             close = getattr(self.outbox_dispatcher.publisher, "close", None)
             if close is not None:
@@ -204,10 +229,23 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
     authorizer = config.authorizer or (
         StaticApiKeyAuthorizer(config.api_keys) if config.api_keys else None
     )
-    embedding_provider = config.embedding_provider or HuggingFaceEmbeddingProvider(
-        model_settings.embedding_config()
+    model_resources = ModelResourceManager(
+        device=model_settings.device,
+        headroom_mb=_env_int("AGENTIC_CV_MODEL_HEADROOM_MB", 512),
+        idle_unload_sec=_env_float("AGENTIC_CV_MODEL_IDLE_UNLOAD_SEC", 300.0),
     )
-    sam3_provider = config.sam3_provider or LocalSam3Provider(model_settings.sam3_config())
+    embedding_provider = config.embedding_provider or HuggingFaceEmbeddingProvider(
+        model_settings.embedding_config(),
+        resources=model_resources,
+        resource_name="siglip2",
+        estimated_vram_mb=_env_int("AGENTIC_CV_EMBEDDING_VRAM_MB", 2304, minimum=1),
+    )
+    sam3_provider = config.sam3_provider or LocalSam3Provider(
+        model_settings.sam3_config(),
+        resources=model_resources,
+        resource_name="sam3",
+        estimated_vram_mb=_env_int("AGENTIC_CV_SAM3_VRAM_MB", 2048, minimum=1),
+    )
     if config.postgres is not None:
         from .postgres_pgvector import open_postgres_vector_index
 
@@ -223,7 +261,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
         registry=registry, outbox=outbox, versions=versions, jobs=jobs, preview=preview,
         sub_assets=sub_assets, annotations=annotations, vector_index=vector_index,
         embedding_provider=embedding_provider, sam3_provider=sam3_provider,
-        agent_sessions=agent_sessions,
+        agent_sessions=agent_sessions, model_resources=model_resources,
     )
     export_service = DatasetExportService(versions, config.data_dir / "exports")
     export_workflow = DatasetExportWorkflow(
@@ -437,6 +475,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
                 "device": model_settings.device,
                 "precision": model_settings.precision,
                 "doctor": "agentic-cv doctor",
+                "resources": model_resources.status().as_dict(),
             },
             "api": {
                 "assets": "/v1/assets",
