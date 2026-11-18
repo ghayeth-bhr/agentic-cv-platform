@@ -261,6 +261,33 @@ MIGRATIONS: tuple[Migration, ...] = (
             """,
         ),
     ),
+    Migration(
+        version=5,
+        name="dataset_versions_sequence",
+        statements=(
+            "CREATE SEQUENCE IF NOT EXISTS dataset_versions_sequence",
+            "ALTER TABLE dataset_versions ADD COLUMN IF NOT EXISTS sequence BIGINT",
+            """
+            UPDATE dataset_versions SET sequence = ordered.rn
+            FROM (
+                SELECT version_id, row_number() OVER (ORDER BY created_at, version_id) AS rn
+                FROM dataset_versions WHERE sequence IS NULL
+            ) AS ordered
+            WHERE dataset_versions.version_id = ordered.version_id
+            """,
+            """
+            ALTER TABLE dataset_versions
+                ALTER COLUMN sequence SET DEFAULT nextval('dataset_versions_sequence')
+            """,
+            """
+            SELECT setval(
+                'dataset_versions_sequence',
+                COALESCE((SELECT MAX(sequence) FROM dataset_versions), 0) + 1,
+                false
+            )
+            """,
+        ),
+    ),
 )
 
 

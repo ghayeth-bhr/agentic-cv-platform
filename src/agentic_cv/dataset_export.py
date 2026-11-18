@@ -9,7 +9,7 @@ from typing import Literal
 from uuid import UUID
 
 from .dataset import export_coco, export_yolo
-from .dataset_store import DatasetVersionStore
+from .dataset_store import DatasetVersionBackend
 
 ExportFormat = Literal["coco", "yolo-detection", "yolo-segmentation"]
 
@@ -24,7 +24,7 @@ class DatasetExportResult:
 
 
 class DatasetExportService:
-    def __init__(self, versions: DatasetVersionStore, output_root: Path) -> None:
+    def __init__(self, versions: DatasetVersionBackend, output_root: Path) -> None:
         self.versions = versions
         self.output_root = output_root
 

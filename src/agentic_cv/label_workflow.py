@@ -6,13 +6,13 @@ from dataclasses import dataclass
 from typing import Literal
 from uuid import UUID
 
-from .annotation_store import AnnotationRevisionStore
+from .annotation_store import AnnotationRevisionBackend
 from .batch_labeling import BatchLabelResult, LabelImage, Sam3BatchLabeler
 from .contracts import EventEnvelope
 from .dataset import DatasetCategory
 from .job_store import JobRecord, JobStoreBackend
 from .outbox import OutboxBackend
-from .preview import PreviewStore
+from .preview import PreviewBackend
 
 
 class JobCancelled(RuntimeError):
@@ -22,10 +22,10 @@ class JobCancelled(RuntimeError):
 @dataclass(frozen=True, kw_only=True)
 class LabelWorkflowDependencies:
     jobs: JobStoreBackend
-    annotations: AnnotationRevisionStore
+    annotations: AnnotationRevisionBackend
     outbox: OutboxBackend
     labeler: Sam3BatchLabeler
-    preview: PreviewStore | None = None
+    preview: PreviewBackend | None = None
 
 
 class DurableLabelWorkflow:

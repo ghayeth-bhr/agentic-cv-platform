@@ -18,7 +18,7 @@ from .auth import Authorizer, OidcJwtAuthorizer, Principal, StaticApiKeyAuthoriz
 from .broker import RabbitMqConfig, RabbitMqPublisher
 from .dataset_export import DatasetExportService
 from .dataset_export_workflow import DatasetExportWorkflow, DatasetExportWorkflowDependencies
-from .dataset_store import DatasetVersionStore
+from .dataset_store import DatasetVersionBackend, DatasetVersionStore
 from .embeddings import HuggingFaceEmbeddingConfig, HuggingFaceEmbeddingProvider
 from .job_store import JobStore, JobStoreBackend
 from .object_storage import LocalObjectStorage, ObjectStorage, S3ObjectStorage
@@ -79,7 +79,7 @@ class LocalAppConfig:
 class LocalAppResources:
     registry: AssetRegistryBackend
     outbox: OutboxBackend
-    versions: DatasetVersionStore
+    versions: DatasetVersionBackend
     jobs: JobStoreBackend
     preview: PreviewBackend
     sub_assets: SubAssetBackend
@@ -118,7 +118,12 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
         outbox = open_postgres_outbox(config.postgres)
     else:
         outbox = Outbox(str(metadata_dir / "outbox.sqlite3"))
-    versions = DatasetVersionStore(str(metadata_dir / "versions.sqlite3"))
+    if config.postgres is not None:
+        from .postgres_dataset_store import open_postgres_dataset_version_store
+
+        versions = open_postgres_dataset_version_store(config.postgres)
+    else:
+        versions = DatasetVersionStore(str(metadata_dir / "versions.sqlite3"))
     if config.postgres is not None:
         from .postgres_job_store import open_postgres_job_store
 
