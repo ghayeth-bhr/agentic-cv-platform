@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api import ApiDependencies, CalibrationApiDependencies, ExportApiDependencies, LabelApiDependencies, create_app as create_core_app
+from .observability import collect_metrics
 from .annotation_store import AnnotationRevisionBackend, AnnotationRevisionStore
 from .asset_registry import AssetRegistry, AssetRegistryBackend
 from .auth import Authorizer, OidcJwtAuthorizer, Principal, StaticApiKeyAuthorizer
@@ -230,6 +231,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
             "status": "ok",
             "docs": "/docs",
             "health": {"live": "/health/live", "ready": "/health/ready"},
+            "observability": {"metrics": "/v1/metrics"},
             "api": {
                 "assets": "/v1/assets",
                 "search": "/v1/search",
@@ -252,6 +254,10 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
     @app.get("/health/ready")
     def readiness() -> dict[str, str]:
         return {"status": "ready"}
+
+    @app.get("/v1/metrics")
+    def metrics() -> dict[str, object]:
+        return collect_metrics()
 
     app.state.resources = resources
     return app
