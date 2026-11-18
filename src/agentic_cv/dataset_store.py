@@ -35,6 +35,7 @@ class DatasetVersionStore:
             """
             CREATE TABLE IF NOT EXISTS dataset_versions (
                 version_id TEXT PRIMARY KEY,
+                sequence INTEGER NOT NULL,
                 tenant_id TEXT NOT NULL,
                 name TEXT NOT NULL,
                 dataset TEXT NOT NULL,
@@ -44,6 +45,15 @@ class DatasetVersionStore:
             )
             """
         )
+        columns = {
+            row["name"]
+            for row in self._connection.execute("PRAGMA table_info(dataset_versions)")
+        }
+        if "sequence" not in columns:
+            self._connection.execute(
+                "ALTER TABLE dataset_versions ADD COLUMN sequence INTEGER"
+            )
+            self._connection.execute("UPDATE dataset_versions SET sequence = rowid")
         self._connection.commit()
 
     def close(self) -> None:
@@ -71,9 +81,20 @@ class DatasetVersionStore:
                     raise ValueError("idempotency key already identifies a different version")
                 return self._record(existing)
             version_id = uuid4()
+            sequence = self._connection.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM dataset_versions"
+            ).fetchone()[0]
             self._connection.execute(
-                "INSERT INTO dataset_versions VALUES (?, ?, ?, ?, ?, ?)",
-                (str(version_id), str(tenant_id), name, encoded, idempotency_key, _utc_now()),
+                """
+                INSERT INTO dataset_versions (
+                    version_id, sequence, tenant_id, name, dataset, idempotency_key,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(version_id), sequence, str(tenant_id), name, encoded,
+                    idempotency_key, _utc_now(),
+                ),
             )
             self._connection.commit()
             return self.get(tenant_id=tenant_id, version_id=version_id)
@@ -91,7 +112,7 @@ class DatasetVersionStore:
     def list(self, *, tenant_id: UUID) -> list[DatasetVersionRecord]:
         with self._lock:
             rows = self._connection.execute(
-                "SELECT * FROM dataset_versions WHERE tenant_id = ? ORDER BY created_at, version_id",
+                "SELECT * FROM dataset_versions WHERE tenant_id = ? ORDER BY created_at, sequence",
                 (str(tenant_id),),
             ).fetchall()
         return [self._record(row) for row in rows]
