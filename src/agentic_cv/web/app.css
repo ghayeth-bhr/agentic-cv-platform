@@ -25,6 +25,7 @@
 }
 
 *, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { height: 100%; }
 body {
   margin: 0;
@@ -327,6 +328,30 @@ input[type="search"]:focus { outline: none; border-color: var(--accent); box-sha
 }
 .empty-state strong { display: block; color: var(--ink); font-weight: 600; margin-bottom: 0.25rem; }
 .empty-state p { margin: 0; font-size: 0.86rem; }
+.state-panel { display: flex; flex-direction: column; align-items: flex-start; gap: 0.55rem; }
+.state-panel p { max-width: 62ch; }
+.state-panel .btn { margin-top: 0.25rem; }
+.state-panel-error { border-color: rgba(229, 83, 75, 0.45); background: rgba(229, 83, 75, 0.06); }
+.state-panel-error strong { color: #ffb3ae; }
+.state-panel-loading { color: var(--ink-muted); }
+.state-panel-loading strong { color: var(--ink); }
+.skeleton-card { pointer-events: none; }
+.skeleton-card:hover { transform: none; border-color: var(--line); }
+.skeleton-block, .skeleton-line {
+  background: linear-gradient(90deg, #12171c 0%, #1b232b 50%, #12171c 100%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.2s ease-in-out infinite;
+}
+.skeleton-line { height: 0.65rem; border-radius: 3px; }
+.skeleton-line-title { width: 70%; }
+.skeleton-line-meta { width: 45%; margin-top: 0.45rem; }
+@keyframes skeleton-shimmer {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-block, .skeleton-line { animation: none; }
+}
 
 .asset-detail {
   position: sticky; top: 1rem; background: var(--bg-panel); border: 1px solid var(--line);
