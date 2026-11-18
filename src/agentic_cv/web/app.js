@@ -431,16 +431,23 @@
   if ($("gallery-refresh")) $("gallery-refresh").addEventListener("click", () => loadAssets());
 
   // Predict
-  function drawPredictions(canvas, img, predictions) {
+  function drawPredictions(canvas, img, predictions, predSize) {
     const ctx = canvas.getContext("2d");
     canvas.width = img.naturalWidth || img.width;
     canvas.height = img.naturalHeight || img.height;
     ctx.drawImage(img, 0, 0);
+    const predW = predSize && Number.isFinite(predSize.w) && predSize.w > 0 ? predSize.w : canvas.width;
+    const predH = predSize && Number.isFinite(predSize.h) && predSize.h > 0 ? predSize.h : canvas.height;
+    const sx = canvas.width / predW;
+    const sy = canvas.height / predH;
     const colors = ["#18b6c4", "#ff6b6b", "#ffd166", "#7bd389", "#c792ea", "#4dabf7"];
     (predictions || []).forEach((p, i) => {
       const color = colors[i % colors.length];
       const box = p.box || [0, 0, 0, 0];
-      const [x1, y1, x2, y2] = box;
+      const x1 = Number(box[0] || 0) * sx;
+      const y1 = Number(box[1] || 0) * sy;
+      const x2 = Number(box[2] || 0) * sx;
+      const y2 = Number(box[3] || 0) * sy;
       const w = Math.max(0, x2 - x1), h = Math.max(0, y2 - y1);
       ctx.lineWidth = Math.max(2, Math.round(canvas.width / 300));
       ctx.strokeStyle = color;
@@ -485,18 +492,20 @@
       let result;
       let img;
       let objectUrl = null;
+      let predSize = null;
       if (assetId) {
         const payload = { prompt };
         if (thresholdRaw !== "") payload.threshold = Number(thresholdRaw);
         result = await request(`/v1/assets/${encodeURIComponent(assetId)}/predict`, {
           method: "POST", headers: headersJSON(true), body: JSON.stringify(payload)
         });
-        const select = $("predict-asset");
-        const opt = select && select.selectedOptions ? select.selectedOptions[0] : null;
-        const thumbUrl = (opt && opt.dataset && opt.dataset.thumb)
-          ? opt.dataset.thumb
-          : `/v1/assets/${encodeURIComponent(assetId)}/thumbnail?tenant_id=${encodeURIComponent(tenantId())}`;
-        img = await loadImageForCanvas(thumbUrl);
+        const imageUrl = result && result.image_url
+          ? result.image_url
+          : `/v1/assets/${encodeURIComponent(assetId)}/image?tenant_id=${encodeURIComponent(tenantId())}`;
+        if (result && Number.isFinite(result.image_width) && Number.isFinite(result.image_height)) {
+          predSize = { w: Number(result.image_width), h: Number(result.image_height) };
+        }
+        img = await loadImageForCanvas(imageUrl);
       } else {
         const form = new FormData();
         form.append("image", file);
@@ -505,10 +514,11 @@
         result = await request("/v1/predict", { method: "POST", body: form });
         objectUrl = URL.createObjectURL(file);
         img = await loadImageForCanvas(objectUrl);
+        predSize = { w: img.naturalWidth || img.width, h: img.naturalHeight || img.height };
       }
 
       const predictions = (result && result.predictions) || [];
-      drawPredictions($("predict-canvas"), img, predictions);
+      drawPredictions($("predict-canvas"), img, predictions, predSize);
       if (objectUrl) URL.revokeObjectURL(objectUrl);
 
       const summary = $("predict-summary");

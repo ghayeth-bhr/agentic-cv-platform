@@ -223,6 +223,9 @@ class Sam3PredictionResponse(BaseModel):
 class Sam3PredictResponse(BaseModel):
     prompt: str
     predictions: list[Sam3PredictionResponse]
+    image_url: str | None = None
+    image_width: int | None = None
+    image_height: int | None = None
 
 
 def _task_spec_response(spec: TaskSpec) -> TaskSpecResponse:
@@ -363,13 +366,54 @@ def _load_source_image(source) -> Image.Image | None:
     return None
 
 
-def _prediction_response(prompt: str, predictions: list[Sam3Prediction]) -> Sam3PredictResponse:
+def _source_image_bytes(source) -> tuple[bytes, str] | None:
+    path = _path_from_file_uri(source.object_uri)
+    if path is None or not path.exists():
+        return None
+    media_type = (source.media_type or "").lower()
+    try:
+        if media_type.startswith("image/"):
+            data = path.read_bytes()
+            if data:
+                return data, (source.media_type or "image/jpeg")
+            return None
+        if media_type.startswith("video/"):
+            import cv2  # type: ignore
+
+            capture = cv2.VideoCapture(str(path))
+            try:
+                ok, frame = capture.read()
+            finally:
+                capture.release()
+            if not ok or frame is None:
+                return None
+            frame = frame[:, :, ::-1]
+            img = Image.fromarray(frame)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=92)
+            return buf.getvalue(), "image/jpeg"
+    except Exception:
+        return None
+    return None
+
+
+def _prediction_response(
+    prompt: str,
+    predictions: list[Sam3Prediction],
+    *,
+    image_url: str | None = None,
+    image_width: int | None = None,
+    image_height: int | None = None,
+) -> Sam3PredictResponse:
     return Sam3PredictResponse(
         prompt=prompt,
         predictions=[
             Sam3PredictionResponse(score=prediction.score, box=prediction.box, mask=prediction.mask.astype(bool).tolist())
             for prediction in predictions
         ],
+        image_url=image_url,
+        image_width=image_width,
+        image_height=image_height,
     )
 
 
@@ -856,6 +900,34 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"prediction failed: {exc}") from exc
-        return _prediction_response(prompt, predictions)
+        width, height = image.size
+        image_url = f"/v1/assets/{asset_id}/image?tenant_id={tenant_id}"
+        return _prediction_response(prompt, predictions, image_url=image_url, image_width=width, image_height=height)
+
+    @app.get("/v1/assets/{asset_id}/image")
+    def asset_image(
+        asset_id: UUID,
+        x_tenant_id: str | None = Header(None),
+        tenant_id_q: str | None = Query(None, alias="tenant_id"),
+        x_api_key: str | None = Header(None),
+        authorization: str | None = Header(None),
+    ) -> Response:
+        raw_tenant = x_tenant_id or tenant_id_q
+        if raw_tenant is None:
+            raise HTTPException(status_code=400, detail="X-Tenant-ID or tenant_id is required")
+        tenant_id = _tenant(raw_tenant)
+        _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="assets:read")
+        summaries = dependencies.registry.list_assets(tenant_id=tenant_id)
+        summary = next((item for item in summaries if item.asset_id == asset_id), None)
+        if summary is None:
+            raise HTTPException(status_code=404, detail="unknown asset")
+        source = _representative_source(summary.sources)
+        if source is None:
+            raise HTTPException(status_code=404, detail="asset has no source")
+        payload = _source_image_bytes(source)
+        if payload is None:
+            raise HTTPException(status_code=404, detail="asset image unavailable")
+        data, media_type = payload
+        return Response(content=data, media_type=media_type, headers={"Cache-Control": "private, max-age=300"})
 
     return app
