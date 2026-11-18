@@ -8,7 +8,10 @@ import os
 from pathlib import Path
 from typing import Mapping
 
-from fastapi import FastAPI
+import logging
+import time
+
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -202,6 +205,37 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
             resources.close()
 
     app = FastAPI(title="Agentic CV Platform", version="1", lifespan=lifespan)
+    http_logger = logging.getLogger("agentic_cv.http")
+
+    @app.middleware("http")
+    async def observability_middleware(request: Request, call_next):
+        start = time.perf_counter()
+        try:
+            response = await call_next(request)
+        except Exception:
+            duration_ms = round((time.perf_counter() - start) * 1000, 3)
+            http_logger.exception(
+                "request failed",
+                extra={
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status_code": 500,
+                    "duration_ms": duration_ms,
+                },
+            )
+            raise
+        duration_ms = round((time.perf_counter() - start) * 1000, 3)
+        http_logger.info(
+            "request completed",
+            extra={
+                "method": request.method,
+                "path": request.url.path,
+                "status_code": response.status_code,
+                "duration_ms": duration_ms,
+            },
+        )
+        return response
+
     web_dir = Path(__file__).parent / "web"
     app.mount("/static", StaticFiles(directory=web_dir), name="static")
     app.state.outbox_dispatcher = outbox_dispatcher

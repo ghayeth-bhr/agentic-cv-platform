@@ -8,6 +8,7 @@ from pathlib import Path
 import uvicorn
 
 from .application import LocalAppConfig, create_local_app
+from .observability import configure_logging
 from .worker_runtime import create_export_worker
 
 
@@ -24,8 +25,10 @@ def main() -> None:
     worker.add_argument("--poll-interval", type=float, default=1.0)
     args = parser.parse_args()
     if args.command == "serve":
+        configure_logging()
         uvicorn.run(create_local_app(LocalAppConfig.from_environment(args.data_dir)), host=args.host, port=args.port)
     elif args.command == "worker":
+        configure_logging()
         runtime = create_export_worker(args.data_dir)
         try:
             runtime.worker.run_forever(
