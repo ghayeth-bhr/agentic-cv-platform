@@ -51,6 +51,7 @@ class JobStore:
             """
             CREATE TABLE IF NOT EXISTS jobs (
                 job_id TEXT PRIMARY KEY,
+                sequence INTEGER NOT NULL,
                 tenant_id TEXT NOT NULL,
                 kind TEXT NOT NULL,
                 status TEXT NOT NULL,
@@ -75,6 +76,9 @@ class JobStore:
         ):
             if name not in columns:
                 self._connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
+        if "sequence" not in columns:
+            self._connection.execute("ALTER TABLE jobs ADD COLUMN sequence INTEGER")
+            self._connection.execute("UPDATE jobs SET sequence = rowid")
         self._connection.commit()
 
     def close(self) -> None:
@@ -103,14 +107,20 @@ class JobStore:
                 return self._record(existing)
             job_id = uuid4()
             now = _utc_now()
+            sequence = self._connection.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM jobs"
+            ).fetchone()[0]
             self._connection.execute(
                 """
                 INSERT INTO jobs (
-                    job_id, tenant_id, kind, status, payload, idempotency_key,
+                    job_id, sequence, tenant_id, kind, status, payload, idempotency_key,
                     attempts, error, created_at, updated_at
-                ) VALUES (?, ?, ?, 'queued', ?, ?, 0, NULL, ?, ?)
+                ) VALUES (?, ?, ?, ?, 'queued', ?, ?, 0, NULL, ?, ?)
                 """,
-                (str(job_id), str(tenant_id), kind, encoded_payload, idempotency_key, now, now),
+                (
+                    str(job_id), sequence, str(tenant_id), kind, encoded_payload,
+                    idempotency_key, now, now,
+                ),
             )
             self._connection.commit()
             return self.get(job_id)
@@ -136,7 +146,7 @@ class JobStore:
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._lock:
             rows = self._connection.execute(
-                f"SELECT * FROM jobs{where} ORDER BY created_at, job_id", values
+                f"SELECT * FROM jobs{where} ORDER BY created_at, sequence", values
             ).fetchall()
         return [self._record(row) for row in rows]
 
@@ -216,7 +226,7 @@ class JobStore:
                 SELECT job_id, cancel_requested FROM jobs
                 WHERE status = 'running' AND lease_expires_at IS NOT NULL
                     AND lease_expires_at <= ?{kind_clause}
-                ORDER BY created_at, job_id
+                ORDER BY created_at, sequence
                 """,
                 values,
             ).fetchall()
