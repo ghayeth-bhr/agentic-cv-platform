@@ -25,6 +25,7 @@ class SubAssetRecord:
     query: str
     result_ids: tuple[str, ...]
     created_at: str
+    asset_id: UUID | None = None
 
 
 class SubAssetBackend(Protocol):
@@ -37,6 +38,12 @@ class SubAssetBackend(Protocol):
     def get(self, sub_asset_id: UUID) -> SubAssetRecord: ...
 
     def get_for_tenant(self, tenant_id: UUID, sub_asset_id: UUID) -> SubAssetRecord: ...
+
+    def link_asset(self, sub_asset_id: UUID, *, asset_id: UUID) -> SubAssetRecord: ...
+
+    def list_for_tenant(self, tenant_id: UUID) -> list[SubAssetRecord]: ...
+
+    def find_by_asset(self, tenant_id: UUID, asset_id: UUID) -> SubAssetRecord | None: ...
 
 
 class SubAssetStore:
@@ -52,9 +59,18 @@ class SubAssetStore:
                 parent_asset_ids TEXT NOT NULL,
                 query TEXT NOT NULL,
                 result_ids TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                asset_id TEXT
             )
             """
+        )
+        columns = {
+            row["name"] for row in self._connection.execute("PRAGMA table_info(sub_assets)")
+        }
+        if "asset_id" not in columns:
+            self._connection.execute("ALTER TABLE sub_assets ADD COLUMN asset_id TEXT")
+        self._connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS sub_assets_asset_idx ON sub_assets (asset_id)"
         )
         self._connection.commit()
 
@@ -85,11 +101,16 @@ class SubAssetStore:
         )
         with self._lock:
             self._connection.execute(
-                "INSERT INTO sub_assets VALUES (?, ?, ?, ?, ?, ?)",
+                """
+                INSERT INTO sub_assets (
+                    sub_asset_id, tenant_id, parent_asset_ids, query, result_ids,
+                    created_at, asset_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
                 (
                     str(record.sub_asset_id), str(record.tenant_id),
                     json.dumps(record.parent_asset_ids), record.query,
-                    json.dumps(record.result_ids), record.created_at,
+                    json.dumps(record.result_ids), record.created_at, None,
                 ),
             )
             self._connection.commit()
@@ -102,15 +123,57 @@ class SubAssetStore:
             ).fetchone()
         if row is None:
             raise KeyError(f"unknown sub-asset: {sub_asset_id}")
-        return SubAssetRecord(
-            sub_asset_id=UUID(row["sub_asset_id"]), tenant_id=UUID(row["tenant_id"]),
-            parent_asset_ids=tuple(json.loads(row["parent_asset_ids"])),
-            query=row["query"], result_ids=tuple(json.loads(row["result_ids"])),
-            created_at=row["created_at"],
-        )
+        return self._record(row)
 
     def get_for_tenant(self, tenant_id: UUID, sub_asset_id: UUID) -> SubAssetRecord:
         record = self.get(sub_asset_id)
         if record.tenant_id != tenant_id:
             raise PermissionError("sub-asset does not belong to tenant")
         return record
+
+    def link_asset(self, sub_asset_id: UUID, *, asset_id: UUID) -> SubAssetRecord:
+        with self._lock:
+            record = self.get(sub_asset_id)
+            self._connection.execute(
+                "UPDATE sub_assets SET asset_id = ? WHERE sub_asset_id = ?",
+                (str(asset_id), str(sub_asset_id)),
+            )
+            self._connection.commit()
+        return SubAssetRecord(
+            sub_asset_id=record.sub_asset_id,
+            tenant_id=record.tenant_id,
+            parent_asset_ids=record.parent_asset_ids,
+            query=record.query,
+            result_ids=record.result_ids,
+            created_at=record.created_at,
+            asset_id=asset_id,
+        )
+
+    def list_for_tenant(self, tenant_id: UUID) -> list[SubAssetRecord]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM sub_assets WHERE tenant_id = ? ORDER BY created_at",
+                (str(tenant_id),),
+            ).fetchall()
+        return [self._record(row) for row in rows]
+
+    def find_by_asset(self, tenant_id: UUID, asset_id: UUID) -> SubAssetRecord | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM sub_assets WHERE tenant_id = ? AND asset_id = ?",
+                (str(tenant_id), str(asset_id)),
+            ).fetchone()
+        return self._record(row) if row is not None else None
+
+    @staticmethod
+    def _record(row: sqlite3.Row) -> SubAssetRecord:
+        raw_asset_id = row["asset_id"] if "asset_id" in row.keys() else None
+        return SubAssetRecord(
+            sub_asset_id=UUID(row["sub_asset_id"]),
+            tenant_id=UUID(row["tenant_id"]),
+            parent_asset_ids=tuple(json.loads(row["parent_asset_ids"])),
+            query=row["query"],
+            result_ids=tuple(json.loads(row["result_ids"])),
+            created_at=row["created_at"],
+            asset_id=UUID(raw_asset_id) if raw_asset_id else None,
+        )

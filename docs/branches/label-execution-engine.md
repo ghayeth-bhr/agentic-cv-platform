@@ -50,7 +50,7 @@ Additional coverage:
 
 ## Limitations
 
-- The P1 flow is HTTP-only. The browser has no Assets/Agent workbench for it yet; that is P2/P3.
+- The P1 label flow is HTTP-only. P2 added the Assets upload/index/search experience; P3 will expose labeling through the Agent chat.
 - `agentic-cv serve` runs both workers. The separate `agentic-cv worker` command still runs only the export worker.
 - Cancellation after some images have been labeled leaves those annotation revisions in place. Dataset creation is gated on `succeeded`, so a cancelled run is not packaged.
 - The fake-SAM HTTP journey proves orchestration and persistence, not SAM 3 quality. Real-model validation remains a P3/owner-machine gate.
@@ -59,4 +59,4 @@ Additional coverage:
 
 ## Next boundary
 
-P2 `feature/assets-experience`: make the workspace usable without UUIDs, with multi-file upload, asset detail, in-asset search, and sub-asset lineage; then wire the label/dataset/download path into the browser.
+P2 `feature/assets-experience`: make the workspace usable without UUIDs, with multi-file upload, asset detail, in-asset search, and sub-asset lineage. P3 then wires the label/dataset/download path into the Agent chat.

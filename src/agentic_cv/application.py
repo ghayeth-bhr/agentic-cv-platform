@@ -30,6 +30,7 @@ from .dataset_export_worker import DatasetExportWorker
 from .dataset_store import DatasetVersionBackend, DatasetVersionStore
 from .embeddings import HuggingFaceEmbeddingProvider
 from .errors import install_model_unavailable_handler
+from .index_worker import IndexWorker
 from .job_store import JobStore, JobStoreBackend
 from .label_images import LabelImageResolver
 from .label_worker import LabelWorker
@@ -185,6 +186,11 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
         vector_index = open_postgres_vector_index(config.postgres)
     else:
         vector_index = SqliteVectorIndex(str(metadata_dir / "vectors.sqlite3"))
+    semantic_search = SemanticSearchService(embedding_provider, vector_index)
+    semantic_indexer = AssetSemanticIndexer(
+        registry=registry, search=semantic_search, data_dir=config.data_dir,
+    )
+    index_worker = IndexWorker(jobs=jobs, indexer=semantic_indexer)
     resources = LocalAppResources(
         registry=registry, outbox=outbox, versions=versions, jobs=jobs, preview=preview,
         sub_assets=sub_assets, annotations=annotations, vector_index=vector_index,
@@ -231,6 +237,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
                     raise ValueError("worker_poll_interval must not be negative")
                 for target, name in (
                     (label_worker.run_forever, "label-worker"),
+                    (index_worker.run_forever, "index-worker"),
                     (export_worker.run_forever, "export-worker"),
                 ):
                     thread = Thread(
@@ -305,17 +312,15 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
             calibration=CalibrationApiDependencies(provider=sam3_provider),
             orchestrator=TaskOrchestrator(),
             sam3=sam3_provider,
+            jobs=jobs,
         )).router
-    )
-    semantic_search = SemanticSearchService(embedding_provider, vector_index)
-    semantic_indexer = AssetSemanticIndexer(
-        registry=registry, search=semantic_search, data_dir=config.data_dir,
     )
     app.include_router(
         create_semantic_app(SemanticApiDependencies(
             search=semantic_search,
             sub_assets=sub_assets,
             indexer=semantic_indexer,
+            index_worker=index_worker,
             registry=registry,
             authorizer=authorizer,
         )).router

@@ -63,3 +63,28 @@ def test_application_config_reads_postgres_opt_in(monkeypatch, tmp_path):
 
     assert config.postgres is not None
     assert config.postgres.dsn == "postgresql://postgres@localhost/cv"
+
+
+def test_jobs_endpoint_lists_queued_index_job_without_other_tenants(tmp_path):
+    app = create_local_app(
+        LocalAppConfig(data_dir=tmp_path / "data", start_workers=False)
+    )
+    tenant_id = "00000000-0000-0000-0000-000000000001"
+    headers = {"X-Tenant-ID": tenant_id}
+
+    with TestClient(app) as client:
+        asset = client.post("/v1/assets", headers=headers, json={"name": "Job asset"})
+        assert asset.status_code == 201
+        asset_id = asset.json()["asset_id"]
+
+        queued = client.post(f"/v1/assets/{asset_id}/index-jobs", headers=headers)
+        assert queued.status_code == 202
+
+        jobs = client.get("/v1/jobs", headers=headers)
+
+    assert jobs.status_code == 200
+    values = jobs.json()["jobs"]
+    assert len(values) == 1
+    assert values[0]["kind"] == "index-asset"
+    assert values[0]["status"] == "queued"
+    assert "job_id" in values[0]

@@ -25,7 +25,7 @@ from .dataset_export import ExportFormat
 from .dataset_export_workflow import DatasetExportWorkflow
 from .dataset_store import DatasetVersionBackend, DatasetVersionRecord
 from .errors import ModelUnavailableError, install_model_unavailable_handler
-from .job_store import JobRecord
+from .job_store import JobRecord, JobStoreBackend
 from .label_workflow import DurableLabelWorkflow
 from .orchestrator import TaskOrchestrationRequest, TaskOrchestrator
 from .outbox import Outbox
@@ -101,6 +101,20 @@ class DatasetExportJobResponse(BaseModel):
     error: str | None
 
 
+class JobSummaryResponse(BaseModel):
+    job_id: UUID
+    kind: str
+    status: str
+    attempts: int
+    error: str | None
+    created_at: str
+    updated_at: str
+
+
+class JobListResponse(BaseModel):
+    jobs: list[JobSummaryResponse]
+
+
 @dataclass(frozen=True, kw_only=True)
 class RefinementApiDependencies:
     service: ClickRefinementService
@@ -148,6 +162,7 @@ class ApiDependencies:
     calibration: CalibrationApiDependencies | None = None
     orchestrator: TaskOrchestrator | None = None
     sam3: Sam3Provider | None = None
+    jobs: JobStoreBackend | None = None
 
 
 def _authorize(
@@ -642,6 +657,49 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
             object_uri=source.object_uri,
             content_sha256=source.content_sha256,
         )
+
+    if dependencies.jobs is not None:
+        @app.get("/v1/jobs", response_model=JobListResponse)
+        def list_jobs(
+            status: str | None = Query(None),
+            kind: str | None = Query(None),
+            x_tenant_id: str = Header(...),
+            x_api_key: str | None = Header(None),
+            authorization: str | None = Header(None),
+        ) -> JobListResponse:
+            tenant_id = _tenant(x_tenant_id)
+            _authorize(
+                dependencies.authorizer,
+                credential=_credential(authorization, x_api_key),
+                tenant_id=tenant_id,
+                role="jobs:read",
+            )
+            if status is not None and status not in {
+                "queued", "running", "succeeded", "failed", "cancelled"
+            }:
+                raise HTTPException(status_code=422, detail="invalid job status")
+            records = dependencies.jobs.list(status=status, kind=kind)  # type: ignore[arg-type]
+            return JobListResponse(jobs=[
+                JobSummaryResponse(
+                    job_id=job.job_id,
+                    kind=job.kind,
+                    status=job.status,
+                    attempts=job.attempts,
+                    error=job.error,
+                    created_at=(
+                        job.created_at.isoformat()
+                        if hasattr(job.created_at, "isoformat")
+                        else str(job.created_at)
+                    ),
+                    updated_at=(
+                        job.updated_at.isoformat()
+                        if hasattr(job.updated_at, "isoformat")
+                        else str(job.updated_at)
+                    ),
+                )
+                for job in records
+                if job.tenant_id == tenant_id
+            ])
 
     if dependencies.exports is not None:
         export_workflow = dependencies.exports.workflow

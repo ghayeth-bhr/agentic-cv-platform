@@ -2,7 +2,7 @@
 
 A local-first platform for managing image/video assets, searching them semantically, and building detection/segmentation datasets with prompted SAM 3 labeling.
 
-This repository currently contains a **strong infrastructure core and a growing product surface**. P0 (`fix/runtime-foundation`) made the local environment honest and diagnosable. P1 (`feature/label-execution-engine`) now executes queued label jobs, builds dataset versions from annotation revisions, and produces downloadable COCO/YOLO archives. The browser-level Assets and Agent experience is the next phase.
+This repository currently contains a **strong infrastructure core and a real Assets experience**. P0 (`fix/runtime-foundation`) made the local environment honest and diagnosable. P1 (`feature/label-execution-engine`) executes queued label jobs, builds dataset versions from annotation revisions, and produces downloadable COCO/YOLO archives. P2 (`feature/assets-experience`) replaces the UUID-driven workbench with a single-workspace **Assets** UI: multi-file chunked uploads, automatic search indexing, asset detail, in-asset search, and sub-asset lineage. The **Agent** chat is the next phase.
 
 ## Current status
 
@@ -18,9 +18,14 @@ This repository currently contains a **strong infrastructure core and a growing 
 | Background label worker + asset→image/video-frame resolver | Added in P1 |
 | Dataset builder over latest annotation revisions | Added in P1 |
 | COCO/YOLO export archives with images and `zip` download | Added in P1 |
+| Single-workspace Assets UI with no tenant/UUID controls | Added in P2 |
+| Multi-file chunked uploads + durable auto-index jobs | Added in P2 |
+| Asset detail, in-asset search, and sub-asset lineage | Added in P2 |
+| Datasets and Jobs lists readable from the workbench | Added in P2 |
+| Browser upload → index → search → sub-asset journey covered by Playwright | Added in P2 |
 | **Agent chat** (task spec → confirm → calibrate → label → dataset) | **Not built yet** |
-| **Browser-level label/dataset flow** | **Next (P2/P3)** |
-| **Manual refinement UI**, dataset gallery, live step cards | **Not built yet** |
+| **Browser-level label/dataset creation flow** | **Next (P3)** |
+| **Manual refinement UI** | **Not built yet** |
 
 The original root README was a 950-line concatenation of 23 branch READMEs. Those are preserved verbatim in [`docs/branches/`](docs/branches/README.md).
 
@@ -67,7 +72,7 @@ agentic-cv serve --data-dir .agentic-cv --host 127.0.0.1 --port 8000
 
 Open <http://127.0.0.1:8000>. Useful endpoints: `/api-info`, `/docs`, `/health/live`, `/health/ready`, `/health`, `/v1/metrics`.
 
-`agentic-cv serve` starts a label worker and an export worker in the app process. To run dataset-export jobs in a separate process instead:
+`agentic-cv serve` starts label, search-index, and export workers in the app process. To run dataset-export jobs in a separate process instead:
 
 ```powershell
 agentic-cv worker --data-dir .agentic-cv --worker-id export-worker
@@ -87,13 +92,16 @@ Do not run `ollama serve` if Ollama is already running on `127.0.0.1:11434`.
 
 ## What works today (browser)
 
-1. **Assets → Gallery**: list assets, thumbnails, source counts, "Index for search".
-2. **Assets → Upload**: create an asset and upload an image or video. Uploaded content is auto-indexed for search.
-3. **Assets → Search library**: semantic search across indexed frames. Results show images. Select results and **Create sub-asset**; the sub-asset is materialized as a real gallery asset.
-4. **Tools → Quick test**: run prompted SAM 3 on an existing asset source/frame or an uploaded image. Bounding boxes are scaled to the preview image.
-5. **Jobs & Exports → Label jobs / Exports**: inspect durable preview events and queue/inspect dataset-export jobs by dataset version.
+The workbench has two primary sections, **Assets** and **Agent**, plus a small **Datasets / Jobs** library area. It uses one local workspace; there is no tenant input and no UUID shown.
 
-The P1 backend path is available over HTTP even though the browser does not expose it yet: `POST /v1/label-jobs` → poll `GET /v1/label-jobs/{id}` → `POST /v1/datasets` → `POST /v1/dataset-exports` → `GET /v1/dataset-exports/{id}/download`. `agentic-cv serve` starts both the label and export workers by default.
+1. **Assets**: list assets by name and thumbnail. Open a card to inspect its sources, media type, and lineage.
+2. **Upload media**: create one asset from several images/videos. Files are hashed and uploaded in 5 MB chunks; a durable search-index job is queued automatically when upload finishes.
+3. **Search the library**: search all assets or only the selected asset with a natural-language description. Results show images and scores.
+4. **Save results as sub-asset**: materializes the matches as a real gallery asset with parent-asset and query lineage shown in its detail panel.
+5. **Datasets**: list dataset versions built from label revisions and export a COCO archive.
+6. **Jobs**: inspect background search-index, labeling, and export jobs, including failures.
+
+The **Agent** section is present but intentionally a next-phase placeholder. The P1 label path is still HTTP-driven: `POST /v1/label-jobs` → poll `GET /v1/label-jobs/{id}` → `POST /v1/datasets` → `POST /v1/dataset-exports` → `GET /v1/dataset-exports/{id}/download`. P3 wires that path into the Agent chat and dataset gallery.
 
 This is a single-user local workbench, not yet the agentic product described below.
 
@@ -107,7 +115,7 @@ Two primary sections:
 The execution plan is tracked in the audit document supplied by the owner (P0–P6). P0 is this branch. The next phases are:
 
 - **P1** `feature/label-execution-engine`: background runner, asset→image resolver, dataset builder, export download, job progress. Implemented in this branch; HTTP e2e and crash/cancel recovery are covered by tests.
-- **P2** `feature/assets-experience`: single-workspace default, multi-file/chunked uploads, auto-index jobs, asset detail page, in-asset search, sub-asset lineage.
+- **P2** `feature/assets-experience`: single-workspace default, multi-file/chunked uploads, auto-index jobs, asset detail page, in-asset search, sub-asset lineage. Implemented in this branch; covered by a Playwright upload → index → search → sub-asset journey.
 - **P3** `feature/agent-chat`: session persistence, LLM task-spec agent, VLM-calibrated pipeline, chat UI, dataset gallery.
 - **P4** `feature/manual-refinement-ui`: point-click refinement wired to revisions.
 - **P5** `feature/gpu-resource-manager`: model serialization, lazy load/unload, batching, measured performance.
@@ -134,6 +142,7 @@ FastAPI app (application.py)
 ├── embeddings.py          lazy SigLIP embeddings
 ├── label_workflow.py      durable label-job state machine
 ├── label_worker.py        queued label-job polling + expired-lease recovery
+├── index_worker.py        durable auto-index jobs + expired-lease recovery
 ├── label_images.py        asset sources/video frames → stable LabelImage records
 ├── batch_labeling.py      SAM 3 batch labeling + annotation persistence
 ├── dataset_builder.py     latest revisions → immutable dataset version + image files
@@ -159,10 +168,14 @@ Heavy dependencies are lazy or injectable. Default `pytest` runs with fakes and 
 | POST | `/v1/uploads/{id}/complete` | finalize and register a source |
 | GET | `/v1/assets/{id}/thumbnail` | representative thumbnail |
 | GET | `/v1/assets/{id}/image` | full representative image/frame (`source_id` optional) |
-| POST | `/v1/assets/{id}/index` | index an asset for semantic search |
+| POST | `/v1/assets/{id}/index` | index an asset for semantic search (synchronous) |
+| POST | `/v1/assets/{id}/index-jobs` | queue a durable auto-index job |
+| GET | `/v1/index-jobs/{id}` | read index-job status |
 | POST | `/v1/search` | semantic search |
 | GET | `/v1/search/records/{id}/image` | search-result image |
 | POST | `/v1/sub-assets/from-search` | create a sub-asset (and gallery asset) |
+| GET | `/v1/sub-assets` | list sub-assets with parent names and lineage |
+| GET | `/v1/jobs` | list background jobs for the tenant |
 | POST | `/v1/assets/{id}/predict` | prompted SAM 3 on one source |
 | POST | `/v1/predict` | multipart SAM 3 smoke endpoint |
 | POST | `/v1/orchestrate` | deterministic message → `TaskSpec` (regex fallback; not the agent) |
@@ -181,7 +194,12 @@ Heavy dependencies are lazy or injectable. Default `pytest` runs with fakes and 
 .venv\Scripts\python -m pytest -q
 ```
 
-Current local result: **214 passed, 10 skipped, 1 warning** (Starlette/httpx deprecation). The 10 skips are the opt-in PostgreSQL tests. The P1 tests include an HTTP-only fake-SAM journey through upload, labeling, dataset creation, COCO/YOLO export, zip download, cancellation, and expired-lease recovery.
+Current local result: **222 passed, 10 skipped, 1 warning** (Starlette/httpx deprecation). The 10 skips are the opt-in PostgreSQL tests. The P1 tests include an HTTP-only fake-SAM journey through upload, labeling, dataset creation, COCO/YOLO export, zip download, cancellation, and expired-lease recovery. The P2 browser test (`tests/test_assets_ui_playwright.py`) drives a real uvicorn server with a fake embedder through upload → auto-index → in-asset search → sub-asset lineage. It skips if the Playwright browser binary is not installed:
+
+```powershell
+.venv\Scripts\python -m playwright install chromium
+.venv\Scripts\python -m pytest tests/test_assets_ui_playwright.py -q
+```
 
 Real PostgreSQL validation is opt-in:
 
@@ -208,24 +226,30 @@ Model access: `facebook/sam3` is gated. Request access on Hugging Face and set `
 ## Demo script (current capabilities)
 
 1. `agentic-cv doctor` and `agentic-cv serve`.
-2. Upload one image and one short video to a new asset.
-3. Wait for auto-indexing; open **Search library** and search for an object.
-4. Select results and create a sub-asset; confirm it appears in the gallery.
-5. Open **Quick test**, select the sub-asset and a source, run a prompt, check that boxes align with the image.
-6. Open **Jobs & Exports** and inspect a label job's preview events or an export job.
+2. Open **Assets → Upload media**, name the asset, and select several photos plus a short video.
+3. Wait for the upload to finish and the auto-index job to report `indexed for search`.
+4. Open the asset card; confirm its sources and detail panel.
+5. In **Search the library**, switch scope to **Selected asset**, search for an object, and inspect the returned images.
+6. Click **Save results as sub-asset**; open the new card and confirm the query and parent-asset lineage.
+7. Open **Jobs** to inspect the index job, or **Datasets** to list versions and download a COCO export when one exists.
+
+The full release demo in the owner's section 7 adds the Agent prompt (`Create a segmentation dataset of workers wearing yellow vests.`), calibration, labeling, refinement, and COCO/YOLO downloads; those remain P3/P4 work.
 
 ## Limitations / safety
 
-- Interactive prediction is one image/frame per request. Whole-asset autolabeling is available through the HTTP label-job → dataset → export flow, but the browser does not expose it until P2/P3.
-- `agentic-cv serve` executes label jobs and export jobs. The separate `agentic-cv worker` command still runs only the export worker.
+- The browser exposes upload, indexing, search, sub-assets, dataset listing, and export download. Creating a label job and building a dataset from it is still HTTP-only until P3.
+- `agentic-cv serve` executes label, index, and export jobs. The separate `agentic-cv worker` command still runs only the export worker.
 - Label jobs that are cancelled mid-run can leave partial annotation revisions; dataset creation requires a succeeded job, so partial runs are not packaged.
-- The agent chat, task-spec LLM, VLM calibration bridge, dataset gallery, and refinement UI are not reachable from the UI yet.
+- The Agent chat, task-spec LLM, VLM calibration bridge, dataset creation flow, and refinement UI are not reachable from the UI yet.
+- The P2 Playwright test uses a fake embedder. Real SigLIP/SAM 3 quality and the 6 GB laptop journey remain owner-machine gates.
+- Sub-assets copy the matched search images into a new asset; they are snapshots, not live filters over the parent asset.
 - SAM 3 is subject to Meta's SAM License and gated weights; this repository is not legal advice or a hosted-product clearance. See `docs/branches/sam-3-licensing-and-hosted-product-review-roadmap-item-10-complete.md`.
 - Do not commit `.agentic-cv/`, model weights, tokens, or local exports.
 
 ## Branch documentation
 
-- Current P1 branch: [`docs/branches/label-execution-engine.md`](docs/branches/label-execution-engine.md)
+- Current P2 branch: [`docs/branches/assets-experience.md`](docs/branches/assets-experience.md)
+- P1 branch record: [`docs/branches/label-execution-engine.md`](docs/branches/label-execution-engine.md)
 - P0 branch record: [`docs/branches/fix-runtime-foundation.md`](docs/branches/fix-runtime-foundation.md)
 - Historical branch READMEs: [`docs/branches/README.md`](docs/branches/README.md)
 - Repository hygiene proposal: [`docs/REPO_HYGIENE.md`](docs/REPO_HYGIENE.md)

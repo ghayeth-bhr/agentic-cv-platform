@@ -11,14 +11,16 @@ from uuid import UUID
 
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .asset_registry import AssetRegistryBackend
 from .auth import Authorizer
 from .errors import install_model_unavailable_handler
+from .index_worker import INDEX_JOB_KIND, IndexWorker
+from .job_store import JobRecord
 from .semantic_indexing import AssetIndexResult, AssetSemanticIndexer
 from .semantic_search import SearchResult, SemanticSearchService
-from .sub_assets import SubAssetBackend
+from .sub_assets import SubAssetBackend, SubAssetRecord
 
 
 class SearchRequest(BaseModel):
@@ -41,11 +43,13 @@ class SearchResponse(BaseModel):
 class SubAssetResponse(BaseModel):
     sub_asset_id: UUID
     parent_asset_ids: tuple[str, ...]
+    parent_asset_names: list[str] = Field(default_factory=list)
     query: str
     result_ids: tuple[str, ...]
     asset_id: UUID | None = None
     asset_name: str | None = None
     source_count: int = 0
+    created_at: str | None = None
 
 
 class IndexAssetResponse(BaseModel):
@@ -55,11 +59,21 @@ class IndexAssetResponse(BaseModel):
     detail: str
 
 
+class IndexJobResponse(BaseModel):
+    job_id: UUID
+    asset_id: UUID
+    kind: str
+    status: str
+    attempts: int
+    error: str | None = None
+
+
 @dataclass(frozen=True, kw_only=True)
 class SemanticApiDependencies:
     search: SemanticSearchService
     sub_assets: SubAssetBackend
     indexer: AssetSemanticIndexer | None = None
+    index_worker: IndexWorker | None = None
     registry: AssetRegistryBackend | None = None
     authorizer: Authorizer | None = None
 
@@ -161,6 +175,47 @@ def _credential(authorization: str | None, api_key: str | None) -> str | None:
     return authorization or api_key
 
 
+def _index_job_response(job: JobRecord) -> IndexJobResponse:
+    return IndexJobResponse(
+        job_id=job.job_id,
+        asset_id=UUID(str(job.payload.get("asset_id"))),
+        kind=job.kind,
+        status=job.status,
+        attempts=job.attempts,
+        error=job.error,
+    )
+
+
+def _sub_asset_response(
+    record: SubAssetRecord,
+    *,
+    registry: AssetRegistryBackend | None,
+    tenant_id: UUID,
+    source_count: int | None = None,
+) -> SubAssetResponse:
+    names: dict[str, str] = {}
+    if registry is not None:
+        names = {
+            str(asset.asset_id): asset.name
+            for asset in registry.list_assets(tenant_id=tenant_id)
+        }
+    return SubAssetResponse(
+        sub_asset_id=record.sub_asset_id,
+        parent_asset_ids=record.parent_asset_ids,
+        parent_asset_names=[
+            names.get(parent_id, "Source asset") for parent_id in record.parent_asset_ids
+        ],
+        query=record.query,
+        result_ids=record.result_ids,
+        asset_id=record.asset_id,
+        asset_name=names.get(str(record.asset_id)) if record.asset_id else None,
+        source_count=(
+            len(record.result_ids) if source_count is None else source_count
+        ),
+        created_at=record.created_at,
+    )
+
+
 def create_app(dependencies: SemanticApiDependencies) -> FastAPI:
     app = FastAPI(title="Agentic CV semantic search API", version="1")
     install_model_unavailable_handler(app)
@@ -240,6 +295,79 @@ def create_app(dependencies: SemanticApiDependencies) -> FastAPI:
             detail=result.detail,
         )
 
+    if dependencies.index_worker is not None:
+        @app.post("/v1/assets/{asset_id}/index-jobs", response_model=IndexJobResponse, status_code=202)
+        def submit_index_job(
+            asset_id: UUID,
+            x_tenant_id: str = Header(...),
+            x_api_key: str | None = Header(None),
+            authorization: str | None = Header(None),
+        ) -> IndexJobResponse:
+            tenant_id = _tenant(x_tenant_id)
+            _authorize(
+                dependencies.authorizer,
+                credential=_credential(authorization, x_api_key),
+                tenant_id=tenant_id,
+                role="assets:write",
+            )
+            registry = dependencies.registry or (
+                dependencies.indexer.registry if dependencies.indexer else None
+            )
+            if registry is not None:
+                known = {
+                    str(asset.asset_id)
+                    for asset in registry.list_assets(tenant_id=tenant_id)
+                }
+                if str(asset_id) not in known:
+                    raise HTTPException(status_code=404, detail="unknown asset")
+            job = dependencies.index_worker.submit(
+                tenant_id=tenant_id, asset_id=asset_id
+            )
+            return _index_job_response(job)
+
+        @app.get("/v1/index-jobs/{job_id}", response_model=IndexJobResponse)
+        def get_index_job(
+            job_id: UUID,
+            x_tenant_id: str = Header(...),
+            x_api_key: str | None = Header(None),
+            authorization: str | None = Header(None),
+        ) -> IndexJobResponse:
+            tenant_id = _tenant(x_tenant_id)
+            _authorize(
+                dependencies.authorizer,
+                credential=_credential(authorization, x_api_key),
+                tenant_id=tenant_id,
+                role="assets:read",
+            )
+            try:
+                job = dependencies.index_worker.jobs.get(job_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            if job.tenant_id != tenant_id or job.kind != INDEX_JOB_KIND:
+                raise HTTPException(status_code=404, detail="unknown index job")
+            return _index_job_response(job)
+
+    @app.get("/v1/sub-assets", response_model=list[SubAssetResponse])
+    def list_sub_assets(
+        x_tenant_id: str = Header(...),
+        x_api_key: str | None = Header(None),
+        authorization: str | None = Header(None),
+    ) -> list[SubAssetResponse]:
+        tenant_id = _tenant(x_tenant_id)
+        _authorize(
+            dependencies.authorizer,
+            credential=_credential(authorization, x_api_key),
+            tenant_id=tenant_id,
+            role="assets:read",
+        )
+        registry = dependencies.registry or (
+            dependencies.indexer.registry if dependencies.indexer else None
+        )
+        return [
+            _sub_asset_response(record, registry=registry, tenant_id=tenant_id)
+            for record in dependencies.sub_assets.list_for_tenant(tenant_id)
+        ]
+
     @app.post("/v1/sub-assets/from-search", response_model=SubAssetResponse, status_code=201)
     def create_sub_asset(
         request: SearchRequest,
@@ -259,23 +387,21 @@ def create_app(dependencies: SemanticApiDependencies) -> FastAPI:
             record = dependencies.sub_assets.create_from_results(
                 tenant_id=tenant_id, query=request.query, results=results
             )
-            asset_id = None
-            asset_name = None
             source_count = 0
             registry = dependencies.registry or (dependencies.indexer.registry if dependencies.indexer else None)
             if registry is not None:
-                asset_id, asset_name, source_count = _materialize_search_asset(
+                asset_id, _, source_count = _materialize_search_asset(
                     registry=registry, tenant_id=tenant_id, query=request.query, results=results
+                )
+                record = dependencies.sub_assets.link_asset(
+                    record.sub_asset_id, asset_id=asset_id
                 )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return SubAssetResponse(
-            sub_asset_id=record.sub_asset_id,
-            parent_asset_ids=record.parent_asset_ids,
-            query=record.query,
-            result_ids=record.result_ids,
-            asset_id=asset_id,
-            asset_name=asset_name,
+        return _sub_asset_response(
+            record,
+            registry=registry,
+            tenant_id=tenant_id,
             source_count=source_count,
         )
 

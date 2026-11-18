@@ -76,8 +76,9 @@ class PostgresSubAssetStore:
             self._connection.execute(
                 """
                 INSERT INTO sub_assets
-                    (sub_asset_id, tenant_id, parent_asset_ids, query, result_ids, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                    (sub_asset_id, tenant_id, parent_asset_ids, query, result_ids,
+                     created_at, asset_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     record.sub_asset_id,
@@ -86,6 +87,7 @@ class PostgresSubAssetStore:
                     record.query,
                     list(record.result_ids),
                     _utc_now(),
+                    None,
                 ),
             )
             self._connection.commit()
@@ -106,6 +108,40 @@ class PostgresSubAssetStore:
             raise PermissionError("sub-asset does not belong to tenant")
         return record
 
+    def link_asset(self, sub_asset_id: UUID, *, asset_id: UUID) -> SubAssetRecord:
+        with self._lock:
+            record = self.get(sub_asset_id)
+            self._connection.execute(
+                "UPDATE sub_assets SET asset_id = %s WHERE sub_asset_id = %s",
+                (asset_id, sub_asset_id),
+            )
+            self._connection.commit()
+        return SubAssetRecord(
+            sub_asset_id=record.sub_asset_id,
+            tenant_id=record.tenant_id,
+            parent_asset_ids=record.parent_asset_ids,
+            query=record.query,
+            result_ids=record.result_ids,
+            created_at=record.created_at,
+            asset_id=asset_id,
+        )
+
+    def list_for_tenant(self, tenant_id: UUID) -> list[SubAssetRecord]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM sub_assets WHERE tenant_id = %s ORDER BY created_at",
+                (tenant_id,),
+            ).fetchall()
+        return [self._record(row) for row in rows]
+
+    def find_by_asset(self, tenant_id: UUID, asset_id: UUID) -> SubAssetRecord | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM sub_assets WHERE tenant_id = %s AND asset_id = %s",
+                (tenant_id, asset_id),
+            ).fetchone()
+        return self._record(row) if row is not None else None
+
     @staticmethod
     def _record(row: Any) -> SubAssetRecord:
         parent = row["parent_asset_ids"]
@@ -114,6 +150,7 @@ class PostgresSubAssetStore:
             parent = json.loads(parent)
         if isinstance(result_ids, str):
             result_ids = json.loads(result_ids)
+        asset_id = row["asset_id"]
         return SubAssetRecord(
             sub_asset_id=UUID(str(row["sub_asset_id"])),
             tenant_id=UUID(str(row["tenant_id"])),
@@ -121,4 +158,5 @@ class PostgresSubAssetStore:
             query=row["query"],
             result_ids=tuple(result_ids),
             created_at=_iso(row["created_at"]),
+            asset_id=UUID(str(asset_id)) if asset_id else None,
         )

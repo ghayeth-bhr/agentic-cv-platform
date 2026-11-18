@@ -7,6 +7,8 @@ from agentic_cv.semantic_api import SemanticApiDependencies, create_app
 from agentic_cv.semantic_search import SearchResult
 from agentic_cv.sub_assets import SubAssetStore
 from agentic_cv.auth import Principal, StaticApiKeyAuthorizer
+from agentic_cv.index_worker import IndexWorker
+from agentic_cv.job_store import JobStore
 
 
 class FakeSearch:
@@ -93,4 +95,35 @@ def test_semantic_api_optional_reader_auth(tmp_path):
     assert missing.status_code == 400
     assert valid.status_code == 200
     assert wrong.status_code == 403
+    store.close()
+
+
+def test_index_job_api_queues_and_reads_durable_job(tmp_path):
+    jobs = JobStore(str(tmp_path / "jobs.sqlite3"))
+    store = SubAssetStore(str(tmp_path / "sub-assets.sqlite3"))
+    worker = IndexWorker(jobs=jobs, indexer=object())  # type: ignore[arg-type]
+    client = TestClient(create_app(SemanticApiDependencies(
+        search=FakeSearch(), sub_assets=store, index_worker=worker,
+    )))
+    tenant_id = uuid4()
+    asset_id = uuid4()
+    headers = {"X-Tenant-ID": str(tenant_id)}
+
+    queued = client.post(f"/v1/assets/{asset_id}/index-jobs", headers=headers)
+
+    assert queued.status_code == 202
+    value = queued.json()
+    assert value["asset_id"] == str(asset_id)
+    assert value["status"] == "queued"
+    assert value["kind"] == "index-asset"
+
+    fetched = client.get(f"/v1/index-jobs/{value['job_id']}", headers=headers)
+    assert fetched.status_code == 200
+    assert fetched.json()["job_id"] == value["job_id"]
+
+    other_tenant = client.get(
+        f"/v1/index-jobs/{value['job_id']}", headers={"X-Tenant-ID": str(uuid4())}
+    )
+    assert other_tenant.status_code == 404
+    jobs.close()
     store.close()
