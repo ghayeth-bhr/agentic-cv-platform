@@ -169,6 +169,33 @@
           <dl id="export-details" class="detail-list" hidden></dl>
         </div>
       </section>
+
+      <section class="panel panel-gallery" aria-labelledby="gallery-title">
+        <header class="panel-header">
+          <h2 id="gallery-title">Preview gallery</h2>
+          <p>Replay durable job preview events as a contact sheet. Use a label-job ID that emits preview events for this tenant.</p>
+        </header>
+        <div class="panel-body">
+          <div class="field-row">
+            <label class="field field-grow">
+              <span>Job ID</span>
+              <input id="gallery-job-id" type="text" placeholder="Label job UUID" spellcheck="false" autocomplete="off">
+            </label>
+            <label class="field">
+              <span>After event ID</span>
+              <input id="gallery-after" type="number" min="0" step="1" placeholder="0">
+            </label>
+          </div>
+          <div class="actions">
+            <button id="gallery-load-button" type="button" class="btn btn-primary">Load preview</button>
+            <button id="gallery-use-export-job-button" type="button" class="btn btn-secondary">Use export job ID</button>
+            <button id="gallery-clear-button" type="button" class="btn btn-secondary">Clear</button>
+          </div>
+          <div id="gallery-status" class="status" role="status" aria-live="polite"></div>
+          <div id="gallery-summary" class="gallery-summary" hidden></div>
+          <div id="gallery-grid" class="gallery-grid" aria-live="polite"></div>
+        </div>
+      </section>
     </main>
 
     <footer class="site-footer">

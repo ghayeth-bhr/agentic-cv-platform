@@ -216,17 +216,41 @@
       container.appendChild(empty);
       return;
     }
-    results.forEach((r, i) => {
-      const row = document.createElement("div"); row.className = "result-row";
-      const rank = document.createElement("div"); rank.className = "result-rank"; rank.textContent = String(i + 1).padStart(2, "0");
-      const main = document.createElement("div"); main.className = "result-main";
-      const id = document.createElement("div"); id.className = "result-id"; id.textContent = r.record_id;
-      const meta = document.createElement("div"); meta.className = "result-meta"; meta.textContent = `asset ${r.asset_id}`;
-      main.append(id, meta);
-      const score = document.createElement("div"); score.className = "result-score"; score.textContent = Number(r.score).toFixed(4);
-      row.append(rank, main, score);
-      container.appendChild(row);
+    const grid = document.createElement("div");
+    grid.className = "result-gallery";
+    results.forEach((r) => {
+      const score = Number(r.score);
+      const pct = Number.isFinite(score) ? Math.max(0, Math.min(100, score * 100)) : 0;
+      const card = document.createElement("article");
+      card.className = "result-card";
+
+      const head = document.createElement("div");
+      head.className = "result-card-head";
+      const id = document.createElement("div");
+      id.className = "result-id";
+      id.textContent = r.record_id;
+      const scoreEl = document.createElement("div");
+      scoreEl.className = "result-score";
+      scoreEl.textContent = Number.isFinite(score) ? score.toFixed(4) : "—";
+      head.append(id, scoreEl);
+
+      const meta = document.createElement("p");
+      meta.className = "result-meta";
+      meta.append("asset ");
+      const asset = document.createElement("span");
+      asset.textContent = r.asset_id || "—";
+      meta.appendChild(asset);
+
+      const bar = document.createElement("div");
+      bar.className = "score-bar";
+      const fill = document.createElement("i");
+      fill.style.width = pct.toFixed(1) + "%";
+      bar.appendChild(fill);
+
+      card.append(head, meta, bar);
+      grid.appendChild(card);
     });
+    container.appendChild(grid);
   }
 
   function searchPayload() {
@@ -349,6 +373,162 @@
     } finally {
       setBusy(btn, false);
     }
+  });
+
+  // 5) Preview gallery
+  function parseSseEvents(text) {
+    const events = [];
+    const blocks = String(text || "").split(/\n\n+/);
+    for (const block of blocks) {
+      if (!block.trim()) continue;
+      let eventId = null;
+      let data = null;
+      for (const line of block.split(/\n/)) {
+        if (line.startsWith("id:")) {
+          const n = Number(line.slice(3).trim());
+          if (Number.isFinite(n)) eventId = n;
+        } else if (line.startsWith("data:")) {
+          const raw = line.slice(5).trim();
+          try { data = JSON.parse(raw); } catch { data = null; }
+        }
+      }
+      if (data) {
+        if (eventId != null && data.event_id == null) data.event_id = eventId;
+        events.push(data);
+      }
+    }
+    return events;
+  }
+
+  function renderGallery(events) {
+    const grid = $("gallery-grid");
+    const summary = $("gallery-summary");
+    grid.innerHTML = "";
+    if (!events || !events.length) {
+      summary.hidden = true;
+      summary.innerHTML = "";
+      return;
+    }
+    const last = events[events.length - 1];
+    const total = Number(last.total) || 0;
+    const processed = Number(last.processed) || 0;
+    summary.hidden = false;
+    summary.innerHTML = "";
+    const parts = [
+      ["Events", String(events.length)],
+      ["Processed", total ? `${processed} / ${total}` : String(processed)],
+      ["Latest status", String(last.status || "—")],
+      ["Job", String(last.job_id || "—")],
+    ];
+    for (const [k, v] of parts) {
+      const span = document.createElement("span");
+      span.append(`${k} `);
+      const strong = document.createElement("strong");
+      strong.textContent = v;
+      span.appendChild(strong);
+      summary.appendChild(span);
+    }
+
+    for (const ev of events) {
+      const evTotal = Number(ev.total) || 0;
+      const evProcessed = Number(ev.processed) || 0;
+      const pct = evTotal > 0 ? Math.max(0, Math.min(100, (evProcessed / evTotal) * 100)) : 0;
+      const status = ev.status || "unknown";
+
+      const card = document.createElement("article");
+      card.className = "gallery-card";
+      card.dataset.status = status;
+
+      const head = document.createElement("div");
+      head.className = "gallery-card-head";
+      const title = document.createElement("div");
+      title.className = "gallery-card-title";
+      title.textContent = ev.image_id || "unknown image";
+      const sub = document.createElement("div");
+      sub.className = "gallery-card-sub";
+      sub.textContent = ev.event_id != null ? `event #${ev.event_id}` : "event";
+      head.append(title, sub);
+
+      const body = document.createElement("div");
+      body.className = "gallery-card-body";
+      const pill = document.createElement("span");
+      pill.className = "status-pill";
+      pill.dataset.status = status;
+      pill.textContent = status;
+      const kv = document.createElement("dl");
+      kv.className = "gallery-kv";
+      const rows = [
+        ["Progress", evTotal ? `${evProcessed} / ${evTotal}` : String(evProcessed)],
+        ["Created", ev.created_at || "—"],
+      ];
+      for (const [k, v] of rows) {
+        const dt = document.createElement("dt"); dt.textContent = k;
+        const dd = document.createElement("dd"); dd.textContent = v;
+        kv.append(dt, dd);
+      }
+      body.append(pill, kv);
+
+      const foot = document.createElement("div");
+      foot.className = "gallery-card-foot";
+      const bar = document.createElement("div");
+      bar.className = "gallery-progress";
+      const fill = document.createElement("i");
+      fill.style.width = `${pct.toFixed(1)}%`;
+      bar.appendChild(fill);
+      foot.appendChild(bar);
+
+      card.append(head, body, foot);
+      grid.appendChild(card);
+    }
+  }
+
+  $("gallery-load-button").addEventListener("click", async () => {
+    const btn = $("gallery-load-button");
+    const jobId = $("gallery-job-id").value.trim();
+    const afterRaw = $("gallery-after").value.trim();
+    if (!jobId) { setStatus("gallery-status", "Enter a job ID.", "error"); return; }
+    const params = new URLSearchParams();
+    if (afterRaw !== "") params.set("after_event_id", afterRaw);
+    const qs = params.toString();
+    const path = `/v1/jobs/${encodeURIComponent(jobId)}/preview${qs ? `?${qs}` : ""}`;
+    setBusy(btn, true);
+    setStatus("gallery-status", "Loading preview events…", "busy");
+    try {
+      const response = await fetch(path, { headers: { "X-Tenant-ID": tenantId() } });
+      const text = await response.text();
+      if (!response.ok) {
+        let body = null;
+        try { body = text ? JSON.parse(text) : null; } catch { body = null; }
+        const detail = body && body.detail ? body.detail : (text || `Request failed (${response.status})`);
+        throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+      }
+      const events = parseSseEvents(text);
+      renderGallery(events);
+      if (!events.length) {
+        setStatus("gallery-status", "No preview events found for this job and tenant. The job may not emit previews, or none match the cursor.", "ok");
+      } else {
+        setStatus("gallery-status", `Loaded ${events.length} preview event${events.length === 1 ? "" : "s"}.`, "ok");
+      }
+    } catch (err) {
+      renderGallery([]);
+      setStatus("gallery-status", err.message || String(err), "error");
+    } finally {
+      setBusy(btn, false);
+    }
+  });
+
+  $("gallery-use-export-job-button").addEventListener("click", () => {
+    const exportJobId = $("job-id").value.trim();
+    if (!exportJobId) { setStatus("gallery-status", "No export job ID to copy.", "error"); return; }
+    $("gallery-job-id").value = exportJobId;
+    setStatus("gallery-status", "Copied export job ID into gallery. Note: export jobs may not emit preview events.", "ok");
+  });
+
+  $("gallery-clear-button").addEventListener("click", () => {
+    $("gallery-grid").innerHTML = "";
+    $("gallery-summary").hidden = true;
+    $("gallery-summary").innerHTML = "";
+    setStatus("gallery-status", "Gallery cleared.", "ok");
   });
 
   checkRuntime();
