@@ -5,9 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from uuid import UUID
 
-from fastapi import FastAPI, Header, HTTPException
+from urllib.parse import quote
+
+from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from .asset_registry import AssetRegistryBackend
 from .auth import Authorizer
 from .semantic_indexing import AssetIndexResult, AssetSemanticIndexer
 from .semantic_search import SearchResult, SemanticSearchService
@@ -24,6 +28,7 @@ class SearchResultResponse(BaseModel):
     record_id: str
     asset_id: str
     score: float
+    image_url: str | None = None
 
 
 class SearchResponse(BaseModel):
@@ -49,6 +54,7 @@ class SemanticApiDependencies:
     search: SemanticSearchService
     sub_assets: SubAssetBackend
     indexer: AssetSemanticIndexer | None = None
+    registry: AssetRegistryBackend | None = None
     authorizer: Authorizer | None = None
 
 
@@ -59,10 +65,21 @@ def _tenant(value: str) -> UUID:
         raise HTTPException(status_code=400, detail="X-Tenant-ID must be a UUID") from exc
 
 
-def _result_response(results: list[SearchResult]) -> SearchResponse:
+def _image_url(record_id: str, tenant_id: UUID | None) -> str | None:
+    if tenant_id is None:
+        return None
+    return f"/v1/search/records/{quote(record_id, safe='')}/image?tenant_id={tenant_id}"
+
+
+def _result_response(results: list[SearchResult], *, tenant_id: UUID | None) -> SearchResponse:
     return SearchResponse(
         results=[
-            SearchResultResponse(record_id=result.record_id, asset_id=result.asset_id, score=result.score)
+            SearchResultResponse(
+                record_id=result.record_id,
+                asset_id=result.asset_id,
+                score=result.score,
+                image_url=_image_url(result.record_id, tenant_id),
+            )
             for result in results
         ]
     )
@@ -117,7 +134,36 @@ def create_app(dependencies: SemanticApiDependencies) -> FastAPI:
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return _result_response(results)
+        return _result_response(results, tenant_id=tenant_id)
+
+    @app.get("/v1/search/records/{record_id}/image")
+    def search_record_image(
+        record_id: str,
+        x_tenant_id: str | None = Header(None),
+        tenant_id_q: str | None = Query(None, alias="tenant_id"),
+        x_api_key: str | None = Header(None),
+        authorization: str | None = Header(None),
+    ) -> FileResponse:
+        raw_tenant = x_tenant_id or tenant_id_q
+        if raw_tenant is None:
+            raise HTTPException(status_code=400, detail="X-Tenant-ID or tenant_id is required")
+        tenant_id = _tenant(raw_tenant)
+        _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="search:read")
+        record = dependencies.search.get_record(record_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="unknown search record")
+        registry = dependencies.registry or (dependencies.indexer.registry if dependencies.indexer else None)
+        if registry is None:
+            raise HTTPException(status_code=503, detail="asset registry is not configured")
+        try:
+            tenant_asset_ids = {str(item.asset_id) for item in registry.list_assets(tenant_id=tenant_id)}
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="failed to verify asset ownership") from exc
+        if str(record.asset_id) not in tenant_asset_ids:
+            raise HTTPException(status_code=404, detail="unknown search record")
+        if not record.image_path.exists():
+            raise HTTPException(status_code=404, detail="search result image unavailable")
+        return FileResponse(record.image_path)
 
     @app.post("/v1/assets/{asset_id}/index", response_model=IndexAssetResponse)
     def index_asset(

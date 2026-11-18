@@ -230,6 +230,8 @@ select { cursor: pointer; }
   border: 1px solid var(--line); border-left: 3px solid var(--accent); background: var(--bg-elev);
   padding: 0.6rem 0.7rem; display: grid; gap: 0.3rem; border-radius: var(--radius-sm);
 }
+.result-thumb { margin: -0.1rem -0.1rem 0.15rem; border-radius: 4px; overflow: hidden; background: #0a0d10; border: 1px solid var(--line-soft); aspect-ratio: 16 / 10; }
+.result-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .result-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; }
 .result-id { font-family: var(--mono); font-size: 0.78rem; font-weight: 500; word-break: break-all; }
 .result-score { font-family: var(--mono); font-size: 0.78rem; color: var(--accent); white-space: nowrap; }

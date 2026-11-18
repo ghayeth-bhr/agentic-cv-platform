@@ -46,6 +46,8 @@ class VectorIndex(Protocol):
 
     def remove(self, record_id: str) -> None: ...
 
+    def get_record(self, record_id: str) -> ImageRecord | None: ...
+
     def search(
         self,
         query_embedding: Sequence[float],
@@ -72,6 +74,12 @@ class LocalVectorIndex:
 
     def remove(self, record_id: str) -> None:
         self._records.pop(record_id, None)
+
+    def get_record(self, record_id: str) -> ImageRecord | None:
+        item = self._records.get(record_id)
+        if item is None:
+            return None
+        return item[0]
 
     def search(
         self,
@@ -121,3 +129,6 @@ class SemanticSearchService:
         if not query.strip():
             raise ValueError("query must not be empty")
         return self.index.search(self.provider.embed_text(query), asset_ids=asset_ids, limit=limit)
+
+    def get_record(self, record_id: str) -> ImageRecord | None:
+        return self.index.get_record(record_id)

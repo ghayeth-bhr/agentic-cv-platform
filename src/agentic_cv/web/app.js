@@ -503,6 +503,18 @@
       const card = document.createElement("article");
       card.className = "result-card";
 
+      if (r.image_url) {
+        const thumb = document.createElement("div");
+        thumb.className = "result-thumb";
+        const img = document.createElement("img");
+        img.src = r.image_url;
+        img.alt = r.record_id || "Search result";
+        img.loading = "lazy";
+        img.onerror = () => { thumb.remove(); };
+        thumb.appendChild(img);
+        card.appendChild(thumb);
+      }
+
       const head = document.createElement("div");
       head.className = "result-card-head";
       const id = document.createElement("div");
