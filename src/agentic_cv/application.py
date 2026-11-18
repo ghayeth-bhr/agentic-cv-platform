@@ -12,16 +12,20 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .api import ApiDependencies, ExportApiDependencies, create_app as create_core_app
+from .api import ApiDependencies, CalibrationApiDependencies, ExportApiDependencies, LabelApiDependencies, create_app as create_core_app
+from .annotation_store import AnnotationRevisionBackend, AnnotationRevisionStore
 from .asset_registry import AssetRegistry, AssetRegistryBackend
 from .auth import Authorizer, OidcJwtAuthorizer, Principal, StaticApiKeyAuthorizer
+from .batch_labeling import Sam3BatchLabeler
 from .broker import RabbitMqConfig, RabbitMqPublisher
 from .dataset_export import DatasetExportService
 from .dataset_export_workflow import DatasetExportWorkflow, DatasetExportWorkflowDependencies
 from .dataset_store import DatasetVersionBackend, DatasetVersionStore
 from .embeddings import HuggingFaceEmbeddingConfig, HuggingFaceEmbeddingProvider
 from .job_store import JobStore, JobStoreBackend
+from .label_workflow import DurableLabelWorkflow, LabelWorkflowDependencies
 from .object_storage import LocalObjectStorage, ObjectStorage, S3ObjectStorage
+from .orchestrator import TaskOrchestrator
 from .outbox import Outbox, OutboxBackend
 from .outbox_dispatcher import EventPublisher, OutboxDispatcher
 from .postgres import PostgresConfig
@@ -83,6 +87,7 @@ class LocalAppResources:
     jobs: JobStoreBackend
     preview: PreviewBackend
     sub_assets: SubAssetBackend
+    annotations: AnnotationRevisionBackend
     vector_index: VectorIndex
     embedding_provider: EmbeddingProvider
     sam3_provider: Sam3Provider
@@ -90,7 +95,7 @@ class LocalAppResources:
 
     def close(self) -> None:
         for resource in (
-            self.registry, self.outbox, self.versions, self.jobs, self.preview, self.sub_assets,
+            self.registry, self.outbox, self.versions, self.jobs, self.preview, self.sub_assets, self.annotations,
         ):
             resource.close()
         for component in (self.vector_index, self.embedding_provider, self.sam3_provider):
@@ -143,6 +148,12 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
         sub_assets = open_postgres_sub_asset_store(config.postgres)
     else:
         sub_assets = SubAssetStore(str(metadata_dir / "sub-assets.sqlite3"))
+    if config.postgres is not None:
+        from .postgres_annotation_store import open_postgres_annotation_store
+
+        annotations = open_postgres_annotation_store(config.postgres)
+    else:
+        annotations = AnnotationRevisionStore(str(metadata_dir / "annotations.sqlite3"))
     storage = config.object_storage or LocalObjectStorage(config.data_dir / "objects")
     uploads = ResumableUploadService(registry, storage)
     authorizer = config.authorizer or (
@@ -160,13 +171,19 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
         vector_index = LocalVectorIndex()
     resources = LocalAppResources(
         registry=registry, outbox=outbox, versions=versions, jobs=jobs, preview=preview,
-        sub_assets=sub_assets, vector_index=vector_index,
+        sub_assets=sub_assets, annotations=annotations, vector_index=vector_index,
         embedding_provider=embedding_provider, sam3_provider=sam3_provider,
     )
     export_service = DatasetExportService(versions, config.data_dir / "exports")
     export_workflow = DatasetExportWorkflow(
         DatasetExportWorkflowDependencies(
             jobs=jobs, versions=versions, exports=export_service, outbox=outbox
+        )
+    )
+    label_workflow = DurableLabelWorkflow(
+        LabelWorkflowDependencies(
+            jobs=jobs, annotations=annotations, outbox=outbox,
+            labeler=Sam3BatchLabeler(sam3_provider), preview=preview,
         )
     )
     outbox_dispatcher = (
@@ -192,6 +209,9 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
             registry=registry, uploads=uploads, outbox=outbox,
             authorizer=authorizer,
             exports=ExportApiDependencies(workflow=export_workflow),
+            labels=LabelApiDependencies(workflow=label_workflow),
+            calibration=CalibrationApiDependencies(provider=sam3_provider),
+            orchestrator=TaskOrchestrator(),
         )).router
     )
     app.include_router(
@@ -214,6 +234,9 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
                 "assets": "/v1/assets",
                 "search": "/v1/search",
                 "exports": "/v1/dataset-exports",
+                "labels": "/v1/label-jobs",
+                "calibration": "/v1/calibration/run",
+                "orchestrate": "/v1/orchestrate",
                 "sam3": "/v1/predict",
             },
         }
