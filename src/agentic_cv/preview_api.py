@@ -9,13 +9,13 @@ from uuid import UUID
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from .preview import PreviewEvent, PreviewStore
+from .preview import PreviewBackend, PreviewEvent
 from .auth import Authorizer
 
 
 @dataclass(frozen=True, kw_only=True)
 class PreviewApiDependencies:
-    store: PreviewStore
+    store: PreviewBackend
     authorizer: Authorizer | None = None
 
 

@@ -25,13 +25,13 @@ from .object_storage import LocalObjectStorage, ObjectStorage, S3ObjectStorage
 from .outbox import Outbox, OutboxBackend
 from .outbox_dispatcher import EventPublisher, OutboxDispatcher
 from .postgres import PostgresConfig
-from .preview import PreviewStore
+from .preview import PreviewBackend, PreviewStore
 from .preview_api import PreviewApiDependencies, create_app as create_preview_app
 from .sam3 import LocalSam3Provider, Sam3Config, Sam3Provider
 from .sam3_service import create_app as create_sam3_app
 from .semantic_api import SemanticApiDependencies, create_app as create_semantic_app
 from .semantic_search import EmbeddingProvider, LocalVectorIndex, SemanticSearchService
-from .sub_assets import SubAssetStore
+from .sub_assets import SubAssetBackend, SubAssetStore
 from .uploads import ResumableUploadService
 
 
@@ -81,8 +81,8 @@ class LocalAppResources:
     outbox: OutboxBackend
     versions: DatasetVersionStore
     jobs: JobStoreBackend
-    preview: PreviewStore
-    sub_assets: SubAssetStore
+    preview: PreviewBackend
+    sub_assets: SubAssetBackend
     embedding_provider: EmbeddingProvider
     sam3_provider: Sam3Provider
     outbox_dispatcher: OutboxDispatcher | None = None
@@ -125,8 +125,18 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
         jobs = open_postgres_job_store(config.postgres)
     else:
         jobs = JobStore(str(metadata_dir / "jobs.sqlite3"))
-    preview = PreviewStore(str(metadata_dir / "preview.sqlite3"))
-    sub_assets = SubAssetStore(str(metadata_dir / "sub-assets.sqlite3"))
+    if config.postgres is not None:
+        from .postgres_preview import open_postgres_preview_store
+
+        preview = open_postgres_preview_store(config.postgres)
+    else:
+        preview = PreviewStore(str(metadata_dir / "preview.sqlite3"))
+    if config.postgres is not None:
+        from .postgres_sub_assets import open_postgres_sub_asset_store
+
+        sub_assets = open_postgres_sub_asset_store(config.postgres)
+    else:
+        sub_assets = SubAssetStore(str(metadata_dir / "sub-assets.sqlite3"))
     storage = config.object_storage or LocalObjectStorage(config.data_dir / "objects")
     uploads = ResumableUploadService(registry, storage)
     authorizer = config.authorizer or (
