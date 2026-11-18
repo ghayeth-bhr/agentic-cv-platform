@@ -2,7 +2,7 @@
 
 A local-first platform for managing image/video assets, searching them semantically, and building detection/segmentation datasets with prompted SAM 3 labeling.
 
-This repository currently contains a **strong infrastructure core and a partial product surface**. The P0 branch (`fix/runtime-foundation`) makes the local environment honest and diagnosable; the agent chat, end-to-end labeling execution, dataset builder, and download flow are still the next phases.
+This repository currently contains a **strong infrastructure core and a growing product surface**. P0 (`fix/runtime-foundation`) made the local environment honest and diagnosable. P1 (`feature/label-execution-engine`) now executes queued label jobs, builds dataset versions from annotation revisions, and produces downloadable COCO/YOLO archives. The browser-level Assets and Agent experience is the next phase.
 
 ## Current status
 
@@ -15,9 +15,11 @@ This repository currently contains a **strong infrastructure core and a partial 
 | Prompted SAM 3 on a selected asset source/frame (`/v1/assets/{id}/predict`) | Implemented |
 | Auth, RBAC, OIDC/JWT, metrics, worker leases, CI/load/failure tests | Implemented |
 | `agentic-cv doctor` environment diagnostics and typed `503 model_unavailable` errors | Added in P0 |
+| Background label worker + asset→image/video-frame resolver | Added in P1 |
+| Dataset builder over latest annotation revisions | Added in P1 |
+| COCO/YOLO export archives with images and `zip` download | Added in P1 |
 | **Agent chat** (task spec → confirm → calibrate → label → dataset) | **Not built yet** |
-| **Label job execution** through the app/worker | **Not built yet** (jobs are submitted but remain queued) |
-| **Dataset builder + export download** from label results | **Not built yet** |
+| **Browser-level label/dataset flow** | **Next (P2/P3)** |
 | **Manual refinement UI**, dataset gallery, live step cards | **Not built yet** |
 
 The original root README was a 950-line concatenation of 23 branch READMEs. Those are preserved verbatim in [`docs/branches/`](docs/branches/README.md).
@@ -65,7 +67,7 @@ agentic-cv serve --data-dir .agentic-cv --host 127.0.0.1 --port 8000
 
 Open <http://127.0.0.1:8000>. Useful endpoints: `/api-info`, `/docs`, `/health/live`, `/health/ready`, `/health`, `/v1/metrics`.
 
-To process dataset-export jobs in a separate process:
+`agentic-cv serve` starts a label worker and an export worker in the app process. To run dataset-export jobs in a separate process instead:
 
 ```powershell
 agentic-cv worker --data-dir .agentic-cv --worker-id export-worker
@@ -91,6 +93,8 @@ Do not run `ollama serve` if Ollama is already running on `127.0.0.1:11434`.
 4. **Tools → Quick test**: run prompted SAM 3 on an existing asset source/frame or an uploaded image. Bounding boxes are scaled to the preview image.
 5. **Jobs & Exports → Label jobs / Exports**: inspect durable preview events and queue/inspect dataset-export jobs by dataset version.
 
+The P1 backend path is available over HTTP even though the browser does not expose it yet: `POST /v1/label-jobs` → poll `GET /v1/label-jobs/{id}` → `POST /v1/datasets` → `POST /v1/dataset-exports` → `GET /v1/dataset-exports/{id}/download`. `agentic-cv serve` starts both the label and export workers by default.
+
 This is a single-user local workbench, not yet the agentic product described below.
 
 ## Target product (the plan)
@@ -102,7 +106,7 @@ Two primary sections:
 
 The execution plan is tracked in the audit document supplied by the owner (P0–P6). P0 is this branch. The next phases are:
 
-- **P1** `feature/label-execution-engine`: background runner, asset→image resolver, dataset builder, export download, job progress.
+- **P1** `feature/label-execution-engine`: background runner, asset→image resolver, dataset builder, export download, job progress. Implemented in this branch; HTTP e2e and crash/cancel recovery are covered by tests.
 - **P2** `feature/assets-experience`: single-workspace default, multi-file/chunked uploads, auto-index jobs, asset detail page, in-asset search, sub-asset lineage.
 - **P3** `feature/agent-chat`: session persistence, LLM task-spec agent, VLM-calibrated pipeline, chat UI, dataset gallery.
 - **P4** `feature/manual-refinement-ui`: point-click refinement wired to revisions.
@@ -128,10 +132,14 @@ FastAPI app (application.py)
 ├── postgres_pgvector.py   opt-in pgvector index
 ├── sam3.py                lazy local SAM 3 provider
 ├── embeddings.py          lazy SigLIP embeddings
-├── label_workflow.py      durable label-job state machine (exists; not executed by the app yet)
+├── label_workflow.py      durable label-job state machine
+├── label_worker.py        queued label-job polling + expired-lease recovery
+├── label_images.py        asset sources/video frames → stable LabelImage records
 ├── batch_labeling.py      SAM 3 batch labeling + annotation persistence
-├── dataset.py             COCO/YOLO export + deterministic splits
+├── dataset_builder.py     latest revisions → immutable dataset version + image files
+├── dataset.py             COCO/YOLO serialization
 ├── dataset_store.py       tenant dataset versions
+├── dataset_export.py      COCO/YOLO files, images, manifest, zip archive
 ├── dataset_export_workflow.py / dataset_export_worker.py
 ├── job_store.py           durable jobs, leases, heartbeat, cancel
 ├── outbox.py              durable event outbox
@@ -158,9 +166,13 @@ Heavy dependencies are lazy or injectable. Default `pytest` runs with fakes and 
 | POST | `/v1/assets/{id}/predict` | prompted SAM 3 on one source |
 | POST | `/v1/predict` | multipart SAM 3 smoke endpoint |
 | POST | `/v1/orchestrate` | deterministic message → `TaskSpec` (regex fallback; not the agent) |
-| POST/GET | `/v1/label-jobs` | submit/read durable label jobs (execution is P1) |
+| POST/GET | `/v1/label-jobs` | submit/read durable label jobs; executed by the label worker |
+| POST | `/v1/label-jobs/{id}/cancel` | request cancellation of a queued/running label job |
+| POST/GET | `/v1/datasets` | build/list dataset versions from succeeded label jobs |
+| GET | `/v1/datasets/{id}` | read dataset-version summary |
 | POST | `/v1/calibration/run` | threshold calibration on uploaded images |
 | POST/GET | `/v1/dataset-exports` | submit/read dataset-export jobs |
+| GET | `/v1/dataset-exports/{id}/download` | download the packaged COCO/YOLO zip |
 | GET | `/v1/preview/...` | replay label preview events |
 
 ## Testing
@@ -169,7 +181,7 @@ Heavy dependencies are lazy or injectable. Default `pytest` runs with fakes and 
 .venv\Scripts\python -m pytest -q
 ```
 
-Current local result: **202 passed, 10 skipped, 1 warning** (Starlette/httpx deprecation). The 10 skips are the opt-in PostgreSQL tests.
+Current local result: **214 passed, 10 skipped, 1 warning** (Starlette/httpx deprecation). The 10 skips are the opt-in PostgreSQL tests. The P1 tests include an HTTP-only fake-SAM journey through upload, labeling, dataset creation, COCO/YOLO export, zip download, cancellation, and expired-lease recovery.
 
 Real PostgreSQL validation is opt-in:
 
@@ -204,16 +216,17 @@ Model access: `facebook/sam3` is gated. Request access on Hugging Face and set `
 
 ## Limitations / safety
 
-- Interactive prediction is one image/frame per request. Whole-asset autolabeling requires P1/P3.
-- Label jobs are persisted but not executed by the app lifespan or the current worker.
-- No dataset version is created automatically from label results yet, and there is no export download endpoint.
-- The agent chat, task-spec LLM, VLM calibration bridge, and dataset gallery are not reachable from the UI yet.
+- Interactive prediction is one image/frame per request. Whole-asset autolabeling is available through the HTTP label-job → dataset → export flow, but the browser does not expose it until P2/P3.
+- `agentic-cv serve` executes label jobs and export jobs. The separate `agentic-cv worker` command still runs only the export worker.
+- Label jobs that are cancelled mid-run can leave partial annotation revisions; dataset creation requires a succeeded job, so partial runs are not packaged.
+- The agent chat, task-spec LLM, VLM calibration bridge, dataset gallery, and refinement UI are not reachable from the UI yet.
 - SAM 3 is subject to Meta's SAM License and gated weights; this repository is not legal advice or a hosted-product clearance. See `docs/branches/sam-3-licensing-and-hosted-product-review-roadmap-item-10-complete.md`.
 - Do not commit `.agentic-cv/`, model weights, tokens, or local exports.
 
 ## Branch documentation
 
-- Current P0 branch: [`docs/branches/fix-runtime-foundation.md`](docs/branches/fix-runtime-foundation.md)
+- Current P1 branch: [`docs/branches/label-execution-engine.md`](docs/branches/label-execution-engine.md)
+- P0 branch record: [`docs/branches/fix-runtime-foundation.md`](docs/branches/fix-runtime-foundation.md)
 - Historical branch READMEs: [`docs/branches/README.md`](docs/branches/README.md)
 - Repository hygiene proposal: [`docs/REPO_HYGIENE.md`](docs/REPO_HYGIENE.md)
 

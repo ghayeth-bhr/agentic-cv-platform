@@ -22,6 +22,7 @@ ProgressCallback = Callable[[str, int, int], None]
 class LabelImage:
     image_id: str
     path: Path
+    file_name: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -83,7 +84,7 @@ class Sam3BatchLabeler:
                 dataset_images.append(
                     DatasetImage(
                         image_id=image.image_id,
-                        file_name=image.path.name,
+                        file_name=image.file_name or image.path.name,
                         width=source.width,
                         height=source.height,
                     )

@@ -53,3 +53,51 @@ def test_revision_inputs_are_validated(tmp_path):
     with pytest.raises(ValueError, match="expected_revision"):
         store.save(tenant_id=uuid4(), annotation=annotation(1), author_id="one", expected_revision=-1)
     store.close()
+
+
+def test_list_latest_returns_one_current_revision_per_annotation(tmp_path):
+    store = AnnotationRevisionStore(str(tmp_path / "annotations.sqlite3"))
+    tenant_id = uuid4()
+    store.save(tenant_id=tenant_id, annotation=annotation(1), author_id="first")
+    store.save(
+        tenant_id=tenant_id,
+        annotation=annotation(2),
+        author_id="second",
+        expected_revision=1,
+    )
+    other = Annotation(
+        annotation_id="annotation-2",
+        image_id="image-2",
+        category_id=1,
+        bbox=(1, 1, 2, 2),
+    )
+    store.save(tenant_id=tenant_id, annotation=other, author_id="first")
+
+    latest = store.list_latest(tenant_id=tenant_id)
+    filtered = store.list_latest(tenant_id=tenant_id, image_ids=["image-1"])
+
+    assert len(latest) == 2
+    assert [item.annotation.bbox[0] for item in latest] == [2, 1]
+    assert len(filtered) == 1
+    assert filtered[0].annotation.bbox[0] == 2
+    store.close()
+
+
+def test_save_without_expected_revision_is_append_only_for_recovery(tmp_path):
+    store = AnnotationRevisionStore(str(tmp_path / "annotations.sqlite3"))
+    tenant_id = uuid4()
+    first = store.save(
+        tenant_id=tenant_id,
+        annotation=annotation(1),
+        author_id="first",
+        expected_revision=None,
+    )
+    second = store.save(
+        tenant_id=tenant_id,
+        annotation=annotation(2),
+        author_id="retry",
+        expected_revision=None,
+    )
+
+    assert (first.revision, second.revision) == (1, 2)
+    store.close()

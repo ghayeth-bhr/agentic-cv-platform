@@ -56,7 +56,7 @@ Ollama was not running during the check; that is an environment issue, not a cod
 - The P0 gate’s **fresh clone → `uv sync --extra ml` → doctor all green on the owner’s laptop** has not been executed end-to-end by the agent. The lockfile and dry-run are verified; the owner must run the real fresh-clone check.
 - `uv sync --extra ml` selects PyPI wheels. Windows CUDA users must install the `+cu124` wheels explicitly (documented in the root README).
 - Ollama is still required for the future agent/VLM phases; P0 only diagnoses it.
-- No agent chat, label execution, dataset builder, export download, or refinement UI exists yet.
+- At P0 time there was no agent chat, label execution, dataset builder, export download, or refinement UI. P1 later added the label execution/dataset/export backend path.
 - Repository hygiene: owner approved option A. `main` was fast-forwarded to `2855e2b` and 41 merged feature branches were pruned. The GitHub **default branch is still `feature/platform-foundation-contracts`** and must be changed to `main` manually (no `gh`/token available here). See `docs/REPO_HYGIENE.md`.
 
 ## Next boundary

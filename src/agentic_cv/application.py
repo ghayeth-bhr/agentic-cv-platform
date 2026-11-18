@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import os
 from pathlib import Path
+from threading import Event, Thread
 from typing import Mapping
 
 import logging
@@ -15,19 +16,23 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .api import ApiDependencies, CalibrationApiDependencies, ExportApiDependencies, LabelApiDependencies, create_app as create_core_app
+from .api import ApiDependencies, CalibrationApiDependencies, DatasetApiDependencies, ExportApiDependencies, LabelApiDependencies, create_app as create_core_app
 from .observability import collect_metrics
 from .annotation_store import AnnotationRevisionBackend, AnnotationRevisionStore
 from .asset_registry import AssetRegistry, AssetRegistryBackend
 from .auth import Authorizer, OidcJwtAuthorizer, Principal, StaticApiKeyAuthorizer
 from .batch_labeling import Sam3BatchLabeler
 from .broker import RabbitMqConfig, RabbitMqPublisher
+from .dataset_builder import DatasetBuilder
 from .dataset_export import DatasetExportService
 from .dataset_export_workflow import DatasetExportWorkflow, DatasetExportWorkflowDependencies
+from .dataset_export_worker import DatasetExportWorker
 from .dataset_store import DatasetVersionBackend, DatasetVersionStore
 from .embeddings import HuggingFaceEmbeddingProvider
 from .errors import install_model_unavailable_handler
 from .job_store import JobStore, JobStoreBackend
+from .label_images import LabelImageResolver
+from .label_worker import LabelWorker
 from .label_workflow import DurableLabelWorkflow, LabelWorkflowDependencies
 from .model_runtime import ModelRuntimeSettings
 from .object_storage import LocalObjectStorage, ObjectStorage, S3ObjectStorage
@@ -57,6 +62,8 @@ class LocalAppConfig:
     embedding_provider: EmbeddingProvider | None = None
     sam3_provider: Sam3Provider | None = None
     postgres: PostgresConfig | None = None
+    start_workers: bool = True
+    worker_poll_interval: float = 0.25
 
     @classmethod
     def from_environment(cls, data_dir: Path) -> "LocalAppConfig":
@@ -195,18 +202,59 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
             labeler=Sam3BatchLabeler(sam3_provider), preview=preview,
         )
     )
+    label_images = LabelImageResolver(registry=registry, data_dir=config.data_dir)
+    label_worker = LabelWorker(
+        jobs=jobs, workflow=label_workflow, images=label_images
+    )
+    dataset_builder = DatasetBuilder(
+        jobs=jobs,
+        annotations=annotations,
+        versions=versions,
+        images=label_images,
+        images_root=config.data_dir / "dataset-images",
+    )
+    export_worker = DatasetExportWorker(jobs=jobs, workflow=export_workflow)
     outbox_dispatcher = (
         OutboxDispatcher(outbox=outbox, publisher=config.event_publisher)
         if config.event_publisher is not None
         else None
     )
     resources.outbox_dispatcher = outbox_dispatcher
+    worker_stop = Event()
+    workers: list[Thread] = []
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         try:
+            if config.start_workers:
+                if config.worker_poll_interval < 0:
+                    raise ValueError("worker_poll_interval must not be negative")
+                for target, name in (
+                    (label_worker.run_forever, "label-worker"),
+                    (export_worker.run_forever, "export-worker"),
+                ):
+                    thread = Thread(
+                        target=target,
+                        kwargs={
+                            "poll_interval": config.worker_poll_interval,
+                            "stop_event": worker_stop,
+                            "sleep_fn": worker_stop.wait,
+                        },
+                        name=name,
+                        daemon=True,
+                    )
+                    thread.start()
+                    workers.append(thread)
             yield
         finally:
+            worker_stop.set()
+            for thread in workers:
+                thread.join(timeout=5)
+                if thread.is_alive():
+                    logging.getLogger("agentic_cv.worker").warning(
+                        "worker thread did not stop before shutdown",
+                        extra={"thread": thread.name},
+                    )
             resources.close()
 
     app = FastAPI(title="Agentic CV Platform", version="1", lifespan=lifespan)
@@ -251,6 +299,9 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
             authorizer=authorizer,
             exports=ExportApiDependencies(workflow=export_workflow),
             labels=LabelApiDependencies(workflow=label_workflow),
+            datasets=DatasetApiDependencies(
+                builder=dataset_builder, versions=versions
+            ),
             calibration=CalibrationApiDependencies(provider=sam3_provider),
             orchestrator=TaskOrchestrator(),
             sam3=sam3_provider,
@@ -288,6 +339,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
             "api": {
                 "assets": "/v1/assets",
                 "search": "/v1/search",
+                "datasets": "/v1/datasets",
                 "exports": "/v1/dataset-exports",
                 "labels": "/v1/label-jobs",
                 "calibration": "/v1/calibration/run",

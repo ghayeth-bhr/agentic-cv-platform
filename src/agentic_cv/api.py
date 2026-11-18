@@ -11,6 +11,7 @@ from urllib.request import url2pathname
 from uuid import UUID
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Response, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from PIL import Image
 from pydantic import BaseModel, Field
 
@@ -19,8 +20,10 @@ from .auth import Authorizer
 from .calibration import CalibrationSample, CalibrationStatus, Sam3Calibrator
 from .click_refinement import ClickPoint, ClickRefinementService, RefinementSnapshot
 from .contracts import EventEnvelope, TaskSpec
+from .dataset_builder import DatasetBuilder
 from .dataset_export import ExportFormat
 from .dataset_export_workflow import DatasetExportWorkflow
+from .dataset_store import DatasetVersionBackend, DatasetVersionRecord
 from .errors import ModelUnavailableError, install_model_unavailable_handler
 from .job_store import JobRecord
 from .label_workflow import DurableLabelWorkflow
@@ -115,6 +118,12 @@ class LabelApiDependencies:
 
 
 @dataclass(frozen=True, kw_only=True)
+class DatasetApiDependencies:
+    builder: DatasetBuilder
+    versions: DatasetVersionBackend
+
+
+@dataclass(frozen=True, kw_only=True)
 class CalibrationApiDependencies:
     provider: Sam3Provider
 
@@ -135,6 +144,7 @@ class ApiDependencies:
     authorizer: Authorizer | None = None
     exports: ExportApiDependencies | None = None
     labels: LabelApiDependencies | None = None
+    datasets: DatasetApiDependencies | None = None
     calibration: CalibrationApiDependencies | None = None
     orchestrator: TaskOrchestrator | None = None
     sam3: Sam3Provider | None = None
@@ -194,6 +204,26 @@ class LabelJobResponse(BaseModel):
     payload: dict
 
 
+class DatasetCreateRequest(BaseModel):
+    job_id: UUID
+    name: str = ""
+    idempotency_key: str
+
+
+class DatasetCategoryResponse(BaseModel):
+    category_id: int
+    name: str
+
+
+class DatasetSummaryResponse(BaseModel):
+    version_id: UUID
+    name: str
+    image_count: int
+    annotation_count: int
+    categories: list[DatasetCategoryResponse]
+    created_at: str
+
+
 class CalibrationAttemptResponse(BaseModel):
     threshold: float
     sample_count: int
@@ -249,6 +279,20 @@ def _label_job_response(job: JobRecord) -> LabelJobResponse:
         lease_owner=job.lease_owner,
         cancel_requested=job.cancel_requested,
         payload=job.payload,
+    )
+
+
+def _dataset_summary(record: DatasetVersionRecord) -> DatasetSummaryResponse:
+    return DatasetSummaryResponse(
+        version_id=record.version_id,
+        name=record.name,
+        image_count=len(record.dataset.images),
+        annotation_count=len(record.dataset.annotations),
+        categories=[
+            DatasetCategoryResponse(category_id=category.category_id, name=category.name)
+            for category in record.dataset.categories
+        ],
+        created_at=record.created_at,
     )
 
 
@@ -660,6 +704,40 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             return _job_response(job)
 
+        @app.get("/v1/dataset-exports/{job_id}/download")
+        def download_dataset_export(
+            job_id: UUID,
+            x_tenant_id: str = Header(...),
+            x_api_key: str | None = Header(None),
+            authorization: str | None = Header(None),
+        ) -> FileResponse:
+            tenant_id = _tenant(x_tenant_id)
+            _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="exports:read")
+            try:
+                job = export_workflow.dependencies.jobs.get(job_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            if job.tenant_id != tenant_id or job.kind != "dataset-export":
+                raise HTTPException(status_code=404, detail="unknown export job")
+            if job.status != "succeeded":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"export job is not ready for download; current status is {job.status}",
+                )
+            version_id = UUID(job.payload["version_id"])
+            format = job.payload["format"]
+            try:
+                archive = export_workflow.dependencies.exports.package(
+                    tenant_id=tenant_id, version_id=version_id, format=format
+                )
+            except FileNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            return FileResponse(
+                archive,
+                media_type="application/zip",
+                filename=f"{version_id}-{format}.zip",
+            )
+
     if dependencies.refinement is not None:
         refinement = dependencies.refinement
 
@@ -791,6 +869,61 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
             except ValueError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             return _label_job_response(job)
+
+    if dependencies.datasets is not None:
+        dataset_builder = dependencies.datasets.builder
+        versions = dependencies.datasets.versions
+
+        @app.post("/v1/datasets", response_model=DatasetSummaryResponse, status_code=201)
+        def create_dataset(
+            request: DatasetCreateRequest,
+            x_tenant_id: str = Header(...),
+            x_api_key: str | None = Header(None),
+            authorization: str | None = Header(None),
+        ) -> DatasetSummaryResponse:
+            tenant_id = _tenant(x_tenant_id)
+            _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="labels:write")
+            if not request.idempotency_key.strip():
+                raise HTTPException(status_code=422, detail="idempotency_key must not be empty")
+            try:
+                result = dataset_builder.build_from_job(
+                    tenant_id=tenant_id,
+                    job_id=request.job_id,
+                    name=request.name,
+                    idempotency_key=request.idempotency_key,
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except PermissionError as exc:
+                raise HTTPException(status_code=403, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            return _dataset_summary(result.record)
+
+        @app.get("/v1/datasets", response_model=list[DatasetSummaryResponse])
+        def list_datasets(
+            x_tenant_id: str = Header(...),
+            x_api_key: str | None = Header(None),
+            authorization: str | None = Header(None),
+        ) -> list[DatasetSummaryResponse]:
+            tenant_id = _tenant(x_tenant_id)
+            _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="labels:read")
+            return [_dataset_summary(record) for record in versions.list(tenant_id=tenant_id)]
+
+        @app.get("/v1/datasets/{version_id}", response_model=DatasetSummaryResponse)
+        def get_dataset(
+            version_id: UUID,
+            x_tenant_id: str = Header(...),
+            x_api_key: str | None = Header(None),
+            authorization: str | None = Header(None),
+        ) -> DatasetSummaryResponse:
+            tenant_id = _tenant(x_tenant_id)
+            _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="labels:read")
+            try:
+                record = versions.get(tenant_id=tenant_id, version_id=version_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            return _dataset_summary(record)
 
     if dependencies.calibration is not None:
         @app.post("/v1/calibration/run", response_model=CalibrationResponse)

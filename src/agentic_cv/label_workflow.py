@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import Literal
+from typing import Callable, Literal
 from uuid import UUID
 
 from .annotation_store import AnnotationRevisionBackend
@@ -66,7 +66,8 @@ class DurableLabelWorkflow:
         self,
         job_id: UUID,
         *,
-        images: list[LabelImage],
+        images: list[LabelImage] | None = None,
+        image_loader: Callable[[], list[LabelImage]] | None = None,
         tenant_id: UUID,
         prompt: str,
         threshold: float,
@@ -90,7 +91,7 @@ class DurableLabelWorkflow:
                 "worker_id": worker_id,
                 "job_id": str(job_id),
                 "tenant_id": str(tenant_id),
-                "image_count": len(images),
+                "image_count": len(images) if images is not None else None,
                 "task": task,
             },
         )
@@ -119,6 +120,12 @@ class DurableLabelWorkflow:
             )
 
         try:
+            if images is None:
+                if image_loader is None:
+                    raise ValueError("images or image_loader is required")
+                images = image_loader()
+            if not images:
+                raise ValueError("at least one label image is required")
             result = self.dependencies.labeler.label(
                 images, prompt=prompt, threshold=threshold, category=category, task=task,
                 on_progress=checkpoint,
@@ -128,6 +135,7 @@ class DurableLabelWorkflow:
                     tenant_id=tenant_id,
                     annotation=annotation,
                     author_id="sam3-batch",
+                    expected_revision=None,
                 )
             self.dependencies.jobs.transition(job.job_id, "succeeded")
             self.dependencies.outbox.enqueue(
