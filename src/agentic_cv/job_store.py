@@ -7,7 +7,7 @@ import sqlite3
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 from uuid import UUID, uuid4
 
 JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
@@ -39,6 +39,36 @@ class JobRecord:
     lease_owner: str | None
     lease_expires_at: str | None
     cancel_requested: bool
+
+
+class JobStoreBackend(Protocol):
+    def close(self) -> None: ...
+
+    def create(
+        self, *, tenant_id: UUID, kind: str, payload: dict[str, Any], idempotency_key: str
+    ) -> JobRecord: ...
+
+    def get(self, job_id: UUID) -> JobRecord: ...
+
+    def list(
+        self, *, status: JobStatus | None = None, kind: str | None = None
+    ) -> list[JobRecord]: ...
+
+    def transition(
+        self, job_id: UUID, status: JobStatus, *, error: str | None = None
+    ) -> JobRecord: ...
+
+    def claim(self, job_id: UUID, *, worker_id: str, lease_seconds: float = 60) -> JobRecord: ...
+
+    def heartbeat(
+        self, job_id: UUID, *, worker_id: str, lease_seconds: float = 60
+    ) -> JobRecord: ...
+
+    def requeue_expired_leases(
+        self, *, now: datetime | None = None, kind: str | None = None
+    ) -> tuple[UUID, ...]: ...
+
+    def request_cancel(self, job_id: UUID) -> JobRecord: ...
 
 
 class JobStore:

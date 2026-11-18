@@ -9,17 +9,17 @@ from uuid import UUID
 from .contracts import EventEnvelope
 from .dataset_export import DatasetExportResult, DatasetExportService, ExportFormat
 from .dataset_store import DatasetVersionStore
-from .job_store import JobRecord, JobStore
+from .job_store import JobRecord, JobStoreBackend
 from .label_workflow import JobCancelled
-from .outbox import Outbox
+from .outbox import OutboxBackend
 
 
 @dataclass(frozen=True, kw_only=True)
 class DatasetExportWorkflowDependencies:
-    jobs: JobStore
+    jobs: JobStoreBackend
     versions: DatasetVersionStore
     exports: DatasetExportService
-    outbox: Outbox
+    outbox: OutboxBackend
 
 
 class DatasetExportWorkflow:

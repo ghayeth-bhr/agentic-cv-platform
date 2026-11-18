@@ -9,12 +9,12 @@ from uuid import UUID
 from collections.abc import Callable
 
 from .dataset_export_workflow import DatasetExportWorkflow
-from .job_store import JobStore
+from .job_store import JobStoreBackend
 
 
 @dataclass(frozen=True, kw_only=True)
 class DatasetExportWorker:
-    jobs: JobStore
+    jobs: JobStoreBackend
     workflow: DatasetExportWorkflow
 
     def run_once(self, *, worker_id: str = "export-worker") -> tuple[UUID, ...]:
