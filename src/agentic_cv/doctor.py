@@ -89,7 +89,7 @@ def check_torch(settings: ModelRuntimeSettings) -> CheckResult:
         except Exception:  # pragma: no cover - driver-specific
             detail = f"torch {version}; CUDA available"
         return CheckResult("PyTorch", "ok", detail)
-    return CheckResult("PyTorch", "ok", f"torch {version}; CPU mode (AGENTIC_CV_DEVICE=cpu)")
+    return CheckResult("PyTorch", "ok", f"torch {version}; CPU mode (no CUDA device selected)")
 
 
 def check_package(name: str, *, min_major: int | None = None) -> CheckResult:
