@@ -239,6 +239,28 @@ MIGRATIONS: tuple[Migration, ...] = (
             """,
         ),
     ),
+    Migration(
+        version=4,
+        name="preview_events",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS preview_events (
+                event_id BIGSERIAL PRIMARY KEY,
+                tenant_id UUID NOT NULL,
+                job_id UUID NOT NULL,
+                image_id TEXT NOT NULL,
+                processed INTEGER NOT NULL,
+                total INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS preview_events_job_idx
+                ON preview_events (tenant_id, job_id, event_id)
+            """,
+        ),
+    ),
 )
 
 

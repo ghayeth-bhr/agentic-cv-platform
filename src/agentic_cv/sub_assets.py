@@ -7,7 +7,7 @@ import sqlite3
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Iterable
+from typing import Iterable, Protocol
 from uuid import UUID, uuid4
 
 from .semantic_search import SearchResult
@@ -25,6 +25,18 @@ class SubAssetRecord:
     query: str
     result_ids: tuple[str, ...]
     created_at: str
+
+
+class SubAssetBackend(Protocol):
+    def close(self) -> None: ...
+
+    def create_from_results(
+        self, *, tenant_id: UUID, query: str, results: Iterable[SearchResult]
+    ) -> SubAssetRecord: ...
+
+    def get(self, sub_asset_id: UUID) -> SubAssetRecord: ...
+
+    def get_for_tenant(self, tenant_id: UUID, sub_asset_id: UUID) -> SubAssetRecord: ...
 
 
 class SubAssetStore:

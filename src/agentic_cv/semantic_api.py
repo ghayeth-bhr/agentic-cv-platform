@@ -9,7 +9,7 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 from .semantic_search import SearchResult, SemanticSearchService
-from .sub_assets import SubAssetStore
+from .sub_assets import SubAssetBackend
 from .auth import Authorizer
 
 
@@ -39,7 +39,7 @@ class SubAssetResponse(BaseModel):
 @dataclass(frozen=True, kw_only=True)
 class SemanticApiDependencies:
     search: SemanticSearchService
-    sub_assets: SubAssetStore
+    sub_assets: SubAssetBackend
     authorizer: Authorizer | None = None
 
 

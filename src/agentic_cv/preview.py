@@ -6,6 +6,7 @@ import sqlite3
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Protocol
 from uuid import UUID
 
 
@@ -23,6 +24,27 @@ class PreviewEvent:
     total: int
     status: str
     created_at: str
+
+
+class PreviewBackend(Protocol):
+    def close(self) -> None: ...
+
+    def publish(
+        self,
+        *,
+        tenant_id: UUID,
+        job_id: UUID,
+        image_id: str,
+        processed: int,
+        total: int,
+        status: str = "preview_ready",
+    ) -> PreviewEvent: ...
+
+    def get(self, event_id: int) -> PreviewEvent: ...
+
+    def list_for_job(
+        self, *, tenant_id: UUID, job_id: UUID, after_event_id: int = 0
+    ) -> list[PreviewEvent]: ...
 
 
 class PreviewStore:
