@@ -72,11 +72,11 @@ class PostgresAnnotationRevisionStore:
         tenant_id: UUID,
         annotation: Annotation,
         author_id: str,
-        expected_revision: int = 0,
+        expected_revision: int | None = 0,
     ) -> AnnotationRevision:
         if not author_id.strip():
             raise ValueError("author_id must not be empty")
-        if expected_revision < 0:
+        if expected_revision is not None and expected_revision < 0:
             raise ValueError("expected_revision must not be negative")
         from psycopg.errors import UniqueViolation
 
@@ -90,7 +90,7 @@ class PostgresAnnotationRevisionStore:
                 (tenant_id, annotation.image_id, annotation.annotation_id),
             ).fetchone()
             current_revision = int(row["revision"]) if row is not None else 0
-            if current_revision != expected_revision:
+            if expected_revision is not None and current_revision != expected_revision:
                 raise RevisionConflictError(
                     f"expected revision {expected_revision}, current revision is {current_revision}"
                 )
@@ -145,6 +145,30 @@ class PostgresAnnotationRevisionStore:
         if row is None:
             raise KeyError(f"unknown annotation: {annotation_id}")
         return self._record(row)
+
+    def list_latest(
+        self,
+        *,
+        tenant_id: UUID,
+        image_ids: list[str] | None = None,
+    ) -> list[AnnotationRevision]:
+        if image_ids is not None and not image_ids:
+            return []
+        image_clause = " AND image_id = ANY(%s)" if image_ids is not None else ""
+        values: tuple[Any, ...] = (tenant_id,)
+        if image_ids is not None:
+            values = (tenant_id, image_ids)
+        with self._lock:
+            rows = self._connection.execute(
+                f"""
+                SELECT DISTINCT ON (image_id, annotation_id) *
+                FROM annotation_revisions
+                WHERE tenant_id = %s{image_clause}
+                ORDER BY image_id, annotation_id, revision DESC
+                """,
+                values,
+            ).fetchall()
+        return [self._record(row) for row in rows]
 
     def history(
         self, *, tenant_id: UUID, image_id: str, annotation_id: str

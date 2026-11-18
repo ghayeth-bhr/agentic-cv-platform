@@ -21,6 +21,7 @@ agentic-cv = "agentic_cv.cli:main"
 [dependency-groups]
 dev = [
     "httpx>=0.27",
+    "pycocotools>=2.0.7",
     "pytest>=8.0",
 ]
 

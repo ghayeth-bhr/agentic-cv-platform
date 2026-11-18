@@ -41,12 +41,19 @@ class AnnotationRevisionBackend(Protocol):
         tenant_id: UUID,
         annotation: Annotation,
         author_id: str,
-        expected_revision: int = 0,
+        expected_revision: int | None = 0,
     ) -> AnnotationRevision: ...
 
     def latest(
         self, *, tenant_id: UUID, image_id: str, annotation_id: str
     ) -> AnnotationRevision: ...
+
+    def list_latest(
+        self,
+        *,
+        tenant_id: UUID,
+        image_ids: list[str] | None = None,
+    ) -> list[AnnotationRevision]: ...
 
     def history(
         self, *, tenant_id: UUID, image_id: str, annotation_id: str
@@ -85,11 +92,11 @@ class AnnotationRevisionStore:
         tenant_id: UUID,
         annotation: Annotation,
         author_id: str,
-        expected_revision: int = 0,
+        expected_revision: int | None = 0,
     ) -> AnnotationRevision:
         if not author_id.strip():
             raise ValueError("author_id must not be empty")
-        if expected_revision < 0:
+        if expected_revision is not None and expected_revision < 0:
             raise ValueError("expected_revision must not be negative")
         with self._lock:
             row = self._connection.execute(
@@ -101,7 +108,7 @@ class AnnotationRevisionStore:
                 (str(tenant_id), annotation.image_id, annotation.annotation_id),
             ).fetchone()
             current_revision = row["revision"] if row is not None else 0
-            if current_revision != expected_revision:
+            if expected_revision is not None and current_revision != expected_revision:
                 raise RevisionConflictError(
                     f"expected revision {expected_revision}, current revision is {current_revision}"
                 )
@@ -136,6 +143,41 @@ class AnnotationRevisionStore:
         if row is None:
             raise KeyError(f"unknown annotation: {annotation_id}")
         return self._record(row)
+
+    def list_latest(
+        self,
+        *,
+        tenant_id: UUID,
+        image_ids: list[str] | None = None,
+    ) -> list[AnnotationRevision]:
+        if image_ids is not None and not image_ids:
+            return []
+        clauses = [
+            "r.tenant_id = ?",
+            """
+            r.revision = (
+                SELECT MAX(r2.revision) FROM annotation_revisions r2
+                WHERE r2.tenant_id = r.tenant_id
+                  AND r2.image_id = r.image_id
+                  AND r2.annotation_id = r.annotation_id
+            )
+            """,
+        ]
+        values: list[str] = [str(tenant_id)]
+        if image_ids is not None:
+            placeholders = ", ".join("?" for _ in image_ids)
+            clauses.append(f"r.image_id IN ({placeholders})")
+            values.extend(image_ids)
+        with self._lock:
+            rows = self._connection.execute(
+                f"""
+                SELECT r.* FROM annotation_revisions r
+                WHERE {' AND '.join(clauses)}
+                ORDER BY r.image_id, r.annotation_id
+                """,
+                values,
+            ).fetchall()
+        return [self._record(row) for row in rows]
 
     def history(self, *, tenant_id: UUID, image_id: str, annotation_id: str) -> list[AnnotationRevision]:
         with self._lock:

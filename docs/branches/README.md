@@ -31,5 +31,6 @@ verbatim so the root README can describe the current product instead of the hist
 | Agentic CV Platform: VLM Validation Adapter | [vlm-validation-adapter.md](vlm-validation-adapter.md) |
 
 New branches use a short, tailored `docs/branches/<branch-name>.md` document
-instead of appending to the root README. The current P0 document is
-[`fix-runtime-foundation.md`](fix-runtime-foundation.md).
+instead of appending to the root README. Current phase records:
+[`fix-runtime-foundation.md`](fix-runtime-foundation.md) (P0) and
+[`label-execution-engine.md`](label-execution-engine.md) (P1).
