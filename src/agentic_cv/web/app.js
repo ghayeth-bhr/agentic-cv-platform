@@ -6,8 +6,8 @@
   const VIEW_META = {
     gallery: { title: "Gallery", eyebrow: "Assets", desc: "Manage uploaded assets and their representative media." },
     upload: { title: "Upload", eyebrow: "Assets", desc: "Create an asset and upload an image or video source." },
-    predict: { title: "Predict / Label", eyebrow: "Agent", desc: "Run prompted prediction or labeling on selected assets and frames." },
-    search: { title: "Search", eyebrow: "Agent", desc: "Find indexed frames by description to scope assets for labeling." },
+    predict: { title: "Quick test", eyebrow: "Tools", desc: "Run a single-image prompted SAM3 smoke test on an asset source or uploaded file." },
+    search: { title: "Search library", eyebrow: "Assets", desc: "Find indexed frames by description and turn selected results into a sub-asset." },
     exports: { title: "Exports", eyebrow: "Jobs & Exports", desc: "Export labeled datasets (available after labeling/dataset versions are ready)." },
     preview: { title: "Label jobs", eyebrow: "Jobs & Exports", desc: "Replay durable label-job preview events and progress." },
   };

@@ -34,16 +34,16 @@
               <span class="nav-label">Upload</span>
               <span class="nav-hint">Ingest source</span>
             </button>
+            <button type="button" class="nav-item" data-view="search">
+              <span class="nav-label">Search library</span>
+              <span class="nav-hint">Find frames</span>
+            </button>
           </div>
           <div class="nav-group">
-            <div class="nav-group-label">Agent</div>
+            <div class="nav-group-label">Tools</div>
             <button type="button" class="nav-item" data-view="predict">
-              <span class="nav-label">Predict / Label</span>
-              <span class="nav-hint">Prompted inference</span>
-            </button>
-            <button type="button" class="nav-item" data-view="search">
-              <span class="nav-label">Search</span>
-              <span class="nav-hint">Find frames</span>
+              <span class="nav-label">Quick test</span>
+              <span class="nav-hint">Single-image SAM3</span>
             </button>
           </div>
           <div class="nav-group nav-group-secondary">
@@ -123,8 +123,8 @@
       <section id="view-predict" class="view" aria-labelledby="predict-heading" hidden>
         <div class="split split-wide">
           <div class="card">
-            <h2 id="predict-heading" class="card-title">Agent prediction (prompted SAM3)</h2>
-            <p class="card-desc">Run prompted segmentation on a selected gallery asset. For assets with multiple images/frames, choose a specific source — prediction runs on the selected image. Batch autolabeling jobs and dataset export become available from the Jobs &amp; Exports area as labeling completes.</p>
+            <h2 id="predict-heading" class="card-title">Quick test (prompted SAM3)</h2>
+            <p class="card-desc">This is a single-image smoke test, not the Agent chat. Pick an existing asset and source/frame, or upload one image. Automated agent runs (task spec, calibration, whole-asset labeling, dataset build) are not built yet; label jobs and exports remain available under Jobs &amp; Exports.</p>
             <div class="field-row">
               <label class="field field-grow">
                 <span>Prompt</span>
