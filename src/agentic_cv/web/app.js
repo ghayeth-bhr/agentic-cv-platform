@@ -2,35 +2,63 @@
   "use strict";
 
   const $ = (id) => document.getElementById(id);
+  const DEFAULT_TENANT = "00000000-0000-0000-0000-000000000001";
+  const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+  const CHUNK_SIZE = 5 * 1024 * 1024;
 
   const VIEW_META = {
-    gallery: { title: "Gallery", eyebrow: "Assets", desc: "Manage uploaded assets and their representative media." },
-    upload: { title: "Upload", eyebrow: "Assets", desc: "Create an asset and upload an image or video source." },
-    predict: { title: "Quick test", eyebrow: "Tools", desc: "Run a single-image prompted SAM3 smoke test on an asset source or uploaded file." },
-    search: { title: "Search library", eyebrow: "Assets", desc: "Find indexed frames by description and turn selected results into a sub-asset." },
-    exports: { title: "Exports", eyebrow: "Jobs & Exports", desc: "Export labeled datasets (available after labeling/dataset versions are ready)." },
-    preview: { title: "Label jobs", eyebrow: "Jobs & Exports", desc: "Replay durable label-job preview events and progress." },
+    assets: {
+      title: "Assets",
+      eyebrow: "Workspace",
+      desc: "Upload photos and videos, inspect what is inside, and search across the library.",
+    },
+    agent: {
+      title: "Agent",
+      eyebrow: "Next phase",
+      desc: "Turn a natural-language task into a calibrated, whole-asset labeling run.",
+    },
+    datasets: {
+      title: "Datasets",
+      eyebrow: "Library",
+      desc: "Dataset versions built from label revisions, ready to export.",
+    },
+    jobs: {
+      title: "Jobs",
+      eyebrow: "Library",
+      desc: "Background indexing, labeling, and export activity.",
+    },
   };
 
-  function tenantId() {
-    const el = $("tenant-id");
-    return el ? el.value.trim() : "";
+  const state = {
+    assets: [],
+    selectedAsset: null,
+    lineage: new Map(),
+    searchPayload: null,
+    searchResults: [],
+    uploadFiles: [],
+  };
+
+  function tenantHeaders(json) {
+    const headers = { "X-Tenant-ID": DEFAULT_TENANT };
+    if (json) headers["Content-Type"] = "application/json";
+    return headers;
   }
 
-  function headersJSON(withTenant) {
-    const h = { "Content-Type": "application/json" };
-    if (withTenant) h["X-Tenant-ID"] = tenantId();
-    return h;
+  function cleanMessage(message) {
+    return String(message == null ? "" : message)
+      .replace(UUID_RE, "this item")
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
   async function request(path, options = {}) {
     const response = await fetch(path, options);
     const text = await response.text();
-    let body;
+    let body = null;
     try { body = text ? JSON.parse(text) : null; } catch { body = { detail: text || response.statusText }; }
     if (!response.ok) {
       const detail = body && (body.detail || body.message) ? (body.detail || body.message) : `Request failed (${response.status})`;
-      throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+      throw new Error(cleanMessage(typeof detail === "string" ? detail : JSON.stringify(detail)));
     }
     return body;
   }
@@ -42,46 +70,49 @@
     if (kind) el.dataset.kind = kind; else delete el.dataset.kind;
   }
 
-  function showDetails(id, entries) {
-    const el = $(id);
-    if (!el) return;
-    el.innerHTML = "";
-    if (!entries || !entries.length) { el.hidden = true; return; }
-    for (const [k, v] of entries) {
-      const dt = document.createElement("dt"); dt.textContent = k;
-      const dd = document.createElement("dd"); dd.textContent = v == null ? "—" : String(v);
-      el.append(dt, dd);
-    }
-    el.hidden = false;
-  }
-
-  function setBusy(button, busy) {
+  function setBusy(button, busy, label) {
     if (!button) return;
     button.disabled = !!busy;
     if (busy) {
       if (!button.dataset.orig) button.dataset.orig = button.textContent;
-      button.textContent = "Working…";
+      button.textContent = label || "Working…";
     } else if (button.dataset.orig) {
       button.textContent = button.dataset.orig;
       delete button.dataset.orig;
     }
   }
 
-  function shortId(id) {
-    const s = String(id || "");
-    return s.length > 12 ? s.slice(0, 8) + "…" : s;
-  }
-
   function formatDate(iso) {
     if (!iso) return "—";
     const d = new Date(iso);
     if (Number.isNaN(d.getTime())) return String(iso);
-    return d.toLocaleString([], { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+    return d.toLocaleString([], {
+      year: "numeric", month: "short", day: "2-digit",
+      hour: "2-digit", minute: "2-digit",
+    });
+  }
+
+  function formatBytes(bytes) {
+    const n = Number(bytes) || 0;
+    if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+    if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${n} B`;
+  }
+
+  function node(tag, className, text) {
+    const el = document.createElement(tag);
+    if (className) el.className = className;
+    if (text != null) el.textContent = text;
+    return el;
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   // Navigation
   function showView(name) {
-    const meta = VIEW_META[name] || VIEW_META.gallery;
+    const meta = VIEW_META[name] || VIEW_META.assets;
     document.querySelectorAll(".nav-item").forEach((btn) => {
       const active = btn.dataset.view === name;
       btn.classList.toggle("is-active", active);
@@ -95,16 +126,15 @@
     if ($("view-title")) $("view-title").textContent = meta.title;
     if ($("view-eyebrow")) $("view-eyebrow").textContent = meta.eyebrow;
     if ($("view-desc")) $("view-desc").textContent = meta.desc;
-    if (name === "gallery") loadAssets();
-    if (name === "search") loadAssets({ picker: true, quiet: true });
-    if (name === "predict") loadAssets({ picker: true, quiet: true });
+    if (name === "assets") loadAssets();
+    if (name === "datasets") loadDatasets();
+    if (name === "jobs") loadJobs();
   }
 
   document.querySelectorAll(".nav-item").forEach((btn) => {
     btn.addEventListener("click", () => showView(btn.dataset.view));
   });
 
-  // Runtime check
   async function checkRuntime() {
     const chip = $("runtime-chip");
     try {
@@ -117,831 +147,691 @@
     }
   }
 
-  // Assets: load, render gallery and picker
-  let cachedAssets = [];
-
+  // Assets
   async function loadAssets(opts = {}) {
-    const picker = !!opts.picker;
     const quiet = !!opts.quiet;
-    const meta = $("gallery-meta");
-    if (!picker && meta && !quiet) meta.textContent = "Loading assets…";
+    const meta = $("assets-meta");
+    if (meta && !quiet) meta.textContent = "Loading assets…";
     try {
-      const data = await request("/v1/assets", { headers: { "X-Tenant-ID": tenantId() } });
-      cachedAssets = (data && data.assets) || [];
-      renderAssetGallery(cachedAssets);
-      renderAssetPicker(cachedAssets);
-      if (meta) {
-        const n = cachedAssets.length;
-        meta.textContent = n ? `${n} asset${n === 1 ? "" : "s"}` : "No assets yet";
+      const [assetData, lineageData] = await Promise.all([
+        request("/v1/assets", { headers: tenantHeaders(false) }),
+        request("/v1/sub-assets", { headers: tenantHeaders(false) }),
+      ]);
+      state.assets = (assetData && assetData.assets) || [];
+      state.lineage = new Map(
+        ((lineageData || [])
+          .filter((item) => item && item.asset_id)
+          .map((item) => [String(item.asset_id), item]))
+      );
+      if (state.selectedAsset) {
+        state.selectedAsset = state.assets.find(
+          (asset) => String(asset.asset_id) === String(state.selectedAsset.asset_id)
+        ) || null;
       }
-      return cachedAssets;
+      renderAssets();
+      renderAssetDetail();
+      syncSearchScopeOptions();
+      const n = state.assets.length;
+      if (meta) meta.textContent = n ? `${n} asset${n === 1 ? "" : "s"}` : "No assets yet";
+      return state.assets;
     } catch (err) {
-      if (!picker && meta) meta.textContent = "Could not load assets";
-      if (!quiet) setStatus("upload-status", "", null);
-      renderAssetGallery([]);
-      renderAssetPicker([]);
-      if (!quiet && $("asset-gallery")) {
-        $("asset-gallery").innerHTML = "";
-        const msg = document.createElement("div");
-        msg.className = "muted";
-        msg.textContent = `Could not load assets: ${err.message || err}`;
-        $("asset-gallery").appendChild(msg);
-      }
+      if (meta) meta.textContent = "Could not load assets";
+      if (!quiet) setStatus("gallery-status", err.message || String(err), "error");
+      state.assets = [];
+      state.lineage = new Map();
+      renderAssets();
+      renderAssetDetail();
+      syncSearchScopeOptions();
       return [];
     }
   }
 
-  function renderAssetGallery(assets) {
+  function assetName(asset) {
+    return (asset && asset.name) || "Untitled asset";
+  }
+
+  function mediaKind(asset) {
+    const source = asset && Array.isArray(asset.sources) ? asset.sources[0] : null;
+    if (!source) return "no source";
+    return (source.media_type || "media").split("/")[0] || "media";
+  }
+
+  function renderAssets() {
     const grid = $("asset-gallery");
     if (!grid) return;
+    const filter = (($("asset-filter") && $("asset-filter").value) || "").trim().toLowerCase();
+    const assets = state.assets.filter((asset) => {
+      if (!filter) return true;
+      return assetName(asset).toLowerCase().includes(filter);
+    });
     grid.innerHTML = "";
-    if (!assets || !assets.length) return;
-    for (const asset of assets) {
-      const card = document.createElement("article");
-      card.className = "asset-card";
+    if (!assets.length) {
+      const empty = node("div", "empty-state");
+      empty.append(
+        node("strong", null, state.assets.length ? "No matching assets." : "No assets yet."),
+        node("p", null, state.assets.length
+          ? "Try a different filter, or clear it to see the whole library."
+          : "Use Upload media to add your first photos or videos.")
+      );
+      grid.appendChild(empty);
+      return;
+    }
+    assets.forEach((asset) => {
+      const index = state.assets.indexOf(asset);
+      const card = node("button", "asset-card");
+      card.type = "button";
+      card.dataset.assetIndex = String(index);
+      card.setAttribute("aria-label", `Open ${assetName(asset)}`);
+      if (state.selectedAsset && String(state.selectedAsset.asset_id) === String(asset.asset_id)) {
+        card.classList.add("is-selected");
+      }
 
-      const thumb = document.createElement("div");
-      thumb.className = "asset-thumb";
+      const thumb = node("div", "asset-thumb");
       if (asset.thumbnail_url) {
         const img = document.createElement("img");
         img.src = asset.thumbnail_url;
-        img.alt = asset.name || "Asset thumbnail";
+        img.alt = "";
         img.loading = "lazy";
         img.onerror = () => {
           thumb.innerHTML = "";
-          thumb.appendChild(thumbFallback(asset));
+          thumb.appendChild(node("div", "thumb-fallback", mediaKind(asset)));
         };
         thumb.appendChild(img);
       } else {
-        thumb.appendChild(thumbFallback(asset));
+        thumb.appendChild(node("div", "thumb-fallback", mediaKind(asset)));
       }
-      const rep = (asset.sources || [])[0];
-      if (rep && rep.media_type) {
-        const badge = document.createElement("span");
-        badge.className = "thumb-badge";
-        badge.textContent = (rep.media_type || "").split("/")[0] || "media";
-        thumb.appendChild(badge);
+      const badge = node("span", "thumb-badge", mediaKind(asset));
+      thumb.appendChild(badge);
+      if (state.lineage.has(String(asset.asset_id))) {
+        thumb.appendChild(node("span", "thumb-badge thumb-badge-sub", "sub-asset"));
       }
 
-      const body = document.createElement("div");
-      body.className = "asset-body";
-      const name = document.createElement("div");
-      name.className = "asset-name";
-      name.textContent = asset.name || "Untitled asset";
-      name.title = asset.name || "";
-      const meta = document.createElement("div");
-      meta.className = "asset-meta";
-      const srcCount = (asset.sources || []).length;
-      meta.textContent = `${srcCount} source${srcCount === 1 ? "" : "s"} · ${formatDate(asset.created_at)}`;
-      const id = document.createElement("div");
-      id.className = "asset-id";
-      id.textContent = asset.asset_id;
-      id.title = asset.asset_id;
-
-      const actions = document.createElement("div");
-      actions.className = "asset-actions";
-      const copyBtn = document.createElement("button");
-      copyBtn.type = "button";
-      copyBtn.className = "btn btn-secondary btn-xs";
-      copyBtn.textContent = "Copy ID";
-      copyBtn.addEventListener("click", async () => {
-        try { await navigator.clipboard.writeText(String(asset.asset_id)); copyBtn.textContent = "Copied"; setTimeout(() => (copyBtn.textContent = "Copy ID"), 1200); }
-        catch { copyBtn.textContent = asset.asset_id; }
-      });
-      const indexBtn = document.createElement("button");
-      indexBtn.type = "button";
-      indexBtn.className = "btn btn-secondary btn-xs";
-      indexBtn.textContent = "Index for search";
-      indexBtn.addEventListener("click", async () => {
-        setBusy(indexBtn, true);
-        setStatus("gallery-status", `Indexing ${asset.name || "asset"} for semantic search…`, "busy");
-        try {
-          const result = await request(`/v1/assets/${encodeURIComponent(asset.asset_id)}/index`, {
-            method: "POST",
-            headers: { "X-Tenant-ID": tenantId() },
-          });
-          setStatus("gallery-status", result.detail || `Indexed ${result.indexed_records || 0} record(s).`, "ok");
-        } catch (err) {
-          setStatus("gallery-status", err.message || String(err), "error");
-        } finally {
-          setBusy(indexBtn, false);
-        }
-      });
-      actions.append(copyBtn, indexBtn);
-
-      body.append(name, meta, id, actions);
+      const body = node("div", "asset-body");
+      const name = node("div", "asset-name", assetName(asset));
+      const sourceCount = (asset.sources || []).length;
+      const meta = node("div", "asset-meta", `${sourceCount} source${sourceCount === 1 ? "" : "s"} · ${formatDate(asset.created_at)}`);
+      body.append(name, meta);
       card.append(thumb, body);
+      card.addEventListener("click", () => selectAsset(index));
       grid.appendChild(card);
+    });
+  }
+
+  function selectAsset(index) {
+    const asset = state.assets[index];
+    if (!asset) return;
+    state.selectedAsset = asset;
+    renderAssets();
+    renderAssetDetail();
+    syncSearchScopeOptions();
+  }
+
+  function selectAssetById(assetId) {
+    const index = state.assets.findIndex((asset) => String(asset.asset_id) === String(assetId));
+    if (index >= 0) selectAsset(index);
+    return index >= 0;
+  }
+
+  function assetImageUrl(asset, source) {
+    let url = `/v1/assets/${encodeURIComponent(asset.asset_id)}/image?tenant_id=${encodeURIComponent(DEFAULT_TENANT)}`;
+    if (source && source.source_id) {
+      url += `&source_id=${encodeURIComponent(source.source_id)}`;
     }
+    return url;
   }
 
-  function thumbFallback(asset) {
-    const wrap = document.createElement("div");
-    wrap.className = "thumb-fallback";
-    const rep = (asset.sources || [])[0];
-    const kind = rep ? (rep.media_type || "source") : "no source";
-    wrap.textContent = kind;
-    return wrap;
-  }
-
-  function renderAssetPicker(assets) {
-    const picker = $("asset-picker");
-    if (picker) {
-      const prev = new Set(selectedAssetIds());
-      picker.innerHTML = "";
-      if (assets && assets.length) {
-        for (const asset of assets) {
-          const label = document.createElement("label");
-          label.className = "pick-item";
-          const cb = document.createElement("input");
-          cb.type = "checkbox";
-          cb.value = asset.asset_id;
-          if (prev.has(String(asset.asset_id))) cb.checked = true;
-          label.appendChild(cb);
-
-          if (asset.thumbnail_url) {
-            const img = document.createElement("img");
-            img.className = "pick-thumb";
-            img.src = asset.thumbnail_url;
-            img.alt = "";
-            img.loading = "lazy";
-            img.onerror = () => { img.replaceWith(pickThumbFallback()); };
-            label.appendChild(img);
-          } else {
-            label.appendChild(pickThumbFallback());
-          }
-
-          const text = document.createElement("div");
-          text.className = "pick-text";
-          const name = document.createElement("div");
-          name.className = "pick-name";
-          name.textContent = asset.name || "Untitled asset";
-          const id = document.createElement("div");
-          id.className = "pick-id";
-          id.textContent = shortId(asset.asset_id);
-          id.title = asset.asset_id;
-          text.append(name, id);
-          label.appendChild(text);
-          picker.appendChild(label);
-        }
-      }
-    }
-    renderPredictAssetSelect(assets || []);
-  }
-
-  function renderPredictAssetSelect(assets) {
-    const select = $("predict-asset");
-    if (!select) return;
-    const prev = select.value;
-    select.innerHTML = "";
-    const none = document.createElement("option");
-    none.value = "";
-    none.textContent = assets && assets.length ? "Use uploaded image file" : "No assets available (upload a file)";
-    select.appendChild(none);
-    for (const asset of (assets || [])) {
-      if (!asset || !asset.asset_id) continue;
-      const opt = document.createElement("option");
-      opt.value = asset.asset_id;
-      const kind = asset.sources && asset.sources[0] ? ((asset.sources[0].media_type || "").split("/")[0] || "asset") : "asset";
-      const count = (asset.sources || []).length;
-      opt.textContent = `${asset.name || "Untitled asset"} (${count} image${count === 1 ? "" : "s"}/${kind})`;
-      if (asset.thumbnail_url) opt.dataset.thumb = asset.thumbnail_url;
-      select.appendChild(opt);
-    }
-    if (prev && Array.from(select.options).some((o) => o.value === prev)) select.value = prev;
-    renderPredictSourceSelect(select.value);
-  }
-
-  function renderPredictSourceSelect(assetId) {
-    const select = $("predict-source");
-    if (!select) return;
-    const prev = select.value;
-    select.innerHTML = "";
-    if (!assetId) {
-      const opt = document.createElement("option");
-      opt.value = "";
-      opt.textContent = "Not applicable (upload a file)";
-      select.appendChild(opt);
-      select.disabled = true;
+  function renderAssetDetail() {
+    const content = $("asset-detail-content");
+    const placeholder = $("asset-detail-placeholder");
+    if (!content || !placeholder) return;
+    const asset = state.selectedAsset;
+    if (!asset) {
+      content.hidden = true;
+      content.innerHTML = "";
+      placeholder.hidden = false;
       return;
     }
-    select.disabled = false;
-    const asset = (cachedAssets || []).find((a) => String(a.asset_id) === String(assetId));
-    const sources = asset && Array.isArray(asset.sources) ? asset.sources : [];
-    const auto = document.createElement("option");
-    auto.value = "";
-    auto.textContent = sources.length > 1 ? "Representative (auto)" : "Selected source";
-    select.appendChild(auto);
-    sources.forEach((s, i) => {
-      const opt = document.createElement("option");
-      opt.value = s.source_id || "";
-      const label = s.filename || s.source_id || `Source ${i + 1}`;
-      const type = s.media_type ? ` · ${s.media_type}` : "";
-      opt.textContent = `${i + 1}. ${label}${type}`;
-      select.appendChild(opt);
+    placeholder.hidden = true;
+    content.hidden = false;
+    content.innerHTML = "";
+
+    const head = node("div", "detail-head");
+    const thumb = node("div", "detail-thumb");
+    if (asset.thumbnail_url) {
+      const img = document.createElement("img");
+      img.src = asset.thumbnail_url;
+      img.alt = "";
+      img.onerror = () => { thumb.innerHTML = ""; thumb.appendChild(node("div", "thumb-fallback", mediaKind(asset))); };
+      thumb.appendChild(img);
+    } else {
+      thumb.appendChild(node("div", "thumb-fallback", mediaKind(asset)));
+    }
+    const heading = node("div", "detail-heading");
+    heading.append(
+      node("p", "detail-eyebrow", "Asset"),
+      node("h2", "detail-title", assetName(asset)),
+      node("p", "detail-meta", `${(asset.sources || []).length} source${(asset.sources || []).length === 1 ? "" : "s"} · added ${formatDate(asset.created_at)}`)
+    );
+    head.append(thumb, heading);
+
+    const actions = node("div", "detail-actions");
+    const indexButton = node("button", "btn btn-secondary btn-small", "Index for search");
+    indexButton.type = "button";
+    indexButton.addEventListener("click", () => submitIndexJob(asset, { button: indexButton, source: "detail" }));
+    const searchButton = node("button", "btn btn-secondary btn-small", "Search this asset");
+    searchButton.type = "button";
+    searchButton.addEventListener("click", () => {
+      if ($("search-scope")) $("search-scope").value = "selected";
+      syncSearchScopeOptions();
+      if ($("search-query")) $("search-query").focus();
     });
-    if (prev && Array.from(select.options).some((o) => o.value === prev)) select.value = prev;
-  }
+    actions.append(indexButton, searchButton);
 
-  if ($("predict-asset")) $("predict-asset").addEventListener("change", (e) => {
-    renderPredictSourceSelect(e.target.value);
-  });
+    content.append(head, actions);
 
-  function pickThumbFallback() {
-    const d = document.createElement("div");
-    d.className = "pick-thumb-fallback";
-    d.textContent = "—";
-    return d;
-  }
+    const lineage = state.lineage.get(String(asset.asset_id));
+    if (lineage) {
+      const box = node("div", "lineage-box");
+      box.append(
+        node("div", "lineage-label", "Sub-asset lineage"),
+        node("p", "lineage-query", `Created from search: “${lineage.query}”`),
+        node("p", "lineage-meta", `Parent assets: ${(lineage.parent_asset_names || []).join(", ") || "Source assets"}`),
+        node("p", "lineage-meta", `${lineage.source_count || (lineage.result_ids || []).length} matched image${(lineage.source_count || (lineage.result_ids || []).length) === 1 ? "" : "s"}`)
+      );
+      content.appendChild(box);
+    }
 
-  function selectedAssetIds() {
-    const picker = $("asset-picker");
-    if (!picker) return [];
-    return Array.from(picker.querySelectorAll('input[type="checkbox"]:checked')).map((cb) => cb.value);
-  }
-
-  // File info helper
-  function bindFileInfo(inputId, infoId) {
-    const input = $(inputId), info = $(infoId);
-    if (!input || !info) return;
-    input.addEventListener("change", () => {
-      const f = input.files && input.files[0];
-      if (!f) { info.textContent = "No file selected."; return; }
-      const mb = f.size / (1024 * 1024);
-      const size = mb >= 1 ? `${mb.toFixed(2)} MB` : `${(f.size / 1024).toFixed(1)} KB`;
-      info.textContent = `${f.name} · ${size} · ${f.type || "unknown type"}`;
+    const sources = node("div", "source-section");
+    sources.appendChild(node("h3", "detail-section-title", "Sources"));
+    const list = node("div", "source-list");
+    const sourceItems = asset.sources || [];
+    if (!sourceItems.length) {
+      list.appendChild(node("p", "muted", "No source media has finished uploading."));
+    }
+    sourceItems.forEach((source, index) => {
+      const row = node("div", "source-row");
+      const image = document.createElement("img");
+      image.className = "source-thumb";
+      image.src = assetImageUrl(asset, source);
+      image.alt = "";
+      image.loading = "lazy";
+      image.onerror = () => { image.replaceWith(node("div", "source-thumb source-thumb-fallback", "—")); };
+      const text = node("div", "source-text");
+      text.append(
+        node("div", "source-name", source.filename || `Source ${index + 1}`),
+        node("div", "source-meta", `${source.media_type || "media"} · added ${formatDate(source.created_at)}`)
+      );
+      row.append(image, text);
+      list.appendChild(row);
     });
+    sources.appendChild(list);
+    content.appendChild(sources);
   }
-  bindFileInfo("asset-file", "asset-file-info");
 
-  async function sha256Hex(buffer) {
-    const hash = await crypto.subtle.digest("SHA-256", buffer);
-    return Array.from(new Uint8Array(hash)).map((b) => b.toString(16).padStart(2, "0")).join("");
+  function syncSearchScopeOptions() {
+    const select = $("search-scope");
+    const chip = $("search-scope-chip");
+    if (!select) return;
+    const selectedOption = select.querySelector('option[value="selected"]');
+    if (selectedOption) {
+      selectedOption.disabled = !state.selectedAsset;
+      selectedOption.textContent = state.selectedAsset
+        ? `Selected: ${assetName(state.selectedAsset)}`
+        : "Selected asset (none)";
+    }
+    if (!state.selectedAsset && select.value === "selected") select.value = "all";
+    if (chip) chip.textContent = select.value === "selected" && state.selectedAsset
+      ? assetName(state.selectedAsset)
+      : "All assets";
   }
 
   // Upload
-  function renderUploadResult(asset, source) {
-    const container = $("upload-result");
-    if (!container) return;
-    container.innerHTML = "";
-    container.classList.remove("muted");
-    const card = document.createElement("div");
-    card.className = "upload-result-card";
-
-    const thumb = document.createElement("div");
-    thumb.className = "asset-thumb";
-    if (asset && asset.asset_id) {
-      const img = document.createElement("img");
-      img.src = `/v1/assets/${asset.asset_id}/thumbnail?tenant_id=${encodeURIComponent(tenantId())}`;
-      img.alt = asset.name || "Uploaded asset";
-      img.onerror = () => { thumb.innerHTML = ""; thumb.appendChild(thumbFallback({ sources: source ? [source] : [] })); };
-      thumb.appendChild(img);
-    } else {
-      thumb.appendChild(thumbFallback({ sources: [] }));
+  function renderUploadFiles() {
+    const info = $("asset-file-info");
+    if (!info) return;
+    info.innerHTML = "";
+    if (!state.uploadFiles.length) {
+      info.textContent = "No files selected.";
+      return;
     }
+    state.uploadFiles.forEach((file) => {
+      const chip = node("span", "file-chip");
+      chip.append(node("strong", null, file.name), node("span", null, ` · ${formatBytes(file.size)}`));
+      info.appendChild(chip);
+    });
+  }
 
-    const body = document.createElement("div");
-    body.className = "asset-body";
-    const name = document.createElement("div");
-    name.className = "asset-name";
-    name.textContent = (asset && asset.name) || "Uploaded asset";
-    const id = document.createElement("div");
-    id.className = "asset-id";
-    id.textContent = asset ? asset.asset_id : "—";
-    const meta = document.createElement("div");
-    meta.className = "asset-meta";
-    meta.textContent = source ? `${source.filename || "source"} · ${(source.media_type || "")}` : "Completed";
-    body.append(name, meta, id);
-    card.append(thumb, body);
-    container.appendChild(card);
+  if ($("asset-file")) $("asset-file").addEventListener("change", (event) => {
+    state.uploadFiles = Array.from(event.target.files || []);
+    renderUploadFiles();
+  });
+
+  function showUploadPanel(show) {
+    const panel = $("upload-panel");
+    const toggle = $("upload-toggle");
+    if (!panel) return;
+    panel.hidden = !show;
+    if (toggle) toggle.setAttribute("aria-expanded", show ? "true" : "false");
+  }
+
+  if ($("upload-toggle")) $("upload-toggle").addEventListener("click", () => {
+    const panel = $("upload-panel");
+    showUploadPanel(!panel || panel.hidden);
+  });
+  if ($("upload-close")) $("upload-close").addEventListener("click", () => showUploadPanel(false));
+
+  async function sha256Hex(bytes) {
+    if (!crypto || !crypto.subtle) {
+      throw new Error("This browser cannot hash files for upload. Use a recent Chrome, Edge, or Firefox.");
+    }
+    const hash = await crypto.subtle.digest("SHA-256", bytes);
+    return Array.from(new Uint8Array(hash)).map((b) => b.toString(16).padStart(2, "0")).join("");
   }
 
   if ($("upload-button")) $("upload-button").addEventListener("click", async () => {
-    const btn = $("upload-button");
-    const file = $("asset-file").files && $("asset-file").files[0];
-    const name = ($("asset-name").value || "").trim() || "Untitled asset";
-    if (!file) { setStatus("upload-status", "Choose a file to upload.", "error"); return; }
-    setBusy(btn, true);
+    const button = $("upload-button");
+    const files = state.uploadFiles.slice();
+    const name = (($("asset-name") && $("asset-name").value) || "").trim()
+      || (files.length ? files[0].name.replace(/\.[^.]+$/, "") : "Untitled asset");
+    if (!files.length) {
+      setStatus("upload-status", "Choose at least one image or video.", "error");
+      return;
+    }
+    setBusy(button, true, "Uploading…");
+    let activeAsset = null;
     try {
-      setStatus("upload-status", "Hashing file…", "busy");
-      const bytes = await file.arrayBuffer();
-      const digest = await sha256Hex(bytes);
-      const h = headersJSON(true);
-
       setStatus("upload-status", "Creating asset…", "busy");
-      const asset = await request("/v1/assets", { method: "POST", headers: h, body: JSON.stringify({ name }) });
-
-      setStatus("upload-status", "Starting upload…", "busy");
-      const upload = await request(`/v1/assets/${asset.asset_id}/uploads`, {
-        method: "POST", headers: h,
-        body: JSON.stringify({ filename: file.name, media_type: file.type || "application/octet-stream", expected_sha256: digest })
+      activeAsset = await request("/v1/assets", {
+        method: "POST",
+        headers: tenantHeaders(true),
+        body: JSON.stringify({ name }),
       });
 
-      setStatus("upload-status", "Uploading bytes…", "busy");
-      const partData = new FormData();
-      partData.append("part", file, file.name);
-      await request(`/v1/uploads/${upload.upload_id}/parts/1`, { method: "PUT", body: partData });
-
-      setStatus("upload-status", "Completing upload…", "busy");
-      const source = await request(`/v1/uploads/${upload.upload_id}/complete`, { method: "POST", headers: h });
-
-      renderUploadResult(asset, { filename: file.name, media_type: file.type });
-      await loadAssets({ quiet: true });
-
-      setStatus("upload-status", "Upload complete. Indexing for semantic search…", "busy");
-      try {
-        const idx = await request(`/v1/assets/${encodeURIComponent(asset.asset_id)}/index`, {
+      for (let fileIndex = 0; fileIndex < files.length; fileIndex += 1) {
+        const file = files[fileIndex];
+        setStatus("upload-status", `Hashing ${file.name} (${fileIndex + 1}/${files.length})…`, "busy");
+        const digest = await sha256Hex(await file.arrayBuffer());
+        const upload = await request(`/v1/assets/${encodeURIComponent(activeAsset.asset_id)}/uploads`, {
           method: "POST",
-          headers: { "X-Tenant-ID": tenantId() },
+          headers: tenantHeaders(true),
+          body: JSON.stringify({
+            filename: file.name,
+            media_type: file.type || "application/octet-stream",
+            expected_sha256: digest,
+          }),
         });
-        setStatus("upload-status", `Upload complete. ${idx.detail || "Indexed for search."}`, "ok");
-      } catch (idxErr) {
-        setStatus("upload-status", `Upload complete. Semantic indexing unavailable: ${idxErr.message || idxErr}`, "error");
-      }
-    } catch (err) {
-      setStatus("upload-status", err.message || String(err), "error");
-    } finally {
-      setBusy(btn, false);
-    }
-  });
-
-  if ($("gallery-refresh")) $("gallery-refresh").addEventListener("click", () => loadAssets());
-
-  // Predict
-  function drawPredictions(canvas, img, predictions, predSize) {
-    const ctx = canvas.getContext("2d");
-    canvas.width = img.naturalWidth || img.width;
-    canvas.height = img.naturalHeight || img.height;
-    ctx.drawImage(img, 0, 0);
-    const predW = predSize && Number.isFinite(predSize.w) && predSize.w > 0 ? predSize.w : canvas.width;
-    const predH = predSize && Number.isFinite(predSize.h) && predSize.h > 0 ? predSize.h : canvas.height;
-    const sx = canvas.width / predW;
-    const sy = canvas.height / predH;
-    const colors = ["#18b6c4", "#ff6b6b", "#ffd166", "#7bd389", "#c792ea", "#4dabf7"];
-    (predictions || []).forEach((p, i) => {
-      const color = colors[i % colors.length];
-      const box = p.box || [0, 0, 0, 0];
-      const x1 = Number(box[0] || 0) * sx;
-      const y1 = Number(box[1] || 0) * sy;
-      const x2 = Number(box[2] || 0) * sx;
-      const y2 = Number(box[3] || 0) * sy;
-      const w = Math.max(0, x2 - x1), h = Math.max(0, y2 - y1);
-      ctx.lineWidth = Math.max(2, Math.round(canvas.width / 300));
-      ctx.strokeStyle = color;
-      ctx.strokeRect(x1, y1, w, h);
-      const label = `#${i + 1} ${(p.score != null ? Number(p.score).toFixed(3) : "")}`;
-      ctx.font = `${Math.max(12, Math.round(canvas.width / 55))}px "IBM Plex Mono", monospace`;
-      const pad = 4;
-      const tw = ctx.measureText(label).width;
-      const th = Math.max(14, Math.round(canvas.width / 45));
-      const ly = Math.max(th + pad, y1);
-      ctx.fillStyle = color;
-      ctx.fillRect(x1, ly - th - pad, tw + pad * 2, th + pad);
-      ctx.fillStyle = "#041316";
-      ctx.fillText(label, x1 + pad, ly - pad / 2);
-    });
-  }
-
-  async function loadImageForCanvas(src) {
-    const img = new Image();
-    await new Promise((resolve, reject) => {
-      img.onload = resolve;
-      img.onerror = () => reject(new Error("Could not load image for prediction preview"));
-      img.src = src;
-    });
-    return img;
-  }
-
-  if ($("predict-refresh-assets")) $("predict-refresh-assets").addEventListener("click", () => loadAssets({ picker: true }));
-
-  if ($("predict-button")) $("predict-button").addEventListener("click", async () => {
-    const btn = $("predict-button");
-    const assetId = ($("predict-asset") && $("predict-asset").value) || "";
-    const file = $("predict-file").files && $("predict-file").files[0];
-    const prompt = ($("predict-prompt").value || "").trim();
-    const thresholdRaw = $("predict-threshold").value;
-    if (!assetId && !file) { setStatus("predict-status", "Choose an existing asset or upload an image file.", "error"); return; }
-    if (!prompt) { setStatus("predict-status", "Enter a prompt.", "error"); return; }
-    setBusy(btn, true);
-    setStatus("predict-status", assetId ? "Running prediction on selected asset…" : "Running prediction on uploaded image…", "busy");
-    if ($("predict-output")) $("predict-output").hidden = true;
-    try {
-      let result;
-      let img;
-      let objectUrl = null;
-      let predSize = null;
-      if (assetId) {
-        const payload = { prompt };
-        if (thresholdRaw !== "") payload.threshold = Number(thresholdRaw);
-        const sourceId = ($("predict-source") && $("predict-source").value) || "";
-        if (sourceId) payload.source_id = sourceId;
-        result = await request(`/v1/assets/${encodeURIComponent(assetId)}/predict`, {
-          method: "POST", headers: headersJSON(true), body: JSON.stringify(payload)
-        });
-        const imageUrl = result && result.image_url
-          ? result.image_url
-          : `/v1/assets/${encodeURIComponent(assetId)}/image?tenant_id=${encodeURIComponent(tenantId())}`;
-        if (result && Number.isFinite(result.image_width) && Number.isFinite(result.image_height)) {
-          predSize = { w: Number(result.image_width), h: Number(result.image_height) };
+        const totalParts = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
+        for (let part = 1; part <= totalParts; part += 1) {
+          const start = (part - 1) * CHUNK_SIZE;
+          const chunk = file.slice(start, Math.min(start + CHUNK_SIZE, file.size));
+          const form = new FormData();
+          form.append("part", chunk, file.name);
+          setStatus("upload-status", `Uploading ${file.name} · ${fileIndex + 1}/${files.length} · part ${part}/${totalParts}`, "busy");
+          await request(`/v1/uploads/${encodeURIComponent(upload.upload_id)}/parts/${part}`, {
+            method: "PUT",
+            headers: tenantHeaders(false),
+            body: form,
+          });
         }
-        img = await loadImageForCanvas(imageUrl);
-      } else {
-        const form = new FormData();
-        form.append("image", file);
-        form.append("prompt", prompt);
-        if (thresholdRaw !== "") form.append("threshold", thresholdRaw);
-        result = await request("/v1/predict", { method: "POST", body: form });
-        objectUrl = URL.createObjectURL(file);
-        img = await loadImageForCanvas(objectUrl);
-        predSize = { w: img.naturalWidth || img.width, h: img.naturalHeight || img.height };
-      }
-
-      const predictions = (result && result.predictions) || [];
-      drawPredictions($("predict-canvas"), img, predictions, predSize);
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-
-      const summary = $("predict-summary");
-      summary.innerHTML = "";
-      if (!predictions.length) {
-        summary.textContent = "No predictions returned.";
-      } else {
-        const intro = document.createElement("div");
-        intro.textContent = `${predictions.length} prediction${predictions.length === 1 ? "" : "s"} for “${result.prompt || prompt}”.`;
-        summary.appendChild(intro);
-        predictions.forEach((p, i) => {
-          const pill = document.createElement("span");
-          pill.className = "pill";
-          const box = (p.box || []).map((n) => Number(n).toFixed(1)).join(", ");
-          pill.textContent = `#${i + 1} score ${Number(p.score).toFixed(3)} · [${box}]`;
-          summary.appendChild(pill);
+        await request(`/v1/uploads/${encodeURIComponent(upload.upload_id)}/complete`, {
+          method: "POST",
+          headers: tenantHeaders(false),
         });
       }
-      $("predict-raw").textContent = JSON.stringify(result, null, 2);
-      $("predict-output").hidden = false;
-      setStatus("predict-status", predictions.length ? "Prediction complete." : "Prediction complete (no detections).", "ok");
+
+      await loadAssets({ quiet: true });
+      selectAssetById(activeAsset.asset_id);
+      setStatus("upload-status", `Uploaded ${files.length} file${files.length === 1 ? "" : "s"}. Queuing search indexing…`, "ok");
+      await submitIndexJob(activeAsset, { source: "upload" });
+      state.uploadFiles = [];
+      if ($("asset-file")) $("asset-file").value = "";
+      renderUploadFiles();
+      showUploadPanel(false);
     } catch (err) {
-      setStatus("predict-status", err.message || String(err), "error");
+      const message = cleanMessage(err.message || err);
+      if (activeAsset) {
+        await loadAssets({ quiet: true });
+        selectAssetById(activeAsset.asset_id);
+        setStatus("upload-status", `Upload incomplete: ${message}`, "error");
+      } else {
+        setStatus("upload-status", message, "error");
+      }
     } finally {
-      setBusy(btn, false);
+      setBusy(button, false);
     }
   });
+
+  async function submitIndexJob(asset, opts = {}) {
+    const button = opts.button || null;
+    setBusy(button, true, "Indexing…");
+    setStatus("gallery-status", `Queuing search indexing for ${assetName(asset)}…`, "busy");
+    try {
+      let job = await request(`/v1/assets/${encodeURIComponent(asset.asset_id)}/index-jobs`, {
+        method: "POST",
+        headers: tenantHeaders(false),
+      });
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        if (job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") break;
+        await sleep(500);
+        job = await request(`/v1/index-jobs/${encodeURIComponent(job.job_id)}`, {
+          headers: tenantHeaders(false),
+        });
+      }
+      if (job.status === "succeeded") {
+        setStatus("gallery-status", `${assetName(asset)} is indexed for search.`, "ok");
+        if (opts.source === "upload") {
+          setStatus("upload-status", `Upload complete. ${assetName(asset)} is indexed for search.`, "ok");
+        }
+      } else if (job.status === "failed") {
+        const detail = cleanMessage(job.error || "search indexing is unavailable");
+        setStatus("gallery-status", `Indexing failed: ${detail}`, "error");
+        if (opts.source === "upload") {
+          setStatus("upload-status", `Upload complete. Search indexing unavailable: ${detail}`, "error");
+        }
+      } else {
+        setStatus("gallery-status", `Indexing ${job.status || "queued"}…`, "busy");
+      }
+      if ($("view-jobs") && !$("view-jobs").hidden) loadJobs();
+      return job;
+    } catch (err) {
+      const detail = cleanMessage(err.message || err);
+      setStatus("gallery-status", `Indexing failed: ${detail}`, "error");
+      if (opts.source === "upload") {
+        setStatus("upload-status", `Upload complete. Search indexing unavailable: ${detail}`, "error");
+      }
+      return null;
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  if ($("assets-refresh")) $("assets-refresh").addEventListener("click", () => loadAssets());
+  if ($("asset-filter")) $("asset-filter").addEventListener("input", renderAssets);
 
   // Search
-  function renderSearchResults(results) {
+  function currentSearchPayload() {
+    const query = (($("search-query") && $("search-query").value) || "").trim();
+    const payload = { query, limit: 20 };
+    const scope = $("search-scope") ? $("search-scope").value : "all";
+    if (scope === "selected" && state.selectedAsset) {
+      payload.asset_ids = [state.selectedAsset.asset_id];
+    }
+    return payload;
+  }
+
+  function assetsById() {
+    return new Map(state.assets.map((asset) => [String(asset.asset_id), asset]));
+  }
+
+  function renderSearchResults() {
     const container = $("search-results");
     if (!container) return;
     container.innerHTML = "";
-    if (!results || !results.length) {
-      const empty = document.createElement("div");
-      empty.className = "results-empty";
-      empty.textContent = "No results.";
-      container.appendChild(empty);
+    if (!state.searchResults.length) {
+      container.appendChild(node("div", "results-empty", "No results yet. Try a description of the people, objects, or scene."));
       return;
     }
-    const grid = document.createElement("div");
-    grid.className = "result-gallery";
-    results.forEach((r) => {
-      const score = Number(r.score);
+    const byId = assetsById();
+    const grid = node("div", "result-gallery");
+    state.searchResults.forEach((result, index) => {
+      const score = Number(result.score);
       const pct = Number.isFinite(score) ? Math.max(0, Math.min(100, score * 100)) : 0;
-      const card = document.createElement("article");
-      card.className = "result-card";
-
-      if (r.image_url) {
-        const thumb = document.createElement("div");
-        thumb.className = "result-thumb";
+      const card = node("button", "result-card");
+      card.type = "button";
+      card.setAttribute("aria-label", `Open match ${index + 1}`);
+      if (result.image_url) {
+        const thumb = node("div", "result-thumb");
         const img = document.createElement("img");
-        img.src = r.image_url;
-        img.alt = r.record_id || "Search result";
+        img.src = result.image_url;
+        img.alt = "";
         img.loading = "lazy";
-        img.onerror = () => { thumb.remove(); };
         thumb.appendChild(img);
         card.appendChild(thumb);
       }
-
-      const head = document.createElement("div");
-      head.className = "result-card-head";
-      const id = document.createElement("div");
-      id.className = "result-id";
-      id.textContent = r.record_id;
-      const scoreEl = document.createElement("div");
-      scoreEl.className = "result-score";
-      scoreEl.textContent = Number.isFinite(score) ? score.toFixed(4) : "—";
-      head.append(id, scoreEl);
-
-      const meta = document.createElement("p");
-      meta.className = "result-meta";
-      meta.append("asset ");
-      const asset = document.createElement("span");
-      asset.textContent = r.asset_id || "—";
-      meta.appendChild(asset);
-
-      const bar = document.createElement("div");
-      bar.className = "score-bar";
+      const head = node("div", "result-card-head");
+      head.append(
+        node("span", "result-rank", `Match ${index + 1}`),
+        node("span", "result-score", Number.isFinite(score) ? `${pct.toFixed(0)}%` : "—")
+      );
+      const parent = byId.get(String(result.asset_id));
+      card.append(
+        head,
+        node("p", "result-meta", parent ? assetName(parent) : "Source asset")
+      );
+      const bar = node("div", "score-bar");
       const fill = document.createElement("i");
-      fill.style.width = pct.toFixed(1) + "%";
+      fill.style.width = `${pct.toFixed(1)}%`;
       bar.appendChild(fill);
-
-      card.append(head, meta, bar);
+      card.appendChild(bar);
+      card.addEventListener("click", () => {
+        if (result.asset_id) selectAssetById(result.asset_id);
+        if ($("asset-detail")) $("asset-detail").scrollIntoView({ behavior: "smooth", block: "start" });
+      });
       grid.appendChild(card);
     });
     container.appendChild(grid);
   }
 
-  function searchPayload() {
-    const query = ($("search-query").value || "").trim();
-    const limitVal = parseInt($("search-limit").value, 10);
-    const payload = { query, limit: Number.isFinite(limitVal) && limitVal > 0 ? limitVal : 10 };
-    const ids = selectedAssetIds();
-    if (ids.length) payload.asset_ids = ids;
-    return payload;
-  }
-
-  if ($("search-select-all")) $("search-select-all").addEventListener("click", () => {
-    document.querySelectorAll("#asset-picker input[type='checkbox']").forEach((cb) => (cb.checked = true));
-  });
-  if ($("search-select-none")) $("search-select-none").addEventListener("click", () => {
-    document.querySelectorAll("#asset-picker input[type='checkbox']").forEach((cb) => (cb.checked = false));
-  });
-  if ($("search-refresh-assets")) $("search-refresh-assets").addEventListener("click", () => loadAssets({ picker: true }));
+  if ($("search-scope")) $("search-scope").addEventListener("change", syncSearchScopeOptions);
 
   if ($("search-button")) $("search-button").addEventListener("click", async () => {
-    const btn = $("search-button");
-    const payload = searchPayload();
-    if (!payload.query) { setStatus("search-status", "Enter a search query.", "error"); return; }
-    setBusy(btn, true);
+    const button = $("search-button");
+    const payload = currentSearchPayload();
+    if (!payload.query) {
+      setStatus("search-status", "Enter a search query.", "error");
+      return;
+    }
+    setBusy(button, true, "Searching…");
     setStatus("search-status", "Searching…", "busy");
-    setStatus("subasset-status", "");
+    state.searchResults = [];
+    state.searchPayload = null;
+    renderSearchResults();
+    if ($("subasset-button")) $("subasset-button").disabled = true;
     try {
-      const result = await request("/v1/search", { method: "POST", headers: headersJSON(true), body: JSON.stringify(payload) });
-      const results = (result && result.results) || [];
-      renderSearchResults(results);
-      setStatus("search-status", `${results.length} result${results.length === 1 ? "" : "s"}.`, "ok");
+      const result = await request("/v1/search", {
+        method: "POST",
+        headers: tenantHeaders(true),
+        body: JSON.stringify(payload),
+      });
+      state.searchResults = (result && result.results) || [];
+      state.searchPayload = payload;
+      renderSearchResults();
+      if ($("subasset-button")) $("subasset-button").disabled = !state.searchResults.length;
+      setStatus("search-status", `${state.searchResults.length} result${state.searchResults.length === 1 ? "" : "s"}.`, "ok");
     } catch (err) {
-      if ($("search-results")) $("search-results").innerHTML = "";
-      setStatus("search-status", err.message || String(err), "error");
+      setStatus("search-status", cleanMessage(err.message || err), "error");
     } finally {
-      setBusy(btn, false);
+      setBusy(button, false);
     }
   });
 
   if ($("subasset-button")) $("subasset-button").addEventListener("click", async () => {
-    const btn = $("subasset-button");
-    const payload = searchPayload();
-    if (!payload.query) { setStatus("subasset-status", "Enter a search query first.", "error"); return; }
-    setBusy(btn, true);
-    setStatus("subasset-status", "Creating sub-asset from search results…", "busy");
-    try {
-      const record = await request("/v1/sub-assets/from-search", {
-        method: "POST", headers: headersJSON(true), body: JSON.stringify(payload)
-      });
-      await loadAssets({ quiet: true });
-      if (record.asset_id) {
-        const count = Number.isFinite(record.source_count) ? record.source_count : (record.result_ids || []).length;
-        setStatus("subasset-status", `Created gallery asset “${record.asset_name || "Sub-asset"}” (${record.asset_id}) with ${count} image source${count === 1 ? "" : "s"}.`, "ok");
-        showView("gallery");
-        setStatus("gallery-status", `Sub-asset created from “${record.query || payload.query}” and added to the gallery.`, "ok");
-      } else {
-        setStatus("subasset-status", `Sub-asset record created: ${record.sub_asset_id} (${(record.result_ids || []).length} results).`, "ok");
-      }
-    } catch (err) {
-      setStatus("subasset-status", err.message || String(err), "error");
-    } finally {
-      setBusy(btn, false);
-    }
-  });
-
-  // Exports
-  function renderExportJob(job) {
-    if (!job) { showDetails("export-details", null); return; }
-    showDetails("export-details", [
-      ["Job", job.job_id],
-      ["Kind", job.kind],
-      ["Status", job.status],
-      ["Attempts", job.attempts],
-      ["Error", job.error],
-      ["Tenant", job.tenant_id],
-    ]);
-  }
-
-  if ($("export-button")) $("export-button").addEventListener("click", async () => {
-    const btn = $("export-button");
-    const versionId = ($("version-id").value || "").trim();
-    const format = $("export-format").value;
-    const idempotencyKey = ($("export-key").value || "").trim() || "browser-export";
-    if (!versionId) { setStatus("export-status", "Enter a dataset version ID.", "error"); return; }
-    setBusy(btn, true);
-    setStatus("export-status", "Queuing export…", "busy");
-    try {
-      const job = await request("/v1/dataset-exports", {
-        method: "POST", headers: headersJSON(true),
-        body: JSON.stringify({ version_id: versionId, format, idempotency_key: idempotencyKey })
-      });
-      renderExportJob(job);
-      if ($("job-id")) $("job-id").value = job.job_id || "";
-      setStatus("export-status", `Export job ${job.status}.`, "ok");
-    } catch (err) {
-      setStatus("export-status", err.message || String(err), "error");
-    } finally {
-      setBusy(btn, false);
-    }
-  });
-
-  if ($("job-status-button")) $("job-status-button").addEventListener("click", async () => {
-    const btn = $("job-status-button");
-    const jobId = ($("job-id").value || "").trim();
-    if (!jobId) { setStatus("export-status", "Enter a job ID.", "error"); return; }
-    setBusy(btn, true);
-    setStatus("export-status", "Fetching job status…", "busy");
-    try {
-      const job = await request(`/v1/dataset-exports/${encodeURIComponent(jobId)}`, { headers: { "X-Tenant-ID": tenantId() } });
-      renderExportJob(job);
-      setStatus("export-status", `Job is ${job.status}.`, "ok");
-    } catch (err) {
-      setStatus("export-status", err.message || String(err), "error");
-    } finally {
-      setBusy(btn, false);
-    }
-  });
-
-  if ($("job-cancel-button")) $("job-cancel-button").addEventListener("click", async () => {
-    const btn = $("job-cancel-button");
-    const jobId = ($("job-id").value || "").trim();
-    if (!jobId) { setStatus("export-status", "Enter a job ID.", "error"); return; }
-    setBusy(btn, true);
-    setStatus("export-status", "Requesting cancellation…", "busy");
-    try {
-      const job = await request(`/v1/dataset-exports/${encodeURIComponent(jobId)}/cancel`, {
-        method: "POST", headers: { "X-Tenant-ID": tenantId() }
-      });
-      renderExportJob(job);
-      setStatus("export-status", `Job is ${job.status}.`, "ok");
-    } catch (err) {
-      setStatus("export-status", err.message || String(err), "error");
-    } finally {
-      setBusy(btn, false);
-    }
-  });
-
-  // Preview gallery (label job events)
-  function parseSseEvents(text) {
-    const events = [];
-    const blocks = String(text || "").split(/\n\n+/);
-    for (const block of blocks) {
-      if (!block.trim()) continue;
-      let eventId = null;
-      let data = null;
-      for (const line of block.split(/\n/)) {
-        if (line.startsWith("id:")) {
-          const n = Number(line.slice(3).trim());
-          if (Number.isFinite(n)) eventId = n;
-        } else if (line.startsWith("data:")) {
-          const raw = line.slice(5).trim();
-          try { data = JSON.parse(raw); } catch { data = null; }
-        }
-      }
-      if (data) {
-        if (eventId != null && data.event_id == null) data.event_id = eventId;
-        events.push(data);
-      }
-    }
-    return events;
-  }
-
-  function renderGallery(events) {
-    const grid = $("gallery-grid");
-    const summary = $("gallery-summary");
-    if (!grid || !summary) return;
-    grid.innerHTML = "";
-    if (!events || !events.length) {
-      summary.hidden = true;
-      summary.innerHTML = "";
+    const button = $("subasset-button");
+    const payload = state.searchPayload || currentSearchPayload();
+    if (!payload.query || !state.searchResults.length) {
+      setStatus("search-status", "Run a search before saving results.", "error");
       return;
     }
-    const last = events[events.length - 1];
-    const total = Number(last.total) || 0;
-    const processed = Number(last.processed) || 0;
-    summary.hidden = false;
-    summary.innerHTML = "";
-    const parts = [
-      ["Events", String(events.length)],
-      ["Processed", total ? `${processed} / ${total}` : String(processed)],
-      ["Latest status", String(last.status || "—")],
-      ["Job", String(last.job_id || "—")],
-    ];
-    for (const [k, v] of parts) {
-      const span = document.createElement("span");
-      span.append(`${k} `);
-      const strong = document.createElement("strong");
-      strong.textContent = v;
-      span.appendChild(strong);
-      summary.appendChild(span);
+    setBusy(button, true, "Saving…");
+    setStatus("search-status", "Saving search results as a sub-asset…", "busy");
+    try {
+      const record = await request("/v1/sub-assets/from-search", {
+        method: "POST",
+        headers: tenantHeaders(true),
+        body: JSON.stringify(payload),
+      });
+      await loadAssets({ quiet: true });
+      if (record.asset_id) selectAssetById(record.asset_id);
+      const count = Number.isFinite(record.source_count) ? record.source_count : state.searchResults.length;
+      setStatus("search-status", `Saved “${record.asset_name || "Sub-asset"}” with ${count} matched image${count === 1 ? "" : "s"}.`, "ok");
+      setStatus("gallery-status", `Sub-asset saved from search: “${record.query || payload.query}”.`, "ok");
+    } catch (err) {
+      setStatus("search-status", cleanMessage(err.message || err), "error");
+    } finally {
+      setBusy(button, false);
     }
+  });
 
-    for (const ev of events) {
-      const evTotal = Number(ev.total) || 0;
-      const evProcessed = Number(ev.processed) || 0;
-      const pct = evTotal > 0 ? Math.max(0, Math.min(100, (evProcessed / evTotal) * 100)) : 0;
-      const status = ev.status || "unknown";
-
-      const card = document.createElement("article");
-      card.className = "gallery-card";
-      card.dataset.status = status;
-
-      const head = document.createElement("div");
-      head.className = "gallery-card-head";
-      const title = document.createElement("div");
-      title.className = "gallery-card-title";
-      title.textContent = ev.image_id || "unknown image";
-      const sub = document.createElement("div");
-      sub.className = "gallery-card-sub";
-      sub.textContent = ev.event_id != null ? `event #${ev.event_id}` : "event";
-      head.append(title, sub);
-
-      const body = document.createElement("div");
-      body.className = "gallery-card-body";
-      const pill = document.createElement("span");
-      pill.className = "status-pill";
-      pill.dataset.status = status;
-      pill.textContent = status;
-      const kv = document.createElement("dl");
-      kv.className = "gallery-kv";
-      const rows = [
-        ["Progress", evTotal ? `${evProcessed} / ${evTotal}` : String(evProcessed)],
-        ["Created", ev.created_at || "—"],
-      ];
-      for (const [k, v] of rows) {
-        const dt = document.createElement("dt"); dt.textContent = k;
-        const dd = document.createElement("dd"); dd.textContent = v;
-        kv.append(dt, dd);
+  // Datasets
+  async function loadDatasets() {
+    const list = $("datasets-list");
+    const meta = $("datasets-meta");
+    if (!list) return;
+    if (meta) meta.textContent = "Loading dataset versions…";
+    setStatus("datasets-status", "");
+    try {
+      const datasets = await request("/v1/datasets", { headers: tenantHeaders(false) });
+      list.innerHTML = "";
+      if (!datasets || !datasets.length) {
+        const empty = node("div", "empty-state");
+        empty.append(
+          node("strong", null, "No dataset versions yet."),
+          node("p", null, "Create one from a succeeded labeling job. The Agent will do this automatically in the next phase.")
+        );
+        list.appendChild(empty);
+      } else {
+        datasets.forEach((dataset) => list.appendChild(renderDatasetCard(dataset)));
       }
-      body.append(pill, kv);
-
-      const foot = document.createElement("div");
-      foot.className = "gallery-card-foot";
-      const bar = document.createElement("div");
-      bar.className = "gallery-progress";
-      const fill = document.createElement("i");
-      fill.style.width = `${pct.toFixed(1)}%`;
-      bar.appendChild(fill);
-      foot.appendChild(bar);
-
-      card.append(head, body, foot);
-      grid.appendChild(card);
+      if (meta) meta.textContent = `${(datasets || []).length} dataset version${(datasets || []).length === 1 ? "" : "s"}`;
+    } catch (err) {
+      setStatus("datasets-status", cleanMessage(err.message || err), "error");
+      list.innerHTML = "";
+      if (meta) meta.textContent = "Could not load datasets";
     }
   }
 
-  if ($("gallery-load-button")) $("gallery-load-button").addEventListener("click", async () => {
-    const btn = $("gallery-load-button");
-    const jobId = ($("gallery-job-id").value || "").trim();
-    const afterRaw = ($("gallery-after").value || "").trim();
-    if (!jobId) { setStatus("gallery-status", "Enter a job ID.", "error"); return; }
-    const params = new URLSearchParams();
-    if (afterRaw !== "") params.set("after_event_id", afterRaw);
-    const qs = params.toString();
-    const path = `/v1/jobs/${encodeURIComponent(jobId)}/preview${qs ? `?${qs}` : ""}`;
-    setBusy(btn, true);
-    setStatus("gallery-status", "Loading preview events…", "busy");
+  function renderDatasetCard(dataset) {
+    const card = node("article", "card dataset-card");
+    const head = node("div", "dataset-head");
+    const title = node("div");
+    title.append(
+      node("h2", "card-title", dataset.name || "Untitled dataset"),
+      node("p", "dataset-meta", `${dataset.image_count} image${dataset.image_count === 1 ? "" : "s"} · ${dataset.annotation_count} annotation${dataset.annotation_count === 1 ? "" : "s"} · ${formatDate(dataset.created_at)}`)
+    );
+    const actions = node("div", "actions");
+    const exportButton = node("button", "btn btn-secondary btn-small", "Export COCO");
+    exportButton.type = "button";
+    exportButton.disabled = !dataset.annotation_count;
+    exportButton.addEventListener("click", () => exportDataset(dataset, exportButton, card));
+    actions.appendChild(exportButton);
+    head.append(title, actions);
+    card.appendChild(head);
+
+    if ((dataset.categories || []).length) {
+      const categories = node("div", "category-row");
+      dataset.categories.forEach((category) => {
+        categories.appendChild(node("span", "category-chip", category.name));
+      });
+      card.appendChild(categories);
+    }
+    const status = node("div", "status");
+    status.dataset.datasetStatus = "true";
+    card.appendChild(status);
+    return card;
+  }
+
+  async function exportDataset(dataset, button, card) {
+    setBusy(button, true, "Exporting…");
+    const status = card.querySelector('[data-dataset-status="true"]');
+    if (status) {
+      status.textContent = "Queuing COCO export…";
+      status.dataset.kind = "busy";
+    }
     try {
-      const response = await fetch(path, { headers: { "X-Tenant-ID": tenantId() } });
-      const text = await response.text();
-      if (!response.ok) {
-        let body = null;
-        try { body = text ? JSON.parse(text) : null; } catch { body = null; }
-        const detail = body && body.detail ? body.detail : (text || `Request failed (${response.status})`);
-        throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+      let job = await request("/v1/dataset-exports", {
+        method: "POST",
+        headers: tenantHeaders(true),
+        body: JSON.stringify({
+          version_id: dataset.version_id,
+          format: "coco",
+          idempotency_key: `ui-coco-${dataset.version_id}-${Date.now()}`,
+        }),
+      });
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        if (job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") break;
+        await sleep(500);
+        job = await request(`/v1/dataset-exports/${encodeURIComponent(job.job_id)}`, {
+          headers: tenantHeaders(false),
+        });
       }
-      const events = parseSseEvents(text);
-      renderGallery(events);
-      if (!events.length) {
-        setStatus("gallery-status", "No preview events found for this job and tenant.", "ok");
+      if (job.status === "succeeded") {
+        if (status) {
+          status.textContent = "COCO export ready. Download starting…";
+          status.dataset.kind = "ok";
+        }
+        window.location.assign(`/v1/dataset-exports/${encodeURIComponent(job.job_id)}/download`);
       } else {
-        setStatus("gallery-status", `Loaded ${events.length} preview event${events.length === 1 ? "" : "s"}.`, "ok");
+        if (status) {
+          status.textContent = `Export ${job.status}${job.error ? `: ${cleanMessage(job.error)}` : ""}`;
+          status.dataset.kind = "error";
+        }
       }
     } catch (err) {
-      renderGallery([]);
-      setStatus("gallery-status", err.message || String(err), "error");
+      if (status) {
+        status.textContent = cleanMessage(err.message || err);
+        status.dataset.kind = "error";
+      }
     } finally {
-      setBusy(btn, false);
+      setBusy(button, false);
     }
-  });
+  }
 
-  if ($("gallery-use-export-job-button")) $("gallery-use-export-job-button").addEventListener("click", () => {
-    const exportJobId = ($("job-id") && $("job-id").value.trim()) || "";
-    if (!exportJobId) { setStatus("gallery-status", "No export job ID to copy.", "error"); return; }
-    $("gallery-job-id").value = exportJobId;
-    setStatus("gallery-status", "Copied export job ID. Export jobs may not emit preview events.", "ok");
-  });
+  if ($("datasets-refresh")) $("datasets-refresh").addEventListener("click", loadDatasets);
 
-  if ($("gallery-clear-button")) $("gallery-clear-button").addEventListener("click", () => {
-    if ($("gallery-grid")) $("gallery-grid").innerHTML = "";
-    if ($("gallery-summary")) { $("gallery-summary").hidden = true; $("gallery-summary").innerHTML = ""; }
-    setStatus("gallery-status", "Gallery cleared.", "ok");
-  });
+  // Jobs
+  function jobKindLabel(kind) {
+    return {
+      "batch-label": "Labeling",
+      "index-asset": "Search indexing",
+      "dataset-export": "Dataset export",
+    }[kind] || "Background job";
+  }
 
-  // Tenant change: reload assets when relevant
-  if ($("tenant-id")) $("tenant-id").addEventListener("change", () => {
-    loadAssets({ quiet: true });
-  });
+  async function loadJobs() {
+    const list = $("jobs-list");
+    const meta = $("jobs-meta");
+    if (!list) return;
+    if (meta) meta.textContent = "Loading jobs…";
+    setStatus("jobs-status", "");
+    try {
+      const data = await request("/v1/jobs", { headers: tenantHeaders(false) });
+      const jobs = (data && data.jobs) || [];
+      list.innerHTML = "";
+      if (!jobs.length) {
+        const empty = node("div", "empty-state");
+        empty.append(
+          node("strong", null, "No background jobs yet."),
+          node("p", null, "Uploading an asset queues a search-indexing job.")
+        );
+        list.appendChild(empty);
+      } else {
+        jobs.slice().reverse().forEach((job) => list.appendChild(renderJobCard(job)));
+      }
+      if (meta) meta.textContent = `${jobs.length} job${jobs.length === 1 ? "" : "s"}`;
+    } catch (err) {
+      setStatus("jobs-status", cleanMessage(err.message || err), "error");
+      list.innerHTML = "";
+      if (meta) meta.textContent = "Could not load jobs";
+    }
+  }
+
+  function renderJobCard(job) {
+    const card = node("article", "card job-card");
+    const head = node("div", "job-head");
+    const text = node("div");
+    text.append(
+      node("h2", "card-title", jobKindLabel(job.kind)),
+      node("p", "job-meta", `Started ${formatDate(job.created_at)} · ${job.attempts} attempt${job.attempts === 1 ? "" : "s"}`)
+    );
+    const pill = node("span", "status-pill", job.status);
+    pill.dataset.status = job.status;
+    head.append(text, pill);
+    card.appendChild(head);
+    if (job.error) card.appendChild(node("p", "job-error", cleanMessage(job.error)));
+    return card;
+  }
+
+  if ($("jobs-refresh")) $("jobs-refresh").addEventListener("click", loadJobs);
 
   // Init
   checkRuntime();
