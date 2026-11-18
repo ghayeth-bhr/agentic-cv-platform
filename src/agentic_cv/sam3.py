@@ -10,6 +10,8 @@ from typing import Any, Callable, Protocol
 import numpy as np
 from PIL import Image
 
+from .errors import ModelUnavailableError
+
 
 @dataclass(frozen=True, kw_only=True)
 class Sam3Config:
@@ -20,8 +22,8 @@ class Sam3Config:
     default_mask_threshold: float = 0.5
 
     def __post_init__(self) -> None:
-        if self.precision not in ("float16", "bfloat16"):
-            raise ValueError("precision must be float16 or bfloat16")
+        if self.precision not in ("float16", "bfloat16", "float32"):
+            raise ValueError("precision must be float16, bfloat16, or float32")
         for name in ("default_threshold", "default_mask_threshold"):
             value = getattr(self, name)
             if not 0 <= value <= 1:
@@ -68,18 +70,38 @@ class LocalSam3Provider:
             self._model, self._processor, self._torch = self._loader(self.config)
             return
 
-        import torch
-        from transformers import Sam3Model, Sam3Processor
+        try:
+            import torch
+            from transformers import Sam3Model, Sam3Processor
+        except ImportError as exc:
+            raise ModelUnavailableError(_install_hint()) from exc
 
         if self.config.device.startswith("cuda") and not torch.cuda.is_available():
-            raise RuntimeError("SAM3 requires CUDA for the configured local provider")
-        dtype = getattr(torch, self.config.precision)
-        self._processor = Sam3Processor.from_pretrained(self.config.checkpoint_id)
-        self._model = Sam3Model.from_pretrained(
-            self.config.checkpoint_id,
-            dtype=dtype,
-            low_cpu_mem_usage=True,
-        ).to(self.config.device)
+            raise ModelUnavailableError(
+                "SAM 3 is configured for CUDA but CUDA is not available. "
+                "Set AGENTIC_CV_DEVICE=cpu for CPU inference, or install CUDA-enabled "
+                "PyTorch. Run `agentic-cv doctor` for details."
+            )
+        try:
+            dtype = getattr(torch, self.config.precision)
+        except AttributeError as exc:
+            raise ModelUnavailableError(
+                f"PyTorch does not expose precision '{self.config.precision}'."
+            ) from exc
+        try:
+            self._processor = Sam3Processor.from_pretrained(self.config.checkpoint_id)
+            self._model = Sam3Model.from_pretrained(
+                self.config.checkpoint_id,
+                dtype=dtype,
+                low_cpu_mem_usage=True,
+            ).to(self.config.device)
+        except Exception as exc:
+            raise ModelUnavailableError(
+                f"Could not load SAM 3 model '{self.config.checkpoint_id}': {exc}. "
+                "The checkpoint is gated: request access at "
+                "https://huggingface.co/facebook/sam3, set HF_TOKEN, and verify network "
+                "connectivity. Run `agentic-cv doctor`."
+            ) from exc
         self._model.eval()
         self._torch = torch
 
@@ -128,6 +150,16 @@ class LocalSam3Provider:
         if self._torch is not None and self._torch.cuda.is_available():
             self._torch.cuda.empty_cache()
         self._torch = None
+
+
+def _install_hint() -> str:
+    return (
+        "SAM 3 is unavailable because PyTorch/Transformers/torchvision are not all "
+        "installed. Install the optional ML extra with `uv sync --extra ml` "
+        "(Windows CUDA: install torch/torchvision from "
+        "https://download.pytorch.org/whl/cu124), set AGENTIC_CV_DEVICE=cpu for CPU "
+        "inference, then restart the server. Run `agentic-cv doctor` for details."
+    )
 
 
 def load_image(path: Path) -> Image.Image:

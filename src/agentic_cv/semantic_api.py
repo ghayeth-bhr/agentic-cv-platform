@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from .asset_registry import AssetRegistryBackend
 from .auth import Authorizer
+from .errors import install_model_unavailable_handler
 from .semantic_indexing import AssetIndexResult, AssetSemanticIndexer
 from .semantic_search import SearchResult, SemanticSearchService
 from .sub_assets import SubAssetBackend
@@ -162,6 +163,7 @@ def _credential(authorization: str | None, api_key: str | None) -> str | None:
 
 def create_app(dependencies: SemanticApiDependencies) -> FastAPI:
     app = FastAPI(title="Agentic CV semantic search API", version="1")
+    install_model_unavailable_handler(app)
 
     @app.post("/v1/search", response_model=SearchResponse)
     def search(

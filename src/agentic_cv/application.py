@@ -25,9 +25,11 @@ from .broker import RabbitMqConfig, RabbitMqPublisher
 from .dataset_export import DatasetExportService
 from .dataset_export_workflow import DatasetExportWorkflow, DatasetExportWorkflowDependencies
 from .dataset_store import DatasetVersionBackend, DatasetVersionStore
-from .embeddings import HuggingFaceEmbeddingConfig, HuggingFaceEmbeddingProvider
+from .embeddings import HuggingFaceEmbeddingProvider
+from .errors import install_model_unavailable_handler
 from .job_store import JobStore, JobStoreBackend
 from .label_workflow import DurableLabelWorkflow, LabelWorkflowDependencies
+from .model_runtime import ModelRuntimeSettings
 from .object_storage import LocalObjectStorage, ObjectStorage, S3ObjectStorage
 from .orchestrator import TaskOrchestrator
 from .outbox import Outbox, OutboxBackend
@@ -36,7 +38,7 @@ from .postgres import PostgresConfig
 from .persistent_vectors import SqliteVectorIndex
 from .preview import PreviewBackend, PreviewStore
 from .preview_api import PreviewApiDependencies, create_app as create_preview_app
-from .sam3 import LocalSam3Provider, Sam3Config, Sam3Provider
+from .sam3 import LocalSam3Provider, Sam3Provider
 from .sam3_service import create_app as create_sam3_app
 from .semantic_api import SemanticApiDependencies, create_app as create_semantic_app
 from .semantic_indexing import AssetSemanticIndexer
@@ -118,6 +120,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
     config.data_dir.mkdir(parents=True, exist_ok=True)
     metadata_dir = config.data_dir / "metadata"
     metadata_dir.mkdir(exist_ok=True)
+    model_settings = ModelRuntimeSettings.from_environment()
     if config.postgres is not None:
         from .postgres_asset_registry import open_postgres_asset_registry
 
@@ -166,9 +169,9 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
         StaticApiKeyAuthorizer(config.api_keys) if config.api_keys else None
     )
     embedding_provider = config.embedding_provider or HuggingFaceEmbeddingProvider(
-        HuggingFaceEmbeddingConfig()
+        model_settings.embedding_config()
     )
-    sam3_provider = config.sam3_provider or LocalSam3Provider(Sam3Config())
+    sam3_provider = config.sam3_provider or LocalSam3Provider(model_settings.sam3_config())
     if config.postgres is not None:
         from .postgres_pgvector import open_postgres_vector_index
 
@@ -207,6 +210,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
             resources.close()
 
     app = FastAPI(title="Agentic CV Platform", version="1", lifespan=lifespan)
+    install_model_unavailable_handler(app)
     http_logger = logging.getLogger("agentic_cv.http")
 
     @app.middleware("http")
@@ -276,6 +280,11 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
             "docs": "/docs",
             "health": {"live": "/health/live", "ready": "/health/ready", "alias": "/health"},
             "observability": {"metrics": "/v1/metrics"},
+            "model_runtime": {
+                "device": model_settings.device,
+                "precision": model_settings.precision,
+                "doctor": "agentic-cv doctor",
+            },
             "api": {
                 "assets": "/v1/assets",
                 "search": "/v1/search",

@@ -8,6 +8,8 @@ from typing import Any, Callable
 import numpy as np
 from PIL import Image
 
+from .errors import ModelUnavailableError
+
 
 @dataclass(frozen=True, kw_only=True)
 class HuggingFaceEmbeddingConfig:
@@ -16,8 +18,8 @@ class HuggingFaceEmbeddingConfig:
     precision: str = "float16"
 
     def __post_init__(self) -> None:
-        if self.precision not in ("float16", "bfloat16"):
-            raise ValueError("precision must be float16 or bfloat16")
+        if self.precision not in ("float16", "bfloat16", "float32"):
+            raise ValueError("precision must be float16, bfloat16, or float32")
 
 
 class HuggingFaceEmbeddingProvider:
@@ -42,16 +44,35 @@ class HuggingFaceEmbeddingProvider:
             self._model, self._processor, self._torch = self._loader(self.config)
             return
 
-        import torch
-        from transformers import AutoModel, AutoProcessor
+        try:
+            import torch
+            from transformers import AutoModel, AutoProcessor
+        except ImportError as exc:
+            raise ModelUnavailableError(_install_hint()) from exc
 
         if self.config.device.startswith("cuda") and not torch.cuda.is_available():
-            raise RuntimeError("embedding provider requires CUDA for the configured device")
-        dtype = getattr(torch, self.config.precision)
-        self._processor = AutoProcessor.from_pretrained(self.config.checkpoint_id)
-        self._model = AutoModel.from_pretrained(
-            self.config.checkpoint_id, dtype=dtype, low_cpu_mem_usage=True
-        ).to(self.config.device)
+            raise ModelUnavailableError(
+                "The embedding provider is configured for CUDA but CUDA is not available. "
+                "Set AGENTIC_CV_DEVICE=cpu for CPU inference, or install CUDA-enabled PyTorch. "
+                "Run `agentic-cv doctor` for details."
+            )
+        try:
+            dtype = getattr(torch, self.config.precision)
+        except AttributeError as exc:
+            raise ModelUnavailableError(
+                f"PyTorch does not expose precision '{self.config.precision}'."
+            ) from exc
+        try:
+            self._processor = AutoProcessor.from_pretrained(self.config.checkpoint_id)
+            self._model = AutoModel.from_pretrained(
+                self.config.checkpoint_id, dtype=dtype, low_cpu_mem_usage=True
+            ).to(self.config.device)
+        except Exception as exc:
+            raise ModelUnavailableError(
+                f"Could not load embedding model '{self.config.checkpoint_id}': {exc}. "
+                "Check Hugging Face access/token and network connectivity, then run "
+                "`agentic-cv doctor`."
+            ) from exc
         self._model.eval()
         self._torch = torch
 
@@ -93,3 +114,13 @@ class HuggingFaceEmbeddingProvider:
         if self._torch is not None and self._torch.cuda.is_available():
             self._torch.cuda.empty_cache()
         self._torch = None
+
+
+def _install_hint() -> str:
+    return (
+        "Image/text embeddings are unavailable because PyTorch/Transformers are not "
+        "installed. Install the optional ML extra with `uv sync --extra ml` "
+        "(Windows CUDA: install torch/torchvision from "
+        "https://download.pytorch.org/whl/cu124), set AGENTIC_CV_DEVICE=cpu for CPU "
+        "inference, then restart the server. Run `agentic-cv doctor` for details."
+    )
