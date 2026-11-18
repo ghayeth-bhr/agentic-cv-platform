@@ -39,7 +39,7 @@ class BatchLabelResult:
     dataset: DatasetVersion
 
 
-def _mask_polygons(mask: np.ndarray) -> tuple[tuple[float, ...], ...]:
+def mask_polygons(mask: np.ndarray) -> tuple[tuple[float, ...], ...]:
     binary = (mask.astype(np.uint8) > 0).astype(np.uint8)
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     polygons = []
@@ -98,7 +98,7 @@ class Sam3BatchLabeler:
                     )
                 )
                 x1, y1, x2, y2 = prediction.box
-                segmentation = _mask_polygons(prediction.mask) if task == "segmentation" else ()
+                segmentation = mask_polygons(prediction.mask) if task == "segmentation" else ()
                 annotations.append(
                     Annotation(
                         annotation_id=f"{image.image_id}:{index}",

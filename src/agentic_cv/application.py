@@ -25,13 +25,19 @@ from .agent import (
 from .agent_api import AgentApiDependencies, create_app as create_agent_app
 from .agent_store import AgentSessionBackend, AgentSessionStore
 from .agent_worker import AgentWorker
-from .api import ApiDependencies, CalibrationApiDependencies, DatasetApiDependencies, ExportApiDependencies, LabelApiDependencies, create_app as create_core_app
+from .api import ApiDependencies, CalibrationApiDependencies, DatasetApiDependencies, ExportApiDependencies, LabelApiDependencies, RefinementApiDependencies, create_app as create_core_app
 from .observability import collect_metrics
 from .annotation_store import AnnotationRevisionBackend, AnnotationRevisionStore
 from .asset_registry import AssetRegistry, AssetRegistryBackend
 from .auth import Authorizer, OidcJwtAuthorizer, Principal, StaticApiKeyAuthorizer
 from .batch_labeling import Sam3BatchLabeler
 from .broker import RabbitMqConfig, RabbitMqPublisher
+from .click_refinement import (
+    ClickRefinementProvider,
+    ClickRefinementService,
+    RefinementTarget,
+    Sam3ClickRefinementProvider,
+)
 from .dataset_builder import DatasetBuilder
 from .dataset_export import DatasetExportService
 from .dataset_export_workflow import DatasetExportWorkflow, DatasetExportWorkflowDependencies
@@ -53,7 +59,7 @@ from .postgres import PostgresConfig
 from .persistent_vectors import SqliteVectorIndex
 from .preview import PreviewBackend, PreviewStore
 from .preview_api import PreviewApiDependencies, create_app as create_preview_app
-from .sam3 import LocalSam3Provider, Sam3Provider
+from .sam3 import LocalSam3Provider, Sam3Provider, load_image
 from .sam3_service import create_app as create_sam3_app
 from .semantic_api import SemanticApiDependencies, create_app as create_semantic_app
 from .semantic_indexing import AssetSemanticIndexer
@@ -71,6 +77,7 @@ class LocalAppConfig:
     event_publisher: EventPublisher | None = None
     embedding_provider: EmbeddingProvider | None = None
     sam3_provider: Sam3Provider | None = None
+    refinement_provider: ClickRefinementProvider | None = None
     postgres: PostgresConfig | None = None
     agent_planner: TaskPlanner | None = None
     calibration_timeout_sec: float = 120.0
@@ -241,6 +248,46 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
         images=label_images,
         images_root=config.data_dir / "dataset-images",
     )
+    dataset_images_root = config.data_dir / "dataset-images"
+    refinement_provider = config.refinement_provider or Sam3ClickRefinementProvider(
+        sam3_provider
+    )
+    refinement_service = ClickRefinementService(refinement_provider)
+
+    def load_refinement_target(
+        tenant_id, version_id, image_id
+    ) -> RefinementTarget:
+        record = versions.get(tenant_id=tenant_id, version_id=version_id)
+        image = next(
+            (item for item in record.dataset.images if item.image_id == image_id),
+            None,
+        )
+        if image is None:
+            raise KeyError("dataset image not found")
+        categories = {
+            category.category_id: category for category in record.dataset.categories
+        }
+        category = None
+        for annotation in record.dataset.annotations:
+            if annotation.image_id == image_id:
+                category = categories.get(annotation.category_id)
+                if category is not None:
+                    break
+        if category is None and record.dataset.categories:
+            category = record.dataset.categories[0]
+        if category is None:
+            raise ValueError("dataset has no category to refine")
+        root = (
+            dataset_images_root / str(tenant_id) / str(version_id)
+        ).resolve()
+        path = (root / image.file_name).resolve()
+        if root not in path.parents:
+            raise ValueError("dataset image path is outside its version")
+        return RefinementTarget(
+            image=load_image(path),
+            prompt=category.name,
+            category_id=category.category_id,
+        )
     export_worker = DatasetExportWorker(jobs=jobs, workflow=export_workflow)
     agent_service = AgentService(
         AgentServiceDependencies(
@@ -345,7 +392,14 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
             exports=ExportApiDependencies(workflow=export_workflow),
             labels=LabelApiDependencies(workflow=label_workflow),
             datasets=DatasetApiDependencies(
-                builder=dataset_builder, versions=versions
+                builder=dataset_builder,
+                versions=versions,
+                images_root=dataset_images_root,
+            ),
+            refinement=RefinementApiDependencies(
+                service=refinement_service,
+                annotations=annotations,
+                dataset_loader=load_refinement_target,
             ),
             calibration=CalibrationApiDependencies(provider=sam3_provider),
             orchestrator=TaskOrchestrator(),

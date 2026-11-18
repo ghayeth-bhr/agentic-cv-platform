@@ -121,6 +121,64 @@ class DatasetBuilder:
             annotation_count=len(annotations),
         )
 
+    def rebuild_from_version(
+        self,
+        *,
+        tenant_id: UUID,
+        version_id: UUID,
+        name: str = "",
+        idempotency_key: str,
+    ) -> DatasetBuildResult:
+        """Create a new immutable version from one version's latest revisions."""
+        if not idempotency_key.strip():
+            raise ValueError("idempotency_key must not be empty")
+        previous = self.versions.get(tenant_id=tenant_id, version_id=version_id)
+        category_ids = {category.category_id for category in previous.dataset.categories}
+        revisions = self.annotations.list_latest(
+            tenant_id=tenant_id,
+            image_ids=[image.image_id for image in previous.dataset.images],
+        )
+        annotations = tuple(
+            revision.annotation
+            for revision in revisions
+            if revision.annotation.category_id in category_ids
+        )
+        dataset = DatasetVersion(
+            images=previous.dataset.images,
+            categories=previous.dataset.categories,
+            annotations=annotations,
+        )
+        record = self.versions.create(
+            tenant_id=tenant_id,
+            name=name.strip() or f"{previous.name} — refined",
+            dataset=dataset,
+            idempotency_key=idempotency_key,
+        )
+        self._copy_version_images(
+            tenant_id=tenant_id,
+            source_version_id=version_id,
+            target_version_id=record.version_id,
+        )
+        return DatasetBuildResult(
+            record=record,
+            image_count=len(dataset.images),
+            annotation_count=len(annotations),
+        )
+
+    def _copy_version_images(
+        self,
+        *,
+        tenant_id: UUID,
+        source_version_id: UUID,
+        target_version_id: UUID,
+    ) -> None:
+        source = self.images_root / str(tenant_id) / str(source_version_id) / "images"
+        if not source.is_dir():
+            return
+        target = self.images_root / str(tenant_id) / str(target_version_id) / "images"
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, target, dirs_exist_ok=True)
+
     def _copy_images(
         self,
         *,

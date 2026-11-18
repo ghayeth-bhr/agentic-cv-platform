@@ -2,7 +2,7 @@
 
 A local-first platform for managing image/video assets, searching them semantically, and building detection/segmentation datasets with prompted SAM 3 labeling.
 
-This repository now contains a working local product path: **Assets** for upload/index/search/sub-assets and an **Agent** chat that plans a task, calibrates a threshold, labels the whole asset, builds a dataset version, and offers a downloadable COCO archive. P0 (`fix/runtime-foundation`) made the runtime honest and diagnosable. P1 (`feature/label-execution-engine`) added durable label execution, dataset builds, and COCO/YOLO archives. P2 (`feature/assets-experience`) replaced the UUID-driven workbench with one workspace. P3 (`feature/agent-chat`) connects the chat to the existing execution engine and adds durable sessions, a planner with a visible local fallback, calibration timeouts, cancellation, and browser download. Manual refinement is P4.
+This repository now contains a working local product path: **Assets** for upload/index/search/sub-assets, an **Agent** chat that plans a task, calibrates a threshold, labels the whole asset, builds a dataset version, and offers a downloadable COCO archive, and a **Review labels** flow that turns a positive/negative click into an annotation revision and a fresh dataset version. P0 (`fix/runtime-foundation`) made the runtime honest and diagnosable. P1 (`feature/label-execution-engine`) added durable label execution, dataset builds, and COCO/YOLO archives. P2 (`feature/assets-experience`) replaced the UUID-driven workbench with one workspace. P3 (`feature/agent-chat`) connects the chat to the existing execution engine and adds durable sessions, a planner with a visible local fallback, calibration timeouts, cancellation, and browser download. P4 (`feature/manual-refinement-ui`) wires the click refinement service to dataset images, annotation revisions, and a rebuilt/exportable dataset version.
 
 ## Current status
 
@@ -28,7 +28,8 @@ This repository now contains a working local product path: **Assets** for upload
 | Ollama task planner with a visible deterministic rules fallback | Added in P3 |
 | Agent chat covered by HTTP and Playwright end-to-end tests | Added in P3 |
 | Real 20-image SAM 3 run: 20/20 annotations, 1.96 GB peak VRAM, 54 s total | Measured in P3 |
-| **Manual refinement UI** | **Next (P4)** |
+| Review labels: click a dataset image, preview a mask, accept a revision, rebuild and export | Added in P4 |
+| Manual refinement covered by HTTP and Playwright end-to-end tests | Added in P4 |
 
 The original root README was a 950-line concatenation of 23 branch READMEs. Those are preserved verbatim in [`docs/branches/`](docs/branches/README.md).
 
@@ -103,7 +104,8 @@ The workbench has two primary sections, **Assets** and **Agent**, plus a small *
 4. **Save results as sub-asset**: materializes the matches as a real gallery asset with parent-asset query lineage shown in its detail panel.
 5. **Agent**: choose an asset, describe the task, inspect the extracted specification, and confirm. The agent calibrates a threshold on a sample, labels the whole asset in the background, builds a dataset version, packages a COCO archive, and exposes a download button. Sessions survive a page reload; failures and timeouts are shown in the chat.
 6. **Datasets**: list dataset versions built from label revisions and export a COCO archive.
-7. **Jobs**: inspect background search-index, labeling, and export jobs, including failures.
+7. **Review labels**: in a dataset card, open **Review labels**, click an image, place positive/negative points, accept the previewed mask, and the app writes a new annotation revision, rebuilds a fresh dataset version, and leaves it ready to export.
+8. **Jobs**: inspect background search-index, labeling, and export jobs, including failures.
 
 The Agent planner asks your local Ollama model (`qwen3-vl:4b` by default, configurable) for a strict JSON task specification. If Ollama is unavailable, it falls back to the deterministic local planner and says so in the chat instead of failing. The P1 label path remains available over HTTP: `POST /v1/label-jobs` → poll `GET /v1/label-jobs/{id}` → `POST /v1/datasets` → `POST /v1/dataset-exports` → `GET /v1/dataset-exports/{id}/download`.
 
@@ -121,7 +123,7 @@ The execution plan is tracked in the audit document supplied by the owner (P0–
 - **P1** `feature/label-execution-engine`: background runner, asset→image resolver, dataset builder, export download, job progress. Implemented in this branch; HTTP e2e and crash/cancel recovery are covered by tests.
 - **P2** `feature/assets-experience`: single-workspace default, multi-file/chunked uploads, auto-index jobs, asset detail page, in-asset search, sub-asset lineage. Implemented in this branch; covered by a Playwright upload → index → search → sub-asset journey.
 - **P3** `feature/agent-chat`: session persistence, LLM task-spec agent, calibrated pipeline, chat UI, dataset download. Implemented in this branch; covered by HTTP and browser end-to-end tests.
-- **P4** `feature/manual-refinement-ui`: point-click refinement wired to revisions.
+- **P4** `feature/manual-refinement-ui`: point-click refinement wired to revisions. Implemented in this branch; a Playwright journey proves mask preview, acceptance, dataset rebuild, and a corrected COCO export.
 - **P5** `feature/gpu-resource-manager`: model serialization, lazy load/unload, batching, measured performance.
 - **P6** `feature/ux-e2e-quality`: Playwright journeys, empty/loading/error states, contract tests.
 
@@ -137,6 +139,7 @@ FastAPI app (application.py)
 ├── agent_store.py         durable SQLite agent sessions + messages
 ├── agent_worker.py        advances labeling → dataset build → export
 ├── ollama_text.py         strict JSON task-spec client
+├── click_refinement.py    click-point sessions + SAM 3 mask selection
 ├── semantic_api.py        search, record images, asset indexing, sub-asset materialization
 ├── preview_api.py         replayable label preview events
 ├── sam3_service.py        standalone multipart /v1/predict
@@ -196,6 +199,11 @@ Heavy dependencies are lazy or injectable. Default `pytest` runs with fakes and 
 | POST | `/v1/label-jobs/{id}/cancel` | request cancellation of a queued/running label job |
 | POST/GET | `/v1/datasets` | build/list dataset versions from succeeded label jobs |
 | GET | `/v1/datasets/{id}` | read dataset-version summary |
+| GET | `/v1/datasets/{id}/images` | list dataset images and their annotations |
+| GET | `/v1/datasets/{id}/images/{image_id}/file` | fetch the image bytes for review |
+| POST | `/v1/datasets/{id}/rebuild` | rebuild a version from its latest annotation revisions |
+| WS | `/v1/refinement/{version_id}/{image_id}` | click-point mask preview (tenant query parameter) |
+| POST | `/v1/refinements/{session_id}/accept` | save the previewed mask as an annotation revision |
 | POST | `/v1/calibration/run` | threshold calibration on uploaded images |
 | POST/GET | `/v1/dataset-exports` | submit/read dataset-export jobs |
 | GET | `/v1/dataset-exports/{id}/download` | download the packaged COCO/YOLO zip |
@@ -207,14 +215,16 @@ Heavy dependencies are lazy or injectable. Default `pytest` runs with fakes and 
 .venv\Scripts\python -m pytest -q
 ```
 
-Current local result: **235 passed, 10 skipped, 1 warning** (Starlette/httpx deprecation). The 10 skips are the opt-in PostgreSQL tests. The P1 tests include an HTTP-only fake-SAM journey through upload, labeling, dataset creation, COCO/YOLO export, zip download, cancellation, and expired-lease recovery. The P3 tests add a chat → confirm → calibration → label → dataset → browser-download journey, plus calibration-timeout, cancellation, fixed-threshold fallback, planner fallback, Ollama thinking-field compatibility, and durable-session coverage.
+Current local result: **239 passed, 10 skipped, 1 warning** (Starlette/httpx deprecation). The 10 skips are the opt-in PostgreSQL tests. The P1 tests include an HTTP-only fake-SAM journey through upload, labeling, dataset creation, COCO/YOLO export, zip download, cancellation, and expired-lease recovery. The P3 tests add a chat → confirm → calibration → label → dataset → browser-download journey, plus calibration-timeout, cancellation, fixed-threshold fallback, planner fallback, Ollama thinking-field compatibility, and durable-session coverage. The P4 tests add an HTTP refinement → revision → rebuild → corrected COCO export check and a browser click → mask preview → accept → rebuilt export journey.
 
 The browser tests drive a real uvicorn server with fake providers. They skip if the Playwright browser binary is not installed:
 
 ```powershell
 .venv\Scripts\python -m playwright install chromium
-.venv\Scripts\python -m pytest tests/test_assets_ui_playwright.py tests/test_agent_ui_playwright.py -q
+.venv\Scripts\python -m pytest tests/test_assets_ui_playwright.py tests/test_agent_ui_playwright.py tests/test_manual_refinement_ui_playwright.py -q
 ```
+
+The P4 browser journey runs the Agent, opens **Review labels**, checks that the mask overlay draws, accepts the correction, rebuilds the dataset, downloads the corrected COCO archive, verifies the new bounding box with `pycocotools`, and asserts that no UUID appears in visible text.
 
 The P3 real-model manual run was executed on the owner's RTX 4050 Laptop (6 GB VRAM) with CUDA `torch 2.6.0+cu124` and cached `facebook/sam3`. It uploaded 20 generated images through the real HTTP API, calibrated at threshold 0.30 with 5/5 sample agreement, labeled all 20 images, and downloaded a COCO archive with 20 images and 20 annotations. Calibration plus the first model load took 38.49 s, the label job took 13.75 s, total wall time was 53.97 s, and peak allocated VRAM was 1.96 GB. The real Ollama planner (`qwen3-vl:4b`) returned a valid `TaskSpec` in 9.37 s. These are local measurements, not production benchmarks.
 
@@ -256,16 +266,19 @@ Model access: `facebook/sam3` is gated. Request access on Hugging Face and set `
 7. Open **Agent**, choose the asset, and enter `Create a segmentation dataset of workers wearing yellow vests.`
 8. Inspect the extracted task/prompt/sample specification, then click **Confirm and calibrate**.
 9. Watch calibration, whole-asset labeling, dataset build, and packaging progress; download the COCO archive from the run panel.
-10. Open **Jobs** to inspect the label/export jobs, or **Datasets** to list the new version and export it again.
-11. Reload the page and reopen **Agent** to confirm the finished run is restored from the local session.
+10. Open **Datasets**, click **Review labels** on the new version, select an image, click a positive point (and a negative point if needed), and accept the previewed mask.
+11. The app writes a revision, rebuilds a refined dataset version, and reports that it is ready; export the refined COCO archive and verify the corrected annotation.
+12. Open **Jobs** to inspect the label/export jobs.
+13. Reload the page and reopen **Agent** to confirm the finished run is restored from the local session.
 
-The release demo in the owner's section 7 also calls for manual refinement of one bad image and a YOLO download from the chat; refinement is P4, and the Agent currently downloads COCO (YOLO remains available through the dataset-export API).
+The release demo in the owner's section 7 also calls for a YOLO download from the chat; the Agent currently downloads COCO, while YOLO remains available through the dataset-export API and the dataset export service.
 
 ## Limitations / safety
 
-- The browser now covers upload, indexing, search, sub-assets, Agent labeling, dataset listing, and downloads. Manual correction of an individual bad mask is still P4.
+- The browser covers upload, indexing, search, sub-assets, Agent labeling, dataset listing, downloads, and per-image review. Manual correction is a click-guided selection of SAM 3 text-prompt masks for the dataset category, not a point-conditioned segmentation model; a click that no candidate mask contains cannot create a new object out of nothing.
+- Accepting a correction updates one existing annotation (or adds one when the image has none) and rebuilds a new immutable dataset version. It does not edit the old version in place.
 - The Agent's default calibration validator is “SAM 3 returned at least one prediction.” The existing VLM validator adapter is injectable but is not wired into the default Agent path yet.
-- The Agent chat downloads COCO. YOLO exports exist behind `/v1/dataset-exports`; the chat does not yet offer a format switch.
+- The Agent chat downloads COCO. YOLO exports exist behind `/v1/dataset-exports`; the chat does not yet offer a format switch, and the review flow exports COCO from the Datasets list.
 - `agentic-cv serve` executes label, index, export, and agent-advance jobs. The separate `agentic-cv worker` command still runs only the export worker.
 - Label jobs cancelled mid-run can leave partial annotation revisions; dataset creation requires a succeeded job, so partial runs are not packaged.
 - The Agent and Assets browser tests use fake SAM 3/embedding providers and a deterministic planner. The separate P3 manual run exercised real SAM 3 and the real Ollama planner; it does not establish quality on your production photos or a full 6 GB laptop UI session.
@@ -276,7 +289,8 @@ The release demo in the owner's section 7 also calls for manual refinement of on
 
 ## Branch documentation
 
-- Current P3 branch: [`docs/branches/agent-chat.md`](docs/branches/agent-chat.md)
+- Current P4 branch: [`docs/branches/manual-refinement-ui.md`](docs/branches/manual-refinement-ui.md)
+- P3 branch record: [`docs/branches/agent-chat.md`](docs/branches/agent-chat.md)
 - P2 branch record: [`docs/branches/assets-experience.md`](docs/branches/assets-experience.md)
 - P1 branch record: [`docs/branches/label-execution-engine.md`](docs/branches/label-execution-engine.md)
 - P0 branch record: [`docs/branches/fix-runtime-foundation.md`](docs/branches/fix-runtime-foundation.md)
