@@ -46,7 +46,7 @@ uv pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 `
   --index-url https://download.pytorch.org/whl/cu124
 ```
 
-Keep `torch` and `torchvision` versions matched. On a CUDA-enabled machine the default device is `cuda`; on CPU-only machines set `AGENTIC_CV_DEVICE=cpu` (precision is forced to `float32`).
+Keep `torch` and `torchvision` versions matched. The default device is `cuda` when torch reports a usable CUDA device and `cpu` otherwise (precision is forced to `float32` on CPU). Set `AGENTIC_CV_DEVICE` to override the automatic choice.
 
 ### Check the environment
 
@@ -184,7 +184,7 @@ Default runtime uses SQLite; `AGENTIC_CV_POSTGRES_DSN` enables PostgreSQL stores
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AGENTIC_CV_DEVICE` | `cuda` | `cpu`, `cuda`, or `cuda:<index>` |
+| `AGENTIC_CV_DEVICE` | `auto` (`cuda` when available, else `cpu`) | `cpu`, `cuda`, or `cuda:<index>` |
 | `AGENTIC_CV_PRECISION` | `float16` (`float32` on CPU) | `float16`, `bfloat16`, `float32` |
 | `AGENTIC_CV_POSTGRES_DSN` | unset | opt-in PostgreSQL + pgvector |
 | `AGENTIC_CV_OIDC_ISSUER/AUDIENCE/JWKS_URL` | unset | opt-in OIDC/JWT auth |
