@@ -100,7 +100,7 @@ def test_agent_service_reads_vectors_from_the_index_before_sampling():
     }
 
     class Images:
-        def resolve(self, *, tenant_id, asset_id):
+        def resolve_many(self, *, tenant_id, asset_ids):
             return images
 
     class Vectors:
@@ -112,7 +112,7 @@ def test_agent_service_reads_vectors_from_the_index_before_sampling():
 
     selected = service._sample_images(
         tenant_id=UUID("00000000-0000-0000-0000-000000000001"),
-        asset_id=UUID("00000000-0000-0000-0000-000000000002"),
+        asset_ids=("00000000-0000-0000-0000-000000000002",),
         sample_size=3,
     )
 

@@ -36,7 +36,7 @@ from .dataset_store import DatasetVersionBackend, DatasetVersionRecord
 from .errors import ModelUnavailableError, install_model_unavailable_handler
 from .job_store import JobRecord, JobStoreBackend
 from .label_images import LabelImageResolver
-from .label_workflow import DurableLabelWorkflow
+from .label_workflow import DurableLabelWorkflow, label_plan
 from .orchestrator import TaskOrchestrationRequest, TaskOrchestrator
 from .outbox import Outbox
 from .overlay import class_color, render_annotation_overlay
@@ -1200,12 +1200,13 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                     raise HTTPException(status_code=404, detail=str(exc)) from exc
                 if job.tenant_id != tenant_id or job.kind != "batch-label":
                     raise HTTPException(status_code=404, detail="unknown label job")
-                asset_id = job.payload.get("asset_id")
-                if not asset_id:
-                    raise HTTPException(status_code=404, detail="label job has no source asset")
                 try:
-                    images = dependencies.label_images.resolve(
-                        tenant_id=tenant_id, asset_id=str(asset_id)
+                    plan = label_plan(job.payload)
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise HTTPException(status_code=404, detail="label job has no source asset") from exc
+                try:
+                    images = dependencies.label_images.resolve_many(
+                        tenant_id=tenant_id, asset_ids=plan.asset_ids
                     )
                 except (KeyError, ValueError) as exc:
                     raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1215,17 +1216,18 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                 revisions = dependencies.annotations.list_latest(
                     tenant_id=tenant_id, image_ids=[image_id]
                 )
-                category_id = int(job.payload.get("category_id", 1))
-                category_name = str(job.payload.get("category_name") or "object")
+                class_names = {
+                    category.category_id: category.name for category in plan.categories
+                }
                 revisions = live_in_set(
-                    revisions, job_set_id(job_id), category_ids={category_id}
+                    revisions, job_set_id(job_id), category_ids=set(class_names)
                 )
                 try:
                     with Image.open(match.path) as source:
                         overlay = render_annotation_overlay(
                             source.convert("RGB"),
                             [revision.annotation for revision in revisions],
-                            class_names={category_id: category_name},
+                            class_names=class_names,
                         )
                 except OSError as exc:
                     raise HTTPException(status_code=404, detail="preview image unavailable") from exc

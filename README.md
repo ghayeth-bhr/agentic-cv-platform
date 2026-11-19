@@ -40,6 +40,7 @@ This repository now contains a working local product path: **Assets** for upload
 | Doctor warning for CPU-only torch on an NVIDIA machine + Windows cu124 lock config | Added in P7 |
 | Real 20-image VLM journey: 5/5 verdicts, 5.82 GB whole-GPU peak, 383 s calibration/label/export | Measured in P7 |
 | Run-scoped annotation sets, tombstone deletes, persisted source-aware splits, 0-based YOLO with split folders, integer-id COCO, time-based shared video frames, SQLite WAL | Fixed in Phase 0 ([`docs/branches/data-correctness.md`](docs/branches/data-correctness.md)) |
+| Conversational agent: asks for missing details, several assets and classes per run, SAM 3 prompt agent, COCO/YOLO chosen in chat | Added in Phase 1 ([`docs/branches/agent-dialogue.md`](docs/branches/agent-dialogue.md)) |
 
 The original root README was a 950-line concatenation of 23 branch READMEs. Those are preserved verbatim in [`docs/branches/`](docs/branches/README.md).
 
@@ -206,7 +207,8 @@ Heavy dependencies are lazy or injectable. Default `pytest` runs with fakes and 
 | POST | `/v1/sub-assets/from-search` | create a sub-asset (and gallery asset) |
 | GET | `/v1/sub-assets` | list sub-assets with parent names and lineage |
 | GET | `/v1/jobs` | list background jobs for the tenant |
-| POST/GET | `/v1/agent/sessions` | plan an agent task / list sessions |
+| POST/GET | `/v1/agent/sessions` | start an agent conversation (one or more `asset_ids`) / list sessions |
+| POST | `/v1/agent/sessions/{id}/messages` | answer the agent or change the plan before confirming |
 | GET | `/v1/agent/sessions/{id}` | read a durable agent session |
 | POST | `/v1/agent/sessions/{id}/confirm` | calibrate (or use a fixed threshold) and start whole-asset labeling |
 | POST | `/v1/agent/sessions/{id}/cancel` | cancel the active calibration/labeling/export run |
@@ -277,6 +279,7 @@ Default runtime uses SQLite; `AGENTIC_CV_POSTGRES_DSN` enables PostgreSQL stores
 | `AGENTIC_CV_VIDEO_SAMPLE_FPS` | `1.0` | video frames sampled per second (search and labeling share them) |
 | `AGENTIC_CV_VIDEO_MAX_FRAMES` | `1000` | per-video frame cap; `0` = unlimited (a warning is logged when reached) |
 | `AGENTIC_CV_AGENT_PLANNER` | `ollama` | set `rules` to skip the text model entirely |
+| `AGENTIC_CV_AGENT_PROMPTS` | `ollama` | set `rules` to keep the LLM planner but skip SAM 3 prompt rewriting |
 | `AGENTIC_CV_TEXT_MODEL` | `qwen3-vl:4b` | Ollama model used for task-spec JSON |
 | `AGENTIC_CV_OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint |
 | `AGENTIC_CV_OLLAMA_TIMEOUT_SEC` | `30` | task-spec request timeout |

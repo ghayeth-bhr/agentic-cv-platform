@@ -12,10 +12,11 @@ from PIL import Image
 from .annotation_sets import job_set_id, live_in_set
 from .annotation_store import AnnotationRevisionBackend
 from .batch_labeling import LabelImage
-from .dataset import DatasetCategory, DatasetImage, DatasetVersion
+from .dataset import DatasetImage, DatasetVersion
 from .dataset_store import DatasetVersionBackend, DatasetVersionRecord
 from .job_store import JobStoreBackend
 from .label_images import LabelImageResolver
+from .label_workflow import label_plan
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -68,14 +69,9 @@ class DatasetBuilder:
                 f"label job must be succeeded before building a dataset; current status is {job.status}"
             )
 
-        payload = job.payload
-        asset_id = str(payload["asset_id"])
-        category_id = int(payload["category_id"])
-        category = DatasetCategory(
-            category_id=category_id,
-            name=str(payload["category_name"]),
-        )
-        label_images = self.images.resolve(tenant_id=tenant_id, asset_id=asset_id)
+        plan = label_plan(job.payload)
+        categories = plan.categories
+        label_images = self.images.resolve_many(tenant_id=tenant_id, asset_ids=plan.asset_ids)
         set_id = job_set_id(job_id)
         revisions = self.annotations.list_latest(
             tenant_id=tenant_id,
@@ -83,7 +79,11 @@ class DatasetBuilder:
         )
         annotations = tuple(
             revision.annotation
-            for revision in live_in_set(revisions, set_id, category_ids={category_id})
+            for revision in live_in_set(
+                revisions,
+                set_id,
+                category_ids={category.category_id for category in categories},
+            )
         )
 
         dataset_images: list[DatasetImage] = []
@@ -102,10 +102,10 @@ class DatasetBuilder:
 
         dataset = DatasetVersion(
             images=tuple(dataset_images),
-            categories=(category,),
+            categories=categories,
             annotations=annotations,
             annotation_set=set_id,
-            source_asset_ids=(asset_id,),
+            source_asset_ids=plan.asset_ids,
         ).with_splits()
         record = self.versions.create(
             tenant_id=tenant_id,

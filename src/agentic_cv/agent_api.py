@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from .agent import AgentConflict, AgentService, AgentSessionView, CalibrationTimeoutError
+from .agent_dialogue import missing_slots
 from .api import _authorize, _credential, _tenant
 from .auth import Authorizer
 from .contracts import TaskSpec
@@ -18,13 +19,27 @@ from .errors import ModelUnavailableError
 
 
 class AgentSessionCreateRequest(BaseModel):
-    asset_id: UUID
+    # One or more assets; ``asset_id`` is the v1 single-asset field.
+    asset_id: UUID | None = None
+    asset_ids: list[UUID] = Field(default_factory=list, max_length=50)
     message: str = Field(min_length=1)
     task_type: Literal["detection", "segmentation"] | None = None
     target_objects: list[str] = Field(default_factory=list)
     visual_attributes: list[str] = Field(default_factory=list)
     sample_size: int | None = Field(default=None, ge=1, le=20)
     max_iterations: int | None = Field(default=None, ge=1, le=10)
+
+
+class AgentMessageRequest(BaseModel):
+    message: str = Field(min_length=1)
+    # When present, replaces the session's asset selection before this turn.
+    asset_ids: list[UUID] | None = Field(default=None, max_length=50)
+
+
+class AgentClassResponse(BaseModel):
+    name: str
+    attributes: list[str]
+    prompts: list[str]
 
 
 class AgentConfirmRequest(BaseModel):
@@ -58,10 +73,18 @@ class AgentSessionResponse(BaseModel):
     session_id: UUID
     tenant_id: UUID
     asset_id: UUID
+    asset_ids: list[str]
     asset_name: str
     message: str
     status: str
     spec: AgentTaskSpecResponse | None
+    task_type: str | None
+    classes: list[AgentClassResponse]
+    export_format: str | None
+    missing_slots: list[str]
+    pending_slot: str | None
+    quick_replies: list[str]
+    assumptions: list[str]
     planner_mode: str
     planner_note: str | None
     prompt: str | None
@@ -92,12 +115,32 @@ class AgentApiDependencies:
 
 def _session_response(view: AgentSessionView) -> AgentSessionResponse:
     record = view.record
-    spec = TaskSpec.from_dict(record.spec) if record.spec is not None else None
+    spec = (
+        TaskSpec.from_dict(record.spec)
+        if record.spec is not None and "target_objects" in record.spec
+        else None
+    )
+    draft = view.draft
     return AgentSessionResponse(
         session_id=record.session_id,
         tenant_id=record.tenant_id,
         asset_id=record.asset_id,
+        asset_ids=list(draft.asset_ids),
         asset_name=record.asset_name,
+        task_type=draft.task_type,
+        classes=[
+            AgentClassResponse(
+                name=item.name,
+                attributes=list(item.attributes),
+                prompts=list(item.prompts),
+            )
+            for item in draft.classes
+        ],
+        export_format=draft.export_format,
+        missing_slots=list(missing_slots(draft)),
+        pending_slot=draft.pending_slot,
+        quick_replies=list(view.quick_replies),
+        assumptions=list(draft.assumptions),
         message=record.message,
         status=record.status,
         spec=(
@@ -175,12 +218,46 @@ def create_app(dependencies: AgentApiDependencies) -> FastAPI:
             view = dependencies.service.create_session(
                 tenant_id=tenant_id,
                 asset_id=request.asset_id,
+                asset_ids=tuple(request.asset_ids),
                 message=request.message,
                 task_type=request.task_type,
                 target_objects=tuple(request.target_objects),
                 visual_attributes=tuple(request.visual_attributes),
                 sample_size=request.sample_size,
                 max_iterations=request.max_iterations,
+            )
+        except Exception as exc:
+            _raise_http(exc)
+            raise
+        return _session_response(view)
+
+    @router.post(
+        "/v1/agent/sessions/{session_id}/messages", response_model=AgentSessionResponse
+    )
+    def post_message(
+        session_id: UUID,
+        request: AgentMessageRequest,
+        x_tenant_id: str = Header(...),
+        x_api_key: str | None = Header(None),
+        authorization: str | None = Header(None),
+    ) -> AgentSessionResponse:
+        """Continue the conversation: answer the agent's question or change the plan."""
+
+        tenant_id = _tenant(x_tenant_id)
+        _authorize(
+            dependencies.authorizer,
+            credential=_credential(authorization, x_api_key),
+            tenant_id=tenant_id,
+            role="labels:write",
+        )
+        try:
+            view = dependencies.service.add_message(
+                tenant_id=tenant_id,
+                session_id=session_id,
+                message=request.message,
+                asset_ids=(
+                    tuple(request.asset_ids) if request.asset_ids is not None else None
+                ),
             )
         except Exception as exc:
             _raise_http(exc)

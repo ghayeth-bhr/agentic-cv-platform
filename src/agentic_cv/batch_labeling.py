@@ -86,6 +86,15 @@ def mask_polygons(
     return tuple(polygon for _, polygon in polygons)
 
 
+@dataclass(frozen=True, kw_only=True)
+class LabelClass:
+    """One class of a labeling run: its SAM 3 prompt, threshold, and category."""
+
+    prompt: str
+    threshold: float
+    category: DatasetCategory
+
+
 class Sam3BatchLabeler:
     def __init__(self, provider: Sam3Provider) -> None:
         self.provider = provider
@@ -94,75 +103,104 @@ class Sam3BatchLabeler:
         self,
         images: list[LabelImage],
         *,
-        prompt: str,
-        threshold: float,
-        category: DatasetCategory,
+        prompt: str | None = None,
+        threshold: float | None = None,
+        category: DatasetCategory | None = None,
         task: BatchTask,
+        classes: list[LabelClass] | None = None,
         on_progress: ProgressCallback | None = None,
         on_image: ImageCallback | None = None,
         annotation_namespace: str | None = None,
+        keep_raw: bool = True,
     ) -> BatchLabelResult:
+        """Label every image for every class.
+
+        A single-class run keeps the historical annotation ids
+        (``<image_id>:<n>``); multi-class runs use ``<image_id>:<category_id>:<n>``.
+        ``keep_raw=False`` drops the per-prediction masks the durable workflow
+        never reads, so memory stays flat on long runs.
+        """
+
+        if classes is None:
+            if prompt is None or threshold is None or category is None:
+                raise ValueError("prompt, threshold, and category are required without classes")
+            classes = [LabelClass(prompt=prompt, threshold=threshold, category=category)]
         if not images:
             raise ValueError("at least one image is required")
-        if not prompt.strip():
-            raise ValueError("prompt must not be empty")
-        if not 0 <= threshold <= 1:
-            raise ValueError("threshold must be between 0 and 1")
+        if not classes:
+            raise ValueError("at least one class is required")
+        for item in classes:
+            if not item.prompt.strip():
+                raise ValueError("prompt must not be empty")
+            if not 0 <= item.threshold <= 1:
+                raise ValueError("threshold must be between 0 and 1")
+        if len({item.category.category_id for item in classes}) != len(classes):
+            raise ValueError("class category ids must be unique")
         if task not in ("detection", "segmentation"):
             raise ValueError("task must be detection or segmentation")
+        multi = len(classes) > 1
 
         dataset_images: list[DatasetImage] = []
         annotations: list[Annotation] = []
         raw_predictions: list[RawPrediction] = []
         for image in images:
+            image_annotations: list[Annotation] = []
             with Image.open(image.path) as source:
                 source = source.convert("RGB")
+                width, height = source.width, source.height
                 dataset_images.append(
                     DatasetImage(
                         image_id=image.image_id,
                         file_name=image.file_name or image.path.name,
-                        width=source.width,
-                        height=source.height,
+                        width=width,
+                        height=height,
                     )
                 )
-                predictions = self.provider.predict(source, prompt, threshold=threshold)
-                width, height = source.width, source.height
-            image_annotations: list[Annotation] = []
-            for index, prediction in enumerate(predictions):
-                raw_predictions.append(
-                    RawPrediction(
-                        image_id=image.image_id, score=prediction.score,
-                        box=prediction.box, mask=prediction.mask,
+                per_class = [
+                    (item, self.provider.predict(source, item.prompt, threshold=item.threshold))
+                    for item in classes
+                ]
+            for item, predictions in per_class:
+                for index, prediction in enumerate(predictions):
+                    if keep_raw:
+                        raw_predictions.append(
+                            RawPrediction(
+                                image_id=image.image_id, score=prediction.score,
+                                box=prediction.box, mask=prediction.mask,
+                            )
+                        )
+                    clipped = clip_box(prediction.box, width=width, height=height)
+                    if clipped is None:
+                        continue
+                    x1, y1, x2, y2 = clipped
+                    segmentation = mask_polygons(prediction.mask) if task == "segmentation" else ()
+                    local_id = (
+                        f"{image.image_id}:{item.category.category_id}:{index}"
+                        if multi
+                        else f"{image.image_id}:{index}"
                     )
-                )
-                clipped = clip_box(
-                    prediction.box, width=width, height=height
-                )
-                if clipped is None:
-                    continue
-                x1, y1, x2, y2 = clipped
-                segmentation = mask_polygons(prediction.mask) if task == "segmentation" else ()
-                local_id = f"{image.image_id}:{index}"
-                annotation = Annotation(
-                    annotation_id=(
-                        f"{annotation_namespace}/{local_id}"
-                        if annotation_namespace
-                        else local_id
-                    ),
-                    image_id=image.image_id,
-                    category_id=category.category_id,
-                    bbox=(x1, y1, x2 - x1, y2 - y1),
-                    segmentation=segmentation,
-                    score=prediction.score,
-                )
-                annotations.append(annotation)
-                image_annotations.append(annotation)
+                    annotation = Annotation(
+                        annotation_id=(
+                            f"{annotation_namespace}/{local_id}"
+                            if annotation_namespace
+                            else local_id
+                        ),
+                        image_id=image.image_id,
+                        category_id=item.category.category_id,
+                        bbox=(x1, y1, x2 - x1, y2 - y1),
+                        segmentation=segmentation,
+                        score=prediction.score,
+                    )
+                    annotations.append(annotation)
+                    image_annotations.append(annotation)
             if on_image is not None:
                 on_image(image.image_id, dataset_images[-1], tuple(image_annotations))
             if on_progress is not None:
                 on_progress(image.image_id, len(dataset_images), len(images))
 
         dataset = DatasetVersion(
-            images=tuple(dataset_images), categories=(category,), annotations=tuple(annotations)
+            images=tuple(dataset_images),
+            categories=tuple(item.category for item in classes),
+            annotations=tuple(annotations),
         )
         return BatchLabelResult(raw_predictions=tuple(raw_predictions), dataset=dataset)
