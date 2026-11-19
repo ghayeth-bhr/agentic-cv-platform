@@ -865,7 +865,11 @@
   // Agent
   const AGENT_SESSION_KEY = "agentic-cv-agent-session";
   const AGENT_ACTIVE = new Set(["calibrating", "labeling", "exporting"]);
+  const AGENT_OPEN = new Set(["gathering", "awaiting_confirmation", "needs_attention"]);
+  const AGENT_DONE = new Set(["complete", "failed", "cancelled"]);
+  const agentSelection = new Set();
   const AGENT_STATUS_LABEL = {
+    gathering: "Needs details",
     awaiting_confirmation: "Awaiting confirmation",
     calibrating: "Calibrating",
     needs_attention: "Needs attention",
@@ -887,48 +891,88 @@
     return status;
   }
 
-  function renderAgentAssets(session) {
-    const select = $("agent-asset");
-    if (!select) return;
-    const previous = select.value
-      || (session && session.asset_id)
-      || (state.selectedAsset && state.selectedAsset.asset_id)
-      || "";
-    select.innerHTML = "";
-    if (state.assetsLoading && !state.assets.length) {
-      const option = document.createElement("option");
-      option.value = "";
-      option.textContent = "Loading assets…";
-      select.appendChild(option);
-      select.disabled = true;
-    } else if (state.assetsError) {
-      const option = document.createElement("option");
-      option.value = "";
-      option.textContent = "Assets unavailable";
-      select.appendChild(option);
-      select.disabled = true;
-    } else if (!state.assets.length) {
-      const option = document.createElement("option");
-      option.value = "";
-      option.textContent = "No assets yet — upload media first";
-      select.appendChild(option);
-      select.disabled = true;
-    } else {
-      state.assets.forEach((asset) => {
-        const option = document.createElement("option");
-        option.value = String(asset.asset_id);
-        const count = (asset.sources || []).length;
-        option.textContent = `${assetName(asset)} · ${count} source${count === 1 ? "" : "s"}`;
-        select.appendChild(option);
-      });
-      if (previous) {
-        const match = state.assets.find((asset) => String(asset.asset_id) === String(previous));
-        if (match) select.value = String(match.asset_id);
-      }
-      select.disabled = !!session;
+  function agentComposeOpen(session) {
+    return !session || AGENT_OPEN.has(session.status) || AGENT_DONE.has(session.status);
+  }
+
+  function syncAgentSelection(session) {
+    const known = new Set(state.assets.map((asset) => String(asset.asset_id)));
+    if (session && AGENT_OPEN.has(session.status) && (session.asset_ids || []).length) {
+      agentSelection.clear();
+      session.asset_ids.forEach((id) => agentSelection.add(String(id)));
     }
-    if ($("agent-message")) $("agent-message").disabled = !!session;
-    if ($("agent-plan")) $("agent-plan").disabled = !!session || !state.assets.length;
+    [...agentSelection].forEach((id) => { if (known.size && !known.has(id)) agentSelection.delete(id); });
+    if (!agentSelection.size && state.assets.length) {
+      const preferred = state.selectedAsset && known.has(String(state.selectedAsset.asset_id))
+        ? String(state.selectedAsset.asset_id)
+        : String(state.assets[0].asset_id);
+      agentSelection.add(preferred);
+    }
+  }
+
+  function renderAgentAssets(session) {
+    const box = $("agent-assets");
+    if (!box) return;
+    box.innerHTML = "";
+    const locked = !!session && !agentComposeOpen(session);
+    let ready = false;
+    if (state.assetsLoading && !state.assets.length) {
+      box.appendChild(node("p", "agent-assets-state", "Loading assets…"));
+    } else if (state.assetsError) {
+      box.appendChild(node("p", "agent-assets-state", "Assets unavailable"));
+    } else if (!state.assets.length) {
+      box.appendChild(node("p", "agent-assets-state", "No assets yet — upload media first"));
+    } else {
+      ready = true;
+      syncAgentSelection(session);
+      state.assets.forEach((asset) => {
+        const id = String(asset.asset_id);
+        const option = node("label", "agent-asset-option");
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.value = id;
+        input.checked = agentSelection.has(id);
+        input.disabled = locked;
+        input.addEventListener("change", () => {
+          if (input.checked) agentSelection.add(id);
+          else agentSelection.delete(id);
+          updateAgentAssetCount();
+        });
+        const count = (asset.sources || []).length;
+        option.append(input, node("span", "agent-asset-name", assetName(asset)),
+          node("span", "agent-asset-meta", `${count} source${count === 1 ? "" : "s"}`));
+        box.appendChild(option);
+      });
+    }
+    box.setAttribute("aria-disabled", String(locked || !ready));
+    updateAgentAssetCount();
+    const open = agentComposeOpen(session);
+    if ($("agent-message")) $("agent-message").disabled = !open;
+    if ($("agent-plan")) {
+      $("agent-plan").disabled = !open || !ready;
+      $("agent-plan").textContent = session && AGENT_OPEN.has(session.status) ? "Send" : "Plan task";
+    }
+  }
+
+  function updateAgentAssetCount() {
+    const count = $("agent-assets-count");
+    if (!count) return;
+    const n = agentSelection.size;
+    count.textContent = n ? `${n} selected` : "none selected";
+  }
+
+  function renderAgentQuickReplies(session) {
+    const box = $("agent-quick-replies");
+    if (!box) return;
+    box.innerHTML = "";
+    const replies = (session && AGENT_OPEN.has(session.status) && session.quick_replies) || [];
+    box.hidden = !replies.length;
+    replies.forEach((reply) => {
+      const chip = node("button", "chip agent-quick-reply", reply);
+      chip.type = "button";
+      chip.addEventListener("click", () => sendAgentMessage(reply));
+      box.appendChild(chip);
+    });
   }
 
   function renderAgentMessages(session) {
@@ -937,7 +981,7 @@
     list.innerHTML = "";
     if (!session || !session.messages || !session.messages.length) {
       const empty = node("div", "agent-empty-chat");
-      empty.textContent = "Start with a task such as “Create a segmentation dataset of workers wearing yellow vests.”";
+      empty.textContent = "Describe the dataset you need, for example “Segment hard hats and safety vests, export YOLO.” I'll ask for anything that's missing.";
       list.appendChild(empty);
       return;
     }
@@ -960,21 +1004,39 @@
     const box = $("agent-spec");
     if (!box) return;
     box.innerHTML = "";
-    const spec = session && session.spec;
-    if (!spec) return;
+    if (!session) return;
+    const classes = session.classes || [];
     const grid = node("dl", "agent-spec-grid");
-    const prompt = session.prompt || (spec.target_objects || []).join(" and ");
+    const exportLabel = { coco: "COCO", yolo: "YOLO" }[session.export_format] || "—";
+    const sample = (session.spec && session.spec.sample_size) || 5;
     [
-      ["Task", spec.task_type],
-      ["Prompt", prompt],
-      ["Calibration", `${spec.sample_size} sample image${spec.sample_size === 1 ? "" : "s"} · ${spec.max_iterations} attempt${spec.max_iterations === 1 ? "" : "s"}`],
-      ["Asset", session.asset_name],
+      ["Task", session.task_type || "—"],
+      ["Assets", session.asset_name],
+      ["Export", exportLabel],
+      ["Calibration", `${sample} sample image${sample === 1 ? "" : "s"} per class`],
       ["Planner", session.planner_mode === "ollama" ? "Local model" : "Local rules"],
     ].forEach(([term, value]) => {
       const [dt, dd] = agentSpecRow(term, value);
       grid.append(dt, dd);
     });
     box.appendChild(grid);
+    const list = node("ul", "agent-class-list");
+    if (!classes.length) list.appendChild(node("li", "agent-class-empty", "No classes yet"));
+    classes.forEach((item) => {
+      const row = node("li", "agent-class");
+      row.appendChild(node("strong", null, item.name));
+      if ((item.attributes || []).length) row.appendChild(node("span", "agent-class-attrs", item.attributes.join(", ")));
+      const prompt = (item.prompts || [])[0];
+      if (prompt) row.appendChild(node("span", "agent-class-prompt", `SAM 3: “${prompt}”`));
+      list.appendChild(row);
+    });
+    box.appendChild(list);
+    const missing = session.missing_slots || [];
+    if (missing.length) {
+      const names = { assets: "assets", classes: "object classes", task_type: "detection or segmentation" };
+      box.appendChild(node("p", "agent-note", `Still needed: ${missing.map((slot) => names[slot] || slot).join(", ")}.`));
+    }
+    (session.assumptions || []).forEach((text) => box.appendChild(node("p", "agent-note", cleanMessage(text))));
     if (session.planner_note) {
       box.appendChild(node("p", "agent-note", cleanMessage(session.planner_note)));
     }
@@ -990,12 +1052,22 @@
     return row;
   }
 
+  function agentFormatLabel(session) {
+    if (session.export_format !== "yolo") return "COCO";
+    return session.task_type === "segmentation" ? "YOLO segmentation" : "YOLO detection";
+  }
+
   function renderAgentProgress(session) {
     const list = $("agent-progress");
     if (!list) return;
     list.innerHTML = "";
     const hasSpec = !!session.spec;
-    list.appendChild(agentStep("Task plan", hasSpec ? "Specification ready" : "Waiting for a task", hasSpec ? "done" : "pending"));
+    const gathering = session.status === "gathering";
+    list.appendChild(agentStep(
+      "Task plan",
+      hasSpec ? "Specification ready" : gathering ? "Waiting for your answer" : "Waiting for a task",
+      hasSpec ? "done" : gathering ? "active" : "pending",
+    ));
 
     let calibrationState = "pending";
     let calibrationDetail = "Runs after confirmation";
@@ -1044,7 +1116,7 @@
     let exportDetail = "Runs after the dataset is built";
     if (session.export_status === "succeeded") {
       exportState = "done";
-      exportDetail = "COCO archive ready to download";
+      exportDetail = `${agentFormatLabel(session)} archive ready to download`;
     } else if (session.export_status === "failed") {
       exportState = "error";
       exportDetail = "Export failed";
@@ -1053,7 +1125,7 @@
       exportDetail = "Export cancelled";
     } else if (session.export_status === "queued" || session.export_status === "running") {
       exportState = "active";
-      exportDetail = "Packaging the COCO archive";
+      exportDetail = `Packaging the ${agentFormatLabel(session)} archive`;
     }
     list.appendChild(agentStep("Download package", exportDetail, exportState));
   }
@@ -1122,6 +1194,21 @@
       box.appendChild(node("p", "agent-calibration-empty", `Running at the fixed threshold ${Number(calibration.threshold).toFixed(2)}.`));
       return;
     }
+    const perClass = calibration.classes || [];
+    if (perClass.length > 1) {
+      perClass.forEach((item) => {
+        const result = item.status === "calibrated" && item.threshold != null
+          ? `threshold ${Number(item.threshold).toFixed(2)}`
+          : "no threshold passed";
+        box.appendChild(node("h4", "agent-calibration-class", `${cleanMessage(item.name)} · “${cleanMessage(item.prompt)}” · ${result}`));
+        renderCalibrationAttempts(box, item, session);
+      });
+      return;
+    }
+    renderCalibrationAttempts(box, calibration, session);
+  }
+
+  function renderCalibrationAttempts(box, calibration, session) {
     const attempts = calibration.attempts || [];
     if (!attempts.length) {
       box.appendChild(node("p", "agent-calibration-empty", calibration.reason || "No threshold attempts were recorded."));
@@ -1394,12 +1481,14 @@
     if (content) content.hidden = false;
     renderAgentAssets(session);
     renderAgentMessages(session);
+    renderAgentQuickReplies(session);
     renderAgentSpec(session);
     renderAgentProgress(session);
     renderAgentCalibration(session);
     syncAgentLiveView(session);
 
-    if ($("agent-run-title")) $("agent-run-title").textContent = session.prompt || session.asset_name || "Task plan";
+    const classNames = (session.classes || []).map((item) => item.name).join(", ");
+    if ($("agent-run-title")) $("agent-run-title").textContent = classNames || session.asset_name || "Task plan";
     const pill = $("agent-run-pill");
     if (pill) {
       pill.textContent = agentStatusLabel(session.status);
@@ -1438,7 +1527,8 @@
 
     const label = agentStatusLabel(session.status);
     if (session.error) setStatus("agent-status", cleanMessage(session.error), "error");
-    else if (session.status === "complete") setStatus("agent-status", "Dataset ready. Download the COCO archive from the run panel.", "ok");
+    else if (session.status === "complete") setStatus("agent-status", `Dataset ready. Download the ${agentFormatLabel(session)} archive from the run panel.`, "ok");
+    else if (session.status === "gathering") setStatus("agent-status", "Answer the agent's question to continue.", "ok");
     else if (AGENT_ACTIVE.has(session.status)) setStatus("agent-status", `${label}…`, "busy");
     else if (session.status === "needs_attention") setStatus("agent-status", "Calibration needs attention. Retry at 0.50 or start a new task.", "error");
     else if (session.status === "awaiting_confirmation") setStatus("agent-status", "Task planned. Confirm the specification to start.", "ok");
@@ -1468,6 +1558,7 @@
       if (el) el.hidden = true;
     });
     renderAgentMessages(null);
+    renderAgentQuickReplies(null);
     renderAgentAssets(null);
     const input = $("agent-message");
     if (input) input.value = "";
@@ -1548,33 +1639,52 @@
     }
   }
 
-  async function planAgentTask() {
+  async function sendAgentMessage(text) {
     const button = $("agent-plan");
-    const assetId = $("agent-asset") ? $("agent-asset").value : "";
-    const message = (($("agent-message") && $("agent-message").value) || "").trim();
-    if (!assetId) {
-      setStatus("agent-status", "Upload and select an asset before planning a task.", "error");
+    const input = $("agent-message");
+    const message = (text != null ? text : (input && input.value) || "").trim();
+    const session = state.agentSession;
+    const assetIds = [...agentSelection];
+    if (!assetIds.length && !(session && AGENT_OPEN.has(session.status))) {
+      setStatus("agent-status", "Select at least one asset before planning a task.", "error");
       return;
     }
     if (!message) {
       setStatus("agent-status", "Describe what the agent should label.", "error");
       return;
     }
-    setBusy(button, true, "Planning…");
-    setStatus("agent-status", "Planning the task…", "busy");
+    const continuing = session && AGENT_OPEN.has(session.status);
+    setBusy(button, true, continuing ? "Sending…" : "Planning…");
+    setStatus("agent-status", continuing ? "Updating the plan…" : "Planning the task…", "busy");
     try {
-      const session = await request("/v1/agent/sessions", {
-        method: "POST",
-        headers: tenantHeaders(true),
-        body: JSON.stringify({ asset_id: assetId, message }),
-      });
-      applyAgentSession(session);
-      setStatus("agent-status", "Task planned. Confirm the specification to start.", "ok");
+      const fresh = continuing
+        ? await request(`/v1/agent/sessions/${encodeURIComponent(session.session_id)}/messages`, {
+          method: "POST",
+          headers: tenantHeaders(true),
+          body: JSON.stringify({ message, asset_ids: assetIds }),
+        })
+        : await request("/v1/agent/sessions", {
+          method: "POST",
+          headers: tenantHeaders(true),
+          body: JSON.stringify({ asset_ids: assetIds, message }),
+        });
+      if (!continuing) {
+        revokeAgentOverlays();
+        resetAgentLive();
+        state.agentCalibrationKey = "";
+      }
+      if (input) input.value = "";
+      applyAgentSession(fresh);
     } catch (err) {
       setStatus("agent-status", cleanMessage(err.message || err), "error");
     } finally {
       setBusy(button, false);
+      renderAgentAssets(state.agentSession);
     }
+  }
+
+  async function planAgentTask() {
+    await sendAgentMessage(null);
   }
 
   async function confirmAgentTask(threshold) {
@@ -1641,6 +1751,12 @@
   }
 
   if ($("agent-plan")) $("agent-plan").addEventListener("click", planAgentTask);
+  if ($("agent-message")) $("agent-message").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      if (!$("agent-plan").disabled) planAgentTask();
+    }
+  });
   if ($("agent-confirm")) $("agent-confirm").addEventListener("click", () => confirmAgentTask(null));
   if ($("agent-retry")) $("agent-retry").addEventListener("click", () => confirmAgentTask(0.5));
   if ($("agent-cancel")) $("agent-cancel").addEventListener("click", cancelAgentTask);

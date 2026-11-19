@@ -167,18 +167,19 @@
 
             <div id="agent-messages" class="agent-messages" aria-live="polite">
               <div class="agent-empty-chat" id="agent-empty-chat">
-                Start with a task such as “Create a segmentation dataset of workers wearing yellow vests.”
+                Describe the dataset you need, for example “Segment hard hats and safety vests, export YOLO.” I'll ask for anything that's missing.
               </div>
             </div>
 
             <div class="agent-compose">
+              <div class="field">
+                <span>Assets <small id="agent-assets-count" class="agent-assets-count"></small></span>
+                <div id="agent-assets" class="agent-assets" role="group" aria-label="Assets to label"></div>
+              </div>
+              <div id="agent-quick-replies" class="agent-quick-replies" hidden></div>
               <label class="field">
-                <span>Asset</span>
-                <select id="agent-asset"></select>
-              </label>
-              <label class="field">
-                <span>Task</span>
-                <textarea id="agent-message" rows="3" placeholder="e.g. Create a segmentation dataset of workers wearing yellow vests."></textarea>
+                <span>Message</span>
+                <textarea id="agent-message" rows="3" placeholder="e.g. Segment hard hats and safety vests, export YOLO. (Enter to send, Shift+Enter for a new line)"></textarea>
               </label>
               <div class="actions">
                 <button type="button" class="btn btn-primary" id="agent-plan">Plan task</button>

@@ -22,8 +22,10 @@ from .agent import (
     AgentServiceDependencies,
     TaskPlanner,
     planner_from_environment,
+    prompt_enhancer_from_environment,
 )
 from .agent_api import AgentApiDependencies, create_app as create_agent_app
+from .prompt_enhancement import PromptEnhancer
 from .agent_store import AgentSessionBackend, AgentSessionStore
 from .agent_worker import AgentWorker
 from .api import ApiDependencies, CalibrationApiDependencies, DatasetApiDependencies, ExportApiDependencies, LabelApiDependencies, RefinementApiDependencies, create_app as create_core_app
@@ -108,6 +110,10 @@ class LocalAppConfig:
     refinement_provider: ClickRefinementProvider | None = None
     postgres: PostgresConfig | None = None
     agent_planner: TaskPlanner | None = None
+    # SAM 3 prompt agent. Defaults to the local Ollama enhancer when the
+    # planner also comes from the environment; injected planners get none
+    # unless one is passed, which keeps tests deterministic.
+    agent_prompt_enhancer: PromptEnhancer | None = None
     calibration_validator_factory: (
         Callable[[UUID, UUID], ValidatorSelection] | None
     ) = None
@@ -346,6 +352,11 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
             images=label_images,
             sam3_provider=sam3_provider,
             planner=config.agent_planner or planner_from_environment(),
+            prompt_enhancer=(
+                config.agent_prompt_enhancer
+                if config.agent_planner is not None
+                else config.agent_prompt_enhancer or prompt_enhancer_from_environment()
+            ),
             calibration_timeout_sec=config.calibration_timeout_sec,
             validator_factory=(
                 config.calibration_validator_factory

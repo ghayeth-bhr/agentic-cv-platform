@@ -128,6 +128,13 @@ class OllamaTextClient:
             raise ValueError("Ollama message.content must decode to an object")
         return _spec_from_payload(specification)
 
+    def extract_draft(self, message: str, context: dict[str, Any]) -> dict[str, Any]:
+        """Structured slot extraction for one chat turn (see ``agent_dialogue``)."""
+
+        if not message.strip():
+            raise ValueError("message must not be empty")
+        return _draft_request(self, message, context)
+
 
 def _spec_from_payload(value: dict[str, Any]) -> TaskSpec:
     target_objects = value.get("target_objects")
@@ -160,3 +167,84 @@ def _spec_from_payload(value: dict[str, Any]) -> TaskSpec:
         sample_size=max(1, min(20, sample_size)),
         max_iterations=max(1, min(10, max_iterations)),
     )
+
+
+DRAFT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "task_type": {"type": "string", "enum": ["detection", "segmentation", "unknown"]},
+        "classes_changed": {"type": "boolean"},
+        "classes": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "attributes": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
+                },
+                "required": ["name", "attributes"],
+            },
+        },
+        "export_format": {"type": "string", "enum": ["coco", "yolo", "unknown"]},
+    },
+    "required": ["task_type", "classes_changed", "classes", "export_format"],
+}
+
+_DRAFT_SYSTEM_PROMPT = (
+    "You extract a computer-vision labeling task from a chat turn. Return only JSON "
+    "matching the schema. Never invent information the user did not give.\n"
+    "- task_type: 'segmentation' if the user wants masks/polygons/segmentation, "
+    "'detection' if they want boxes/detection, else 'unknown'.\n"
+    "- classes: the COMPLETE updated list of object classes to label, each a short "
+    "noun phrase (e.g. 'hard hat'), with colors/states in attributes (e.g. ['yellow']). "
+    "Start from the current classes and apply the user's change (add, remove, replace).\n"
+    "- classes_changed: false when this turn does not mention objects to label.\n"
+    "- export_format: 'coco' or 'yolo' only if the user names it, else 'unknown'.\n"
+    "If the agent just asked a question, the user's message is probably its answer."
+)
+
+
+def _draft_request(client: "OllamaTextClient", message: str, context: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "model": client.model,
+        "messages": [
+            {"role": "system", "content": _DRAFT_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"Current task: {json.dumps(context, ensure_ascii=False)}\n"
+                    f"User message: {message.strip()}"
+                ),
+            },
+        ],
+        "format": DRAFT_SCHEMA,
+        "stream": False,
+        "think": False,
+        "keep_alive": "10m",
+        "options": {"num_ctx": client.num_ctx, "temperature": client.temperature, "num_predict": 512},
+    }
+    request = Request(
+        f"{client.base_url.rstrip('/')}/api/chat",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=client.timeout_sec) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+        raise RuntimeError(f"Ollama request failed at {client.base_url}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError("Ollama response was not valid JSON") from exc
+    try:
+        message_body = body["message"]
+        content = message_body["content"]
+    except (KeyError, TypeError) as exc:
+        raise ValueError("Ollama response is missing message.content") from exc
+    if not content and isinstance(message_body.get("thinking"), str):
+        content = message_body["thinking"]
+    value = json.loads(content) if isinstance(content, str) else content
+    if not isinstance(value, dict):
+        raise ValueError("Ollama draft must be a JSON object")
+    return value

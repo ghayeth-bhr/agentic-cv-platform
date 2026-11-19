@@ -10,7 +10,7 @@ from uuid import UUID
 
 from .annotation_sets import job_set_id, live_in_set
 from .annotation_store import AnnotationRevisionBackend
-from .batch_labeling import BatchLabelResult, LabelImage, Sam3BatchLabeler
+from .batch_labeling import BatchLabelResult, LabelClass, LabelImage, Sam3BatchLabeler
 from .contracts import EventEnvelope
 from .dataset import DatasetCategory
 from .job_store import JobRecord, JobStoreBackend
@@ -22,6 +22,41 @@ logger = logging.getLogger("agentic_cv.workflow")
 
 class JobCancelled(RuntimeError):
     """Raised when a running label job observes a cancellation request."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class LabelPlan:
+    asset_ids: tuple[str, ...]
+    classes: tuple[LabelClass, ...]
+
+    @property
+    def categories(self) -> tuple[DatasetCategory, ...]:
+        return tuple(item.category for item in self.classes)
+
+
+def label_plan(payload: dict) -> LabelPlan:
+    """Read a batch-label payload: v2 (``asset_ids`` + ``classes``) or v1 (one asset, one class)."""
+
+    asset_ids = tuple(str(item) for item in payload.get("asset_ids") or ()) or (
+        str(payload["asset_id"]),
+    )
+    raw_classes = payload.get("classes") or [
+        {
+            "category_id": payload["category_id"],
+            "name": payload["category_name"],
+            "prompt": payload["prompt"],
+            "threshold": payload["threshold"],
+        }
+    ]
+    classes = tuple(
+        LabelClass(
+            prompt=str(item["prompt"]),
+            threshold=float(item["threshold"]),
+            category=DatasetCategory(category_id=int(item["category_id"]), name=str(item["name"])),
+        )
+        for item in raw_classes
+    )
+    return LabelPlan(asset_ids=asset_ids, classes=classes)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -48,18 +83,33 @@ class DurableLabelWorkflow:
         category_id: int,
         category_name: str,
         idempotency_key: str,
+        asset_ids: list[str] | None = None,
+        classes: list[LabelClass] | None = None,
     ) -> JobRecord:
+        payload = {
+            "asset_id": asset_id,
+            "prompt": prompt,
+            "threshold": threshold,
+            "task": task,
+            "category_id": category_id,
+            "category_name": category_name,
+        }
+        if asset_ids:
+            payload["asset_ids"] = list(asset_ids)
+        if classes:
+            payload["classes"] = [
+                {
+                    "category_id": item.category.category_id,
+                    "name": item.category.name,
+                    "prompt": item.prompt,
+                    "threshold": item.threshold,
+                }
+                for item in classes
+            ]
         return self.dependencies.jobs.create(
             tenant_id=tenant_id,
             kind="batch-label",
-            payload={
-                "asset_id": asset_id,
-                "prompt": prompt,
-                "threshold": threshold,
-                "task": task,
-                "category_id": category_id,
-                "category_name": category_name,
-            },
+            payload=payload,
             idempotency_key=idempotency_key,
         )
 
@@ -73,7 +123,8 @@ class DurableLabelWorkflow:
         prompt: str,
         threshold: float,
         task: Literal["detection", "segmentation"],
-        category: DatasetCategory,
+        category: DatasetCategory | None = None,
+        classes: list[LabelClass] | None = None,
         worker_id: str = "label-worker",
         lease_seconds: float = 60,
     ) -> BatchLabelResult:
@@ -162,9 +213,11 @@ class DurableLabelWorkflow:
                 raise ValueError("at least one label image is required")
             result = self.dependencies.labeler.label(
                 images, prompt=prompt, threshold=threshold, category=category, task=task,
+                classes=classes,
                 on_progress=checkpoint,
                 on_image=save_image_annotations,
                 annotation_namespace=set_id,
+                keep_raw=False,
             )
             self.dependencies.jobs.transition(job.job_id, "succeeded")
             self.dependencies.outbox.enqueue(

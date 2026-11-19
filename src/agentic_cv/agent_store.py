@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 from .sqlite_utils import connect_sqlite
 
 AgentSessionStatus = Literal[
+    "gathering",
     "awaiting_confirmation",
     "calibrating",
     "needs_attention",
@@ -259,7 +260,7 @@ def new_session_record(
     spec: dict[str, Any],
     planner_mode: str,
     planner_note: str | None,
-    prompt: str,
+    prompt: str | None,
     messages: tuple[AgentMessage, ...],
 ) -> AgentSessionRecord:
     now = _utc_now()

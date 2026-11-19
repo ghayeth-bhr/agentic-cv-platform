@@ -30,7 +30,27 @@ from .calibration import (
     Sam3Calibrator,
     Validator,
 )
+from .agent_dialogue import (
+    ClassSpec,
+    DraftPatch,
+    ExtractionResult,
+    Question,
+    RulesDraftExtractor,
+    Slot,
+    TaskDraft,
+    apply_patch,
+    draft_from_spec,
+    join_names,
+    mark_asked,
+    missing_slots,
+    next_question,
+    resolve_defaults,
+    rules_prompt,
+)
+from .batch_labeling import LabelClass
 from .calibration_samples import select_calibration_images
+from .dataset import DatasetCategory
+from .prompt_enhancement import OllamaPromptEnhancer, PromptEnhancer
 from .calibration_validation import ValidatorSelection, any_prediction_selection
 from .contracts import TaskSpec
 from .orchestrator import TaskOrchestrationRequest, TaskOrchestrator
@@ -50,10 +70,10 @@ _DEFAULT_THRESHOLDS = (0.3, 0.45, 0.6, 0.75, 0.85)
 _TASK_LEAD = re.compile(
     r"^\s*(?:please\s+)?(?:can\s+you\s+|could\s+you\s+)?(?:i\s+want\s+to\s+)?"
     r"(?:create|build|make|generate|produce|prepare)\s+"
-    r"(?:me\s+)?(?:a|an|the)?\s*"
+    r"(?:me\b\s*)?(?:(?:a|an|the)\b)?\s*"
     r"(?:(?:detection|segmentation)\s+)?"
     r"(?:dataset\s+)?"
-    r"(?:of|for|with|showing|that\s+(?:labels|detects|segments))?\s*",
+    r"(?:(?:of|for|with|showing|that\s+(?:labels|detects|segments))\b)?\s*",
     re.IGNORECASE,
 )
 _VERB_LEAD = re.compile(
@@ -122,13 +142,33 @@ class RulesTaskPlanner:
         )
         return PlannerResult(spec=spec, mode="rules")
 
+    def extract(
+        self, message: str, *, draft: TaskDraft, pending_slot: Slot | None
+    ) -> ExtractionResult:
+        return RulesDraftExtractor().extract(message, draft=draft, pending_slot=pending_slot)
+
 
 class OllamaTaskPlanner:
-    """Try a local text model, then fall back to the deterministic planner."""
+    """Try a local text model, then fall back to the deterministic planner.
 
-    def __init__(self, client: OllamaTextClient, fallback: TaskPlanner | None = None) -> None:
+    After a failure the model is skipped for ``retry_after_sec`` so every chat
+    turn does not wait on a dead endpoint (on Windows ``localhost`` tries IPv6
+    then IPv4, about 4 s per refused request).
+    """
+
+    def __init__(
+        self,
+        client: OllamaTextClient,
+        fallback: TaskPlanner | None = None,
+        *,
+        retry_after_sec: float = 30.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.client = client
         self.fallback = fallback or RulesTaskPlanner()
+        self.retry_after_sec = retry_after_sec
+        self._clock = clock
+        self._down_until = 0.0
 
     def plan(
         self,
@@ -167,6 +207,97 @@ class OllamaTaskPlanner:
         )
         return PlannerResult(spec=spec, mode="ollama")
 
+    def extract(
+        self, message: str, *, draft: TaskDraft, pending_slot: Slot | None
+    ) -> ExtractionResult:
+        """LLM slot extraction, checked against deterministic rules.
+
+        The rules extractor always runs: it backs up fields the model left
+        "unknown", and it is the whole answer when the model is unreachable.
+        """
+
+        rules = RulesDraftExtractor().extract(message, draft=draft, pending_slot=pending_slot)
+        unavailable = "Planning model unavailable; using the local rule-based planner."
+        if self._clock() < self._down_until:
+            return ExtractionResult(patch=rules.patch, mode="rules", note=unavailable)
+        try:
+            if hasattr(self.client, "extract_draft"):
+                payload = self.client.extract_draft(
+                    message, _draft_context(draft, pending_slot)
+                )
+                patch = _patch_from_model(payload, rules=rules.patch, message=message, draft=draft)
+            else:
+                spec = self.client.plan_task(message)
+                lifted = draft_from_spec(spec, asset_ids=draft.asset_ids)
+                patch = DraftPatch(
+                    task_type=spec.task_type,
+                    classes=lifted.classes,
+                    export_format=rules.patch.export_format,
+                )
+        except Exception as exc:
+            self._down_until = self._clock() + self.retry_after_sec
+            logger.warning("agent planner unavailable; using local rules: %s", exc)
+            return ExtractionResult(patch=rules.patch, mode="rules", note=unavailable)
+        return ExtractionResult(patch=patch, mode="ollama")
+
+
+def _draft_context(draft: TaskDraft, pending_slot: Slot | None) -> dict[str, Any]:
+    return {
+        "task_type": draft.task_type or "unknown",
+        "classes": [
+            {"name": item.name, "attributes": list(item.attributes)} for item in draft.classes
+        ],
+        "export_format": draft.export_format or "unknown",
+        "agent_just_asked_about": pending_slot or "nothing",
+    }
+
+
+def _stems(text: str) -> set[str]:
+    return {word[:4] for word in re.findall(r"[a-z0-9]+", text.lower()) if len(word) >= 3}
+
+
+def _patch_from_model(
+    payload: dict[str, Any], *, rules: DraftPatch, message: str, draft: TaskDraft
+) -> DraftPatch:
+    """Validate the model's JSON; keep only classes grounded in the conversation.
+
+    A class must share a word stem with the user's message or the current class
+    list, so a small model cannot invent "person" from "make a dataset".
+    """
+
+    task_type = payload.get("task_type")
+    task_type = task_type if task_type in ("detection", "segmentation") else rules.task_type
+    export_format = payload.get("export_format")
+    export_format = export_format if export_format in ("coco", "yolo") else rules.export_format
+    classes = None
+    if payload.get("classes_changed") and isinstance(payload.get("classes"), list):
+        grounding = _stems(message) | _stems(" ".join(item.name for item in draft.classes))
+        parsed: list[ClassSpec] = []
+        for item in payload["classes"][:10]:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+                continue
+            name = " ".join(item["name"].split())
+            if not name or not (_stems(name) & grounding):
+                continue
+            attributes = tuple(
+                " ".join(value.split())
+                for value in item.get("attributes", [])
+                if isinstance(value, str) and value.strip()
+            )[:5]
+            if name.lower() not in {existing.name.lower() for existing in parsed}:
+                parsed.append(ClassSpec(name=name, attributes=attributes))
+        if parsed:
+            classes = tuple(parsed)
+    if classes is None and rules.classes is not None and rules.classes_mode != "replace":
+        return replace(rules, task_type=task_type, export_format=export_format)
+    if classes is None and pending_slot_is_classes(draft) and rules.classes is not None:
+        classes = rules.classes
+    return DraftPatch(task_type=task_type, classes=classes, export_format=export_format)
+
+
+def pending_slot_is_classes(draft: TaskDraft) -> bool:
+    return draft.pending_slot == "classes"
+
 
 def planner_from_environment() -> TaskPlanner:
     if os.getenv("AGENTIC_CV_AGENT_PLANNER", "").strip().lower() == "rules":
@@ -181,6 +312,28 @@ def planner_from_environment() -> TaskPlanner:
         timeout_sec=timeout,
     )
     return OllamaTaskPlanner(client=client, fallback=RulesTaskPlanner())
+
+
+def prompt_enhancer_from_environment() -> PromptEnhancer | None:
+    """The Ollama SAM 3 prompt agent, unless rules-only mode is configured.
+
+    ``AGENTIC_CV_AGENT_PROMPTS=rules`` keeps planning on the LLM but skips
+    prompt rewriting.
+    """
+
+    if os.getenv("AGENTIC_CV_AGENT_PLANNER", "").strip().lower() == "rules":
+        return None
+    if os.getenv("AGENTIC_CV_AGENT_PROMPTS", "").strip().lower() == "rules":
+        return None
+    try:
+        timeout = float(os.getenv("AGENTIC_CV_OLLAMA_TIMEOUT_SEC", "30"))
+    except ValueError:
+        timeout = 30.0
+    return OllamaPromptEnhancer(
+        model=os.getenv("AGENTIC_CV_TEXT_MODEL", "qwen3-vl:4b"),
+        base_url=os.getenv("AGENTIC_CV_OLLAMA_URL", "http://localhost:11434"),
+        timeout_sec=timeout,
+    )
 
 
 def clean_target_phrase(message: str) -> str:
@@ -225,6 +378,8 @@ class AgentServiceDependencies:
     validator_factory: Callable[[UUID, UUID], ValidatorSelection] | None = None
     vectors: VectorIndex | None = None
     overlay_root: Path | None = None
+    # SAM 3 prompt agent. None keeps the deterministic noun-phrase rules.
+    prompt_enhancer: PromptEnhancer | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -235,12 +390,55 @@ class AgentSessionView:
     dataset: dict[str, Any] | None
     download_path: str | None
 
+    @property
+    def draft(self) -> TaskDraft:
+        return session_draft(self.record)
+
+    @property
+    def quick_replies(self) -> tuple[str, ...]:
+        spec = self.record.spec or {}
+        return tuple(spec.get("quick_replies", ()))
+
+
+_OPEN_FOR_MESSAGES = ("gathering", "awaiting_confirmation", "needs_attention")
+_NIL_ASSET = UUID(int=0)
+
+
+def session_draft(record: AgentSessionRecord) -> TaskDraft:
+    """The session's draft; sessions created before drafts existed are lifted from v1."""
+
+    spec = record.spec or {}
+    if "draft" in spec:
+        return TaskDraft.from_dict(spec["draft"])
+    if "target_objects" not in spec:
+        return TaskDraft(asset_ids=(str(record.asset_id),))
+    task = TaskSpec.from_dict(spec)
+    draft = draft_from_spec(task, asset_ids=(str(record.asset_id),))
+    if len(draft.classes) == 1 and record.prompt:
+        draft = replace(draft, classes=(replace(draft.classes[0], prompts=(record.prompt,)),))
+    return replace(draft, export_format="coco")
+
+
+def export_format_for(draft: TaskDraft) -> str:
+    if draft.export_format == "yolo":
+        return "yolo-segmentation" if draft.task_type == "segmentation" else "yolo-detection"
+    return "coco"
+
+
+def _format_label(export_format: str) -> str:
+    return {
+        "coco": "COCO",
+        "yolo-detection": "YOLO detection",
+        "yolo-segmentation": "YOLO segmentation",
+    }.get(export_format, export_format)
+
 
 class AgentService:
     def __init__(self, dependencies: AgentServiceDependencies) -> None:
         self.dependencies = dependencies
         self._calibration_lock = threading.Lock()
         self._calibration_cancels: dict[UUID, threading.Event] = {}
+        self._enhancer_down_until = 0.0
         if dependencies.calibration_timeout_sec <= 0:
             raise ValueError("calibration_timeout_sec must be greater than 0")
         if not dependencies.thresholds:
@@ -248,12 +446,15 @@ class AgentService:
         if not 0 < dependencies.minimum_agreement <= 1:
             raise ValueError("minimum_agreement must be between 0 and 1")
 
+    # ------------------------------------------------------------------ dialogue
+
     def create_session(
         self,
         *,
         tenant_id: UUID,
-        asset_id: UUID,
         message: str,
+        asset_id: UUID | None = None,
+        asset_ids: tuple[UUID, ...] = (),
         task_type: str | None = None,
         target_objects: tuple[str, ...] = (),
         visual_attributes: tuple[str, ...] = (),
@@ -262,39 +463,197 @@ class AgentService:
     ) -> AgentSessionView:
         if not message.strip():
             raise ValueError("message must not be empty")
-        asset_name = self._asset_name(tenant_id=tenant_id, asset_id=asset_id)
-        planned = self.dependencies.planner.plan(
-            message,
+        selected = _dedupe_assets(((asset_id,) if asset_id else ()) + tuple(asset_ids))
+        names = self._asset_names(tenant_id=tenant_id, asset_ids=selected)
+        overrides = _override_patch(
             task_type=task_type,
             target_objects=target_objects,
             visual_attributes=visual_attributes,
             sample_size=sample_size,
             max_iterations=max_iterations,
         )
-        prompt = prompt_for_spec(planned.spec)
-        reply = (
-            f"I read this as a {planned.spec.task_type} task for “{prompt}”. "
-            f"Confirm to calibrate on up to {planned.spec.sample_size} sample image"
-            f"{'' if planned.spec.sample_size == 1 else 's'}, then label “{asset_name}”."
-        )
-        if planned.note:
-            reply = f"{reply}\n\n{planned.note}"
         record = new_session_record(
             tenant_id=tenant_id,
-            asset_id=asset_id,
-            asset_name=asset_name,
+            asset_id=selected[0] if selected else _NIL_ASSET,
+            asset_name=", ".join(names) or "No asset selected",
             message=message.strip(),
-            spec=planned.spec.to_dict(),
-            planner_mode=planned.mode,
-            planner_note=planned.note,
-            prompt=prompt,
-            messages=(
-                AgentMessage.create("user", message.strip()),
-                AgentMessage.create("assistant", reply),
-            ),
+            spec={"draft": TaskDraft(asset_ids=tuple(str(item) for item in selected)).to_dict()},
+            planner_mode="rules",
+            planner_note=None,
+            prompt=None,
+            messages=(),
         )
-        record = self.dependencies.store.create(record)
-        return self.view(record)
+        record = self._turn(
+            tenant_id=tenant_id,
+            record=record,
+            message=message.strip(),
+            overrides=overrides,
+        )
+        return self.view(self.dependencies.store.create(record))
+
+    def add_message(
+        self,
+        *,
+        tenant_id: UUID,
+        session_id: UUID,
+        message: str,
+        asset_ids: tuple[UUID, ...] | None = None,
+    ) -> AgentSessionView:
+        """One more chat turn: answer a question or change the plan before confirming."""
+
+        if not message.strip():
+            raise ValueError("message must not be empty")
+        record = self.dependencies.store.get(tenant_id=tenant_id, session_id=session_id)
+        if record.status not in _OPEN_FOR_MESSAGES:
+            raise AgentConflict(
+                f"session is {record.status}; start a new task to change the plan"
+            )
+        if asset_ids is not None:
+            selected = _dedupe_assets(tuple(asset_ids))
+            names = self._asset_names(tenant_id=tenant_id, asset_ids=selected)
+            draft = replace(session_draft(record), asset_ids=tuple(str(item) for item in selected))
+            record = replace(
+                record,
+                asset_id=selected[0] if selected else _NIL_ASSET,
+                asset_name=", ".join(names) or "No asset selected",
+                spec={**(record.spec or {}), "draft": draft.to_dict()},
+            )
+        record = self._turn(tenant_id=tenant_id, record=record, message=message.strip())
+        return self.view(self.dependencies.store.save(record))
+
+    def _turn(
+        self,
+        *,
+        tenant_id: UUID,
+        record: AgentSessionRecord,
+        message: str,
+        overrides: DraftPatch | None = None,
+    ) -> AgentSessionRecord:
+        draft = session_draft(record)
+        extraction = self._extract(message, draft)
+        draft = apply_patch(draft, extraction.patch)
+        if overrides is not None:
+            draft = apply_patch(draft, overrides)
+        draft = resolve_defaults(draft)
+        question = next_question(draft)
+        image_count = 0
+        if question is None:
+            try:
+                image_count = len(
+                    self.dependencies.images.resolve_many(
+                        tenant_id=tenant_id, asset_ids=draft.asset_ids
+                    )
+                )
+            except ValueError as exc:
+                question = Question(
+                    slot="assets",
+                    text=(
+                        f"I can't label the selected assets yet: {exc}. Select assets that "
+                        "contain images or videos, then send your message again."
+                    ),
+                )
+        draft = mark_asked(draft, question)
+        messages = record.messages + (AgentMessage.create("user", message),)
+        if question is not None:
+            reply = question.text
+            spec: dict[str, Any] = {
+                "draft": draft.to_dict(),
+                "quick_replies": list(question.quick_replies),
+            }
+            status: AgentSessionStatus = "gathering"
+            prompt = None
+        else:
+            draft = self._prepare_prompts(draft)
+            reply = self._plan_summary(record, draft, image_count)
+            spec = {**draft.task_spec().to_dict(), "draft": draft.to_dict(), "quick_replies": []}
+            status = "awaiting_confirmation"
+            prompt = "; ".join(item.prompt for item in draft.classes)
+        if extraction.note:
+            reply = f"{reply}\n\n{extraction.note}"
+        return replace(
+            record,
+            status=status,
+            spec=spec,
+            prompt=prompt,
+            planner_mode=extraction.mode,
+            planner_note=extraction.note,
+            threshold=None,
+            calibration=None,
+            error=None,
+            messages=messages + (AgentMessage.create("assistant", reply),),
+        )
+
+    def _extract(self, message: str, draft: TaskDraft) -> ExtractionResult:
+        planner = self.dependencies.planner
+        extract = getattr(planner, "extract", None)
+        if callable(extract):
+            return extract(message, draft=draft, pending_slot=draft.pending_slot)
+        # A planner with only plan(): treat its TaskSpec as the whole turn.
+        planned = planner.plan(message)
+        lifted = draft_from_spec(planned.spec, asset_ids=draft.asset_ids)
+        return ExtractionResult(
+            patch=DraftPatch(task_type=planned.spec.task_type, classes=lifted.classes),
+            mode=planned.mode,
+            note=planned.note,
+        )
+
+    def _prepare_prompts(self, draft: TaskDraft) -> TaskDraft:
+        """Prompt agent: give each class short SAM 3 noun phrases.
+
+        The enhancer (local LLM) proposes up to three phrases; the deterministic
+        rules phrase is always kept as the last alternative so calibration has
+        a safe fallback. Without an enhancer the rules phrase is used alone.
+        """
+
+        enhancer = self.dependencies.prompt_enhancer
+        if enhancer is not None and time.monotonic() < self._enhancer_down_until:
+            enhancer = None
+        classes: list[ClassSpec] = []
+        for item in draft.classes:
+            if item.prompts:
+                classes.append(item)
+                continue
+            fallback = rules_prompt(item)
+            prompts: list[str] = []
+            if enhancer is not None:
+                try:
+                    enhanced = enhancer.enhance(fallback)
+                    prompts = [
+                        phrase for phrase in enhanced.prompts
+                        if 0 < len(phrase.split()) <= 8
+                    ]
+                except Exception as exc:
+                    # Skip the enhancer for a while instead of paying its
+                    # timeout on every class and every turn.
+                    self._enhancer_down_until = time.monotonic() + 30.0
+                    enhancer = None
+                    logger.warning("prompt enhancement failed; using the class phrase: %s", exc)
+            if fallback.lower() not in {phrase.lower() for phrase in prompts}:
+                prompts.append(fallback)
+            classes.append(replace(item, prompts=tuple(prompts[:4])))
+        return replace(draft, classes=tuple(classes))
+
+    def _plan_summary(
+        self, record: AgentSessionRecord, draft: TaskDraft, image_count: int
+    ) -> str:
+        task = "segmentation (pixel masks)" if draft.task_type == "segmentation" else "detection (bounding boxes)"
+        lines = [
+            f"Here is the plan: {task} on “{record.asset_name}” "
+            f"({image_count} image{'' if image_count == 1 else 's'}).",
+        ]
+        for item in draft.classes:
+            line = f"• {item.name}"
+            if item.prompt.lower() != item.name.lower():
+                line += f" — SAM 3 prompt “{item.prompt}”"
+            lines.append(line)
+        lines.append(
+            f"I'll calibrate on up to {draft.sample_size} sample image"
+            f"{'' if draft.sample_size == 1 else 's'} per class, label every image, and "
+            f"package {_format_label(export_format_for(draft))}. "
+            "Confirm to start, or tell me what to change."
+        )
+        lines.extend(draft.assumptions)
+        return "\n".join(lines)
 
     def get_session(self, *, tenant_id: UUID, session_id: UUID) -> AgentSessionView:
         return self.view(self.dependencies.store.get(tenant_id=tenant_id, session_id=session_id))
@@ -306,6 +665,8 @@ class AgentService:
             self.view(record)
             for record in self.dependencies.store.list(tenant_id=tenant_id, limit=limit)
         ]
+
+    # ------------------------------------------------------------------ run
 
     def confirm(
         self,
@@ -321,8 +682,12 @@ class AgentService:
             raise AgentConflict(
                 f"session is {record.status}; only a planned session can be confirmed"
             )
-        if record.spec is None:
-            raise AgentConflict("session has no task specification")
+        draft = session_draft(record)
+        missing = missing_slots(draft)
+        if record.spec is None or missing:
+            raise AgentConflict(
+                "the task is not fully specified yet; still needed: " + ", ".join(missing)
+            )
         if threshold is not None and not 0 <= threshold <= 1:
             raise ValueError("threshold must be between 0 and 1")
         agreement = (
@@ -336,6 +701,11 @@ class AgentService:
         if any(not 0 <= value <= 1 for value in selected_thresholds):
             raise ValueError("thresholds must be between 0 and 1")
 
+        classes = draft.classes
+        categories = [
+            DatasetCategory(category_id=index, name=item.name[:80])
+            for index, item in enumerate(classes, start=1)
+        ]
         record = replace(record, status="calibrating", error=None)
         record = self.dependencies.store.save(record)
         selection: ValidatorSelection | None = None
@@ -350,12 +720,12 @@ class AgentService:
             calibration_started = time.perf_counter()
             label_images = self._sample_images(
                 tenant_id=tenant_id,
-                asset_id=record.asset_id,
-                sample_size=TaskSpec.from_dict(record.spec).sample_size,
+                asset_ids=draft.asset_ids,
+                sample_size=draft.sample_size,
             )
             total_images = len(
-                self.dependencies.images.resolve(
-                    tenant_id=tenant_id, asset_id=str(record.asset_id)
+                self.dependencies.images.resolve_many(
+                    tenant_id=tenant_id, asset_ids=draft.asset_ids
                 )
             )
             if threshold is None:
@@ -369,20 +739,28 @@ class AgentService:
                 cancel_event = threading.Event()
                 with self._calibration_lock:
                     self._calibration_cancels[session_id] = cancel_event
-                try:
-                    result = self._calibrate_with_timeout(
-                        lambda: Sam3Calibrator(
+
+                def calibrate_all() -> list[CalibrationResult]:
+                    return [
+                        Sam3Calibrator(
                             self.dependencies.sam3_provider,
                             selection.validator,
                             minimum_agreement=agreement,
-                            max_iterations=TaskSpec.from_dict(record.spec).max_iterations,
+                            max_iterations=draft.max_iterations,
                         ).calibrate(
                             samples,
-                            prompt=record.prompt or "",
+                            prompt=item.prompt,
                             thresholds=list(selected_thresholds),
                             should_cancel=cancel_event.is_set,
-                        ),
+                        )
+                        for item in classes
+                    ]
+
+                try:
+                    results = self._calibrate_with_timeout(
+                        calibrate_all,
                         cancel_event=cancel_event,
+                        budget=self.dependencies.calibration_timeout_sec * len(classes),
                     )
                 finally:
                     with self._calibration_lock:
@@ -396,32 +774,45 @@ class AgentService:
                     record = self.dependencies.store.save(record)
                 record, release_timing = self._release_validator(selection, record)
                 timing.update(release_timing)
-                calibration = _calibration_payload(result, selection, timings=timing)
-                if result.status != "calibrated" or result.threshold is None:
-                    target = record.prompt or "that object"
+                calibration = _combined_calibration(
+                    [
+                        {
+                            **_calibration_payload(result, selection, timings=timing),
+                            "name": item.name,
+                            "category_id": category.category_id,
+                        }
+                        for item, category, result in zip(classes, categories, results)
+                    ]
+                )
+                failed = [
+                    item for item, result in zip(classes, results)
+                    if result.status != "calibrated" or result.threshold is None
+                ]
+                if failed:
+                    target = join_names(tuple(failed))
                     record = replace(
                         record,
                         status="needs_attention",
                         calibration=calibration,
                         error=(
                             f"I can't segment reliably: no threshold met the sample agreement "
-                            f"for “{target}”. Retry with different samples, or run with a "
-                            "fixed threshold."
+                            f"for {target}. Retry with different samples, rephrase the class, "
+                            "or run with a fixed threshold."
                         ),
                     )
                     record = self._append(
                         record,
                         "assistant",
-                        f"I can't segment reliably from these images for “{target}”. I can "
-                        "retry with different samples, or you can run at a fixed threshold "
-                        "such as 0.50.",
+                        f"I can't segment reliably from these images for {target}. You can "
+                        "describe the object differently (for example “hard hat” instead of "
+                        "“helmet”), or run at a fixed threshold such as 0.50.",
                     )
                     return self.view(self.dependencies.store.save(record))
-                chosen_threshold = result.threshold
+                chosen = [float(result.threshold) for result in results]  # type: ignore[arg-type]
             else:
-                chosen_threshold = threshold
+                chosen = [threshold for _ in classes]
                 calibration = _manual_calibration_payload(
-                    prompt=record.prompt or "", threshold=threshold
+                    prompt=", ".join(item.prompt for item in classes), threshold=threshold
                 )
                 samples = []
                 record, _ = self._release_validator(selection, record)
@@ -434,35 +825,48 @@ class AgentService:
             if current.status != "calibrating":
                 return self.view(current)
 
+            label_classes = [
+                LabelClass(prompt=item.prompt, threshold=value, category=category)
+                for item, value, category in zip(classes, chosen, categories)
+            ]
             job = self.dependencies.labels.submit(
                 tenant_id=tenant_id,
-                asset_id=str(record.asset_id),
-                prompt=record.prompt or "object",
-                threshold=chosen_threshold,
-                task=TaskSpec.from_dict(record.spec).task_type,
-                category_id=1,
-                category_name=(record.prompt or "object")[:80],
+                asset_id=draft.asset_ids[0],
+                prompt=label_classes[0].prompt,
+                threshold=label_classes[0].threshold,
+                task=draft.task_type,  # type: ignore[arg-type]
+                category_id=categories[0].category_id,
+                category_name=categories[0].name,
                 idempotency_key=f"agent-label:{record.session_id}",
+                asset_ids=list(draft.asset_ids),
+                classes=label_classes,
             )
             record = replace(
                 record,
                 status="labeling",
-                threshold=chosen_threshold,
+                threshold=chosen[0],
                 calibration=calibration,
                 label_job_id=job.job_id,
                 error=None,
             )
+            plural = "" if total_images == 1 else "s"
             if threshold is None:
                 sample_count = len(samples)
+                if len(classes) == 1:
+                    calibrated = f"Calibrated at {chosen[0]:.2f}"
+                else:
+                    calibrated = "Calibrated " + ", ".join(
+                        f"{item.name} at {value:.2f}" for item, value in zip(classes, chosen)
+                    )
                 message = (
-                    f"Calibrated at {chosen_threshold:.2f} on {sample_count} sample image"
+                    f"{calibrated} on {sample_count} sample image"
                     f"{'' if sample_count == 1 else 's'}. Labeling {total_images} image"
-                    f"{'' if total_images == 1 else 's'} in the background."
+                    f"{plural} in the background."
                 )
             else:
                 message = (
-                    f"Using the fixed threshold {chosen_threshold:.2f}. Labeling "
-                    f"{total_images} image{'' if total_images == 1 else 's'} in the background."
+                    f"Using the fixed threshold {threshold:.2f}. Labeling "
+                    f"{total_images} image{plural} in the background."
                 )
             record = self._append(record, "assistant", message)
             record = self.dependencies.store.save(record)
@@ -548,10 +952,12 @@ class AgentService:
                 return self.view(self.dependencies.store.save(record))
             if job.status == "succeeded":
                 try:
+                    draft = session_draft(record)
+                    class_names = ", ".join(item.name for item in draft.classes)
                     result = self.dependencies.dataset_builder.build_from_job(
                         tenant_id=record.tenant_id,
                         job_id=job.job_id,
-                        name=f"{record.asset_name} — {record.prompt or 'dataset'}",
+                        name=f"{record.asset_name} — {class_names or record.prompt or 'dataset'}",
                         idempotency_key=f"agent-dataset:{record.session_id}",
                     )
                 except Exception as exc:
@@ -565,10 +971,11 @@ class AgentService:
                 if current.status != "labeling":
                     return self.view(current)
                 try:
+                    export_format = export_format_for(session_draft(record))
                     export = self.dependencies.export_workflow.submit(
                         tenant_id=record.tenant_id,
                         version_id=result.record.version_id,
-                        format="coco",
+                        format=export_format,  # type: ignore[arg-type]
                         idempotency_key=f"agent-export:{record.session_id}",
                     )
                 except Exception as exc:
@@ -591,7 +998,8 @@ class AgentService:
                     f"Built a dataset with {result.image_count} image"
                     f"{'' if result.image_count == 1 else 's'} and "
                     f"{result.annotation_count} annotation"
-                    f"{'' if result.annotation_count == 1 else 's'}. Packaging COCO now.",
+                    f"{'' if result.annotation_count == 1 else 's'}. "
+                    f"Packaging {_format_label(export_format)} now.",
                 )
                 return self.view(self.dependencies.store.save(record))
         if record.status == "exporting" and record.export_job_id is not None:
@@ -609,7 +1017,8 @@ class AgentService:
                 record = self._append(
                     record,
                     "assistant",
-                    "The COCO dataset is ready. Download the archive from the run panel.",
+                    f"The {_format_label(export_format_for(session_draft(record)))} dataset is "
+                    "ready. Download the archive from the run panel.",
                 )
             else:
                 return self.view(record)
@@ -662,15 +1071,23 @@ class AgentService:
             download_path=download_path,
         )
 
-    def _asset_name(self, *, tenant_id: UUID, asset_id: UUID) -> str:
-        for asset in self.dependencies.registry.list_assets(tenant_id=tenant_id):
-            if asset.asset_id == asset_id:
-                return asset.name
-        raise KeyError(f"unknown asset: {asset_id}")
+    def _asset_names(self, *, tenant_id: UUID, asset_ids: tuple[UUID, ...]) -> list[str]:
+        if not asset_ids:
+            return []
+        known = {
+            asset.asset_id: asset.name
+            for asset in self.dependencies.registry.list_assets(tenant_id=tenant_id)
+        }
+        missing = [str(item) for item in asset_ids if item not in known]
+        if missing:
+            raise KeyError(f"unknown asset: {missing[0]}")
+        return [known[item] for item in asset_ids]
 
-    def _sample_images(self, *, tenant_id: UUID, asset_id: UUID, sample_size: int):
-        images = self.dependencies.images.resolve(
-            tenant_id=tenant_id, asset_id=str(asset_id)
+    def _sample_images(
+        self, *, tenant_id: UUID, asset_ids: tuple[str, ...], sample_size: int
+    ):
+        images = self.dependencies.images.resolve_many(
+            tenant_id=tenant_id, asset_ids=asset_ids
         )
         if not images:
             raise ValueError("asset has no image or video frames to label")
@@ -747,9 +1164,13 @@ class AgentService:
         return path
 
     def _calibrate_with_timeout(
-        self, calibrate, *, cancel_event: threading.Event | None = None
+        self,
+        calibrate,
+        *,
+        cancel_event: threading.Event | None = None,
+        budget: float | None = None,
     ):
-        timeout = self.dependencies.calibration_timeout_sec
+        timeout = budget or self.dependencies.calibration_timeout_sec
         result_queue: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
 
         def target() -> None:
@@ -828,6 +1249,57 @@ def _calibration_payload(
         "timings": timings,
         "vlm_unloaded_after_calibration": bool(timings.get("vlm_unloaded", False)),
     }
+
+
+def _combined_calibration(per_class: list[dict[str, Any]]) -> dict[str, Any]:
+    """One class keeps the historical payload; several get an overall summary.
+
+    The top level mirrors the first class so older clients still render it;
+    ``classes`` carries every class's attempts and verdicts.
+    """
+
+    if len(per_class) == 1:
+        return {**per_class[0], "classes": per_class}
+    statuses = {item["status"] for item in per_class}
+    return {
+        **per_class[0],
+        "status": "calibrated" if statuses == {"calibrated"} else "no_acceptable_threshold",
+        "prompt": ", ".join(str(item["prompt"]) for item in per_class),
+        "classes": per_class,
+    }
+
+
+def _dedupe_assets(values: tuple[UUID, ...]) -> tuple[UUID, ...]:
+    seen: list[UUID] = []
+    for value in values:
+        if value not in seen:
+            seen.append(value)
+    return tuple(seen)
+
+
+def _override_patch(
+    *,
+    task_type: str | None,
+    target_objects: tuple[str, ...],
+    visual_attributes: tuple[str, ...],
+    sample_size: int | None,
+    max_iterations: int | None,
+) -> DraftPatch | None:
+    """Explicit API fields (v1 clients) win over what the message says."""
+
+    if not any((task_type, target_objects, visual_attributes, sample_size, max_iterations)):
+        return None
+    classes = None
+    if target_objects:
+        classes = tuple(
+            ClassSpec(name=name, attributes=tuple(visual_attributes)) for name in target_objects
+        )
+    return DraftPatch(
+        task_type=task_type,  # type: ignore[arg-type]
+        classes=classes,
+        sample_size=sample_size,
+        max_iterations=max_iterations,
+    )
 
 
 def _manual_calibration_payload(*, prompt: str, threshold: float) -> dict[str, Any]:

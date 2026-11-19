@@ -98,3 +98,15 @@ class LabelImageResolver:
         if not images:
             raise ValueError("asset has no indexable image or video sources")
         return images
+
+    def resolve_many(self, *, tenant_id: UUID, asset_ids: list[str] | tuple[str, ...]) -> list[LabelImage]:
+        """Images of several assets in order, without duplicates."""
+
+        seen: set[str] = set()
+        images: list[LabelImage] = []
+        for asset_id in asset_ids:
+            for image in self.resolve(tenant_id=tenant_id, asset_id=str(asset_id)):
+                if image.image_id not in seen:
+                    seen.add(image.image_id)
+                    images.append(image)
+        return images
