@@ -156,9 +156,33 @@ Added or extended:
 - `tests/test_ui_api_contracts.py`: dataset-format selector and export contract.
 
 Default `pytest` remains deterministic: agent confirmation tests inject a
-validator factory, so a locally running Ollama cannot change the result. The
-full suite, Playwright browser tests, `compileall`, `node --check`,
-`git diff --check`, and `uv lock --check` are the release gates.
+validator factory, so a locally running Ollama cannot change the result.
+
+Verification output from the release gate:
+
+```text
+$ .venv\Scripts\python -m pytest -q
+275 passed, 10 skipped, 1 warning in 44.05s
+
+$ .venv\Scripts\python -m pytest tests/test_agent_ui_playwright.py tests/test_manual_refinement_ui_playwright.py tests/test_assets_ui_playwright.py -q
+3 passed in 18.13s
+
+$ node --check src/agentic_cv/web/app.js
+(no output; exit 0)
+
+$ .venv\Scripts\python -m compileall -q src tests scripts
+(no output; exit 0)
+
+$ uv lock --check
+Resolved 90 packages in 3ms
+
+$ agentic-cv doctor --no-network --port 8124
+...
+Summary: 11 ok, 0 warn, 0 fail
+```
+
+The 10 skips are the opt-in PostgreSQL tests. The real 20-image VLM run and
+its exact JSON output are in [`docs/PERFORMANCE.md`](../PERFORMANCE.md).
 
 ## Demo (section 7)
 
