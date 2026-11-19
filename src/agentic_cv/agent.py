@@ -49,7 +49,7 @@ from .agent_dialogue import (
     rules_prompt,
 )
 from .batch_labeling import LabelClass
-from .calibration_samples import select_calibration_images
+from .calibration_samples import select_samples_for_target
 from .dataset import DatasetCategory
 from .prompt_enhancement import OllamaPromptEnhancer, PromptEnhancer
 from .calibration_validation import ValidatorSelection, any_prediction_selection
@@ -412,6 +412,11 @@ class AgentServiceDependencies:
     overlay_root: Path | None = None
     # SAM 3 prompt agent. None keeps the deterministic noun-phrase rules.
     prompt_enhancer: PromptEnhancer | None = None
+    # Text embedding for target-aware calibration sampling (SigLIP text tower).
+    text_embedder: Callable[[str], Any] | None = None
+    # Unloads a managed model by name ("siglip2", "sam3") so calibration can
+    # keep at most one large model on the GPU at a time.
+    release_models: Callable[[str], Any] | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -432,6 +437,7 @@ class AgentSessionView:
         return tuple(spec.get("quick_replies", ()))
 
 
+_MAX_PROMPTS_TRIED = 3
 _OPEN_FOR_MESSAGES = ("gathering", "awaiting_confirmation", "needs_attention")
 _NIL_ASSET = UUID(int=0)
 
@@ -760,46 +766,112 @@ class AgentService:
                 record = self._append(record, "assistant", initial_notice)
                 record = self.dependencies.store.save(record)
             calibration_started = time.perf_counter()
-            label_images = self._sample_images(
-                tenant_id=tenant_id,
-                asset_ids=draft.asset_ids,
-                sample_size=draft.sample_size,
+            all_images = self.dependencies.images.resolve_many(
+                tenant_id=tenant_id, asset_ids=draft.asset_ids
             )
-            total_images = len(
-                self.dependencies.images.resolve_many(
-                    tenant_id=tenant_id, asset_ids=draft.asset_ids
-                )
-            )
+            if not all_images:
+                raise ValueError("asset has no image or video frames to label")
+            total_images = len(all_images)
+            sample_ids: set[str] = set()
             if threshold is None:
-                samples = [
-                    CalibrationSample(
-                        image_id=item.image_id,
-                        image=self._load_image(item.path),
-                    )
-                    for item in label_images
-                ]
                 cancel_event = threading.Event()
                 with self._calibration_lock:
                     self._calibration_cancels[session_id] = cancel_event
+                image_cache: dict[str, Image.Image] = {}
+                progress: list[dict[str, Any]] = []
 
-                def calibrate_all() -> list[CalibrationResult]:
-                    return [
-                        Sam3Calibrator(
-                            self.dependencies.sam3_provider,
-                            selection.validator,
-                            minimum_agreement=agreement,
-                            max_iterations=draft.max_iterations,
-                        ).calibrate(
-                            samples,
-                            prompt=item.prompt,
-                            thresholds=list(selected_thresholds),
-                            should_cancel=cancel_event.is_set,
+                def load(item) -> CalibrationSample:
+                    if item.image_id not in image_cache:
+                        image_cache[item.image_id] = self._load_image(item.path)
+                    return CalibrationSample(image_id=item.image_id, image=image_cache[item.image_id])
+
+                def publish(name: str, prompt: str, attempt) -> None:
+                    progress.append(
+                        {"name": name, "prompt": prompt, **_attempt_payload(attempt)}
+                    )
+                    self._save_progress(tenant_id, session_id, progress)
+
+                # Pick every class's samples first (this uses the SigLIP text
+                # tower), then free SigLIP so SAM 3 and the VLM share the GPU.
+                class_samples = {
+                    item.name: self._sample_images(
+                        images=all_images,
+                        sample_size=draft.sample_size,
+                        text=item.prompt,
+                    )
+                    for item in classes
+                }
+                self._release_model("siglip2")
+
+                def calibrate_all() -> list[tuple[str, CalibrationResult, list[CalibrationResult]]]:
+                    """Phased rounds so SAM 3 and the VLM are never resident together.
+
+                    Each round runs SAM 3 for every class still pending (one
+                    prompt each), unloads SAM 3, then lets the validator judge.
+                    A class whose prompt failed moves to its next prompt in the
+                    next round, after the VLM is unloaded. On a 6 GB GPU the two
+                    models together paged to system memory: ~45 s per VLM
+                    verdict instead of ~4 s (measured).
+                    """
+
+                    calibrator = Sam3Calibrator(
+                        self.dependencies.sam3_provider,
+                        selection.validator,
+                        minimum_agreement=agreement,
+                        max_iterations=draft.max_iterations,
+                    )
+                    samples_for = {
+                        index: [load(image) for image in class_samples[item.name]]
+                        for index, item in enumerate(classes)
+                    }
+                    for chosen in samples_for.values():
+                        sample_ids.update(sample.image_id for sample in chosen)
+                    queue = {
+                        index: list((item.prompts or (item.prompt,))[:_MAX_PROMPTS_TRIED])
+                        for index, item in enumerate(classes)
+                    }
+                    tried: dict[int, list[CalibrationResult]] = {index: [] for index in queue}
+                    first_round = True
+                    while queue:
+                        if not first_round and selection.release is not None:
+                            selection.release()  # free the VLM before SAM 3 runs again
+                        first_round = False
+                        round_prompts = {index: prompts.pop(0) for index, prompts in queue.items()}
+                        raw = {
+                            index: calibrator.infer(
+                                samples_for[index],
+                                prompt=prompt,
+                                thresholds=list(selected_thresholds),
+                                should_cancel=cancel_event.is_set,
+                            )
+                            for index, prompt in round_prompts.items()
+                        }
+                        self._release_model("sam3")
+                        for index, prompt in round_prompts.items():
+                            item = classes[index]
+                            result = calibrator.score(
+                                samples_for[index],
+                                raw[index],
+                                prompt=prompt,
+                                thresholds=list(selected_thresholds),
+                                should_cancel=cancel_event.is_set,
+                                on_attempt=lambda attempt, name=item.name, prompt=prompt: publish(name, prompt, attempt),
+                            )
+                            tried[index].append(result)
+                            if result.status in ("calibrated", "no_target_in_samples") or not queue[index]:
+                                del queue[index]
+                    outcomes = []
+                    for index in range(len(classes)):
+                        results = tried[index]
+                        best = next(
+                            (result for result in results if result.status == "calibrated"),
+                            max(results, key=lambda result: max(a.agreement for a in result.attempts)),
                         )
-                        for item in classes
-                    ]
+                        outcomes.append((best.prompt, best, results))
+                    return outcomes
 
                 try:
-                    results = self._calibrate_with_timeout(
+                    outcomes = self._calibrate_with_timeout(
                         calibrate_all,
                         cancel_event=cancel_event,
                         budget=self.dependencies.calibration_timeout_sec * len(classes),
@@ -822,41 +894,51 @@ class AgentService:
                             **_calibration_payload(result, selection, timings=timing),
                             "name": item.name,
                             "category_id": category.category_id,
+                            "prompts_tried": [tried_result.prompt for tried_result in tried],
                         }
-                        for item, category, result in zip(classes, categories, results)
+                        for item, category, (_, result, tried) in zip(classes, categories, outcomes)
                     ]
                 )
+                absent = [
+                    item for item, (_, result, _) in zip(classes, outcomes)
+                    if result.status == "no_target_in_samples"
+                ]
                 failed = [
-                    item for item, result in zip(classes, results)
+                    item for item, (_, result, _) in zip(classes, outcomes)
                     if result.status != "calibrated" or result.threshold is None
                 ]
                 if failed:
                     target = join_names(tuple(failed))
+                    if absent and len(absent) == len(failed):
+                        explanation = (
+                            f"None of the sample images shows {target}, so I could not "
+                            "calibrate. Check that the selected assets contain it, or "
+                            "describe it differently."
+                        )
+                    else:
+                        explanation = (
+                            f"I can't segment reliably from these images for {target}: no "
+                            "threshold met the sample agreement with any of the prompts I "
+                            "tried. You can describe the object differently (for example "
+                            "“hard hat” instead of “helmet”), or run at a fixed threshold "
+                            "such as 0.50."
+                        )
                     record = replace(
                         record,
                         status="needs_attention",
                         calibration=calibration,
-                        error=(
-                            f"I can't segment reliably: no threshold met the sample agreement "
-                            f"for {target}. Retry with different samples, rephrase the class, "
-                            "or run with a fixed threshold."
-                        ),
+                        error=explanation,
                     )
-                    record = self._append(
-                        record,
-                        "assistant",
-                        f"I can't segment reliably from these images for {target}. You can "
-                        "describe the object differently (for example “hard hat” instead of "
-                        "“helmet”), or run at a fixed threshold such as 0.50.",
-                    )
+                    record = self._append(record, "assistant", explanation)
                     return self.view(self.dependencies.store.save(record))
-                chosen = [float(result.threshold) for result in results]  # type: ignore[arg-type]
+                chosen = [float(result.threshold) for _, result, _ in outcomes]  # type: ignore[arg-type]
+                chosen_prompts = [prompt for prompt, _, _ in outcomes]
             else:
                 chosen = [threshold for _ in classes]
+                chosen_prompts = [item.prompt for item in classes]
                 calibration = _manual_calibration_payload(
                     prompt=", ".join(item.prompt for item in classes), threshold=threshold
                 )
-                samples = []
                 record, _ = self._release_validator(selection, record)
 
             # A cancel request can arrive while calibration is running. Do not
@@ -868,8 +950,8 @@ class AgentService:
                 return self.view(current)
 
             label_classes = [
-                LabelClass(prompt=item.prompt, threshold=value, category=category)
-                for item, value, category in zip(classes, chosen, categories)
+                LabelClass(prompt=prompt, threshold=value, category=category)
+                for prompt, value, category in zip(chosen_prompts, chosen, categories)
             ]
             job = self.dependencies.labels.submit(
                 tenant_id=tenant_id,
@@ -893,7 +975,7 @@ class AgentService:
             )
             plural = "" if total_images == 1 else "s"
             if threshold is None:
-                sample_count = len(samples)
+                sample_count = len(sample_ids)
                 if len(classes) == 1:
                     calibrated = f"Calibrated at {chosen[0]:.2f}"
                 else:
@@ -1125,12 +1207,48 @@ class AgentService:
             raise KeyError(f"unknown asset: {missing[0]}")
         return [known[item] for item in asset_ids]
 
+    def _release_model(self, name: str) -> None:
+        """Unload a managed model; it reloads lazily on its next use."""
+
+        release = self.dependencies.release_models
+        if release is None:
+            return
+        try:
+            release(name)
+        except Exception:
+            logger.warning("could not release model %s", name, exc_info=True)
+
+    def _save_progress(
+        self, tenant_id: UUID, session_id: UUID, attempts: list[dict[str, Any]]
+    ) -> None:
+        """Publish calibration attempts as they finish, for the live view.
+
+        Re-reads the session so a concurrent cancel is never overwritten.
+        """
+
+        try:
+            current = self.dependencies.store.get(tenant_id=tenant_id, session_id=session_id)
+            if current.status != "calibrating":
+                return
+            self.dependencies.store.save(
+                replace(current, calibration={"status": "running", "progress": list(attempts)})
+            )
+        except Exception:
+            logger.warning("could not save calibration progress", exc_info=True)
+
     def _sample_images(
-        self, *, tenant_id: UUID, asset_ids: tuple[str, ...], sample_size: int
+        self,
+        *,
+        tenant_id: UUID | None = None,
+        asset_ids: tuple[str, ...] = (),
+        sample_size: int,
+        images: list | None = None,
+        text: str | None = None,
     ):
-        images = self.dependencies.images.resolve_many(
-            tenant_id=tenant_id, asset_ids=asset_ids
-        )
+        if images is None:
+            images = self.dependencies.images.resolve_many(
+                tenant_id=tenant_id, asset_ids=asset_ids
+            )
         if not images:
             raise ValueError("asset has no image or video frames to label")
         count = max(1, min(sample_size, len(images)))
@@ -1150,7 +1268,16 @@ class AgentService:
                     vector = None
                 if vector is not None:
                     embeddings[image.image_id] = vector
-        return select_calibration_images(images, count=count, embeddings=embeddings)
+        text_vector = None
+        embed_text = self.dependencies.text_embedder
+        if text and embed_text is not None and len(embeddings) == len(images):
+            try:
+                text_vector = embed_text(text)
+            except Exception:
+                logger.warning("could not embed the class text for sampling", exc_info=True)
+        return select_samples_for_target(
+            images, count=count, embeddings=embeddings, text_embedding=text_vector
+        )
 
     def _release_validator(
         self, selection: ValidatorSelection, record: AgentSessionRecord
@@ -1268,28 +1395,33 @@ def _calibration_payload(
         "validator_mode": selection.mode,
         "validator_model": selection.model,
         "notice": selection.current_notice(),
-        "attempts": [
-            {
-                "threshold": attempt.threshold,
-                "sample_count": attempt.sample_count,
-                "accepted_count": attempt.accepted_count,
-                "agreement": attempt.agreement,
-                "verdicts": [
-                    {
-                        "image_id": verdict.image_id,
-                        "accepted": verdict.accepted,
-                        "confidence": verdict.confidence,
-                        "reasoning": verdict.reasoning,
-                        "overlay_id": verdict.overlay_id,
-                    }
-                    for verdict in attempt.verdicts
-                ],
-            }
-            for attempt in result.attempts
-        ],
+        "attempts": [_attempt_payload(attempt) for attempt in result.attempts],
+        "forward_passes": result.forward_passes,
         "reason": result.reason,
         "timings": timings,
         "vlm_unloaded_after_calibration": bool(timings.get("vlm_unloaded", False)),
+    }
+
+
+def _attempt_payload(attempt) -> dict[str, Any]:
+    return {
+        "threshold": attempt.threshold,
+        "sample_count": attempt.sample_count,
+        "accepted_count": attempt.accepted_count,
+        "positive_count": attempt.positive_count,
+        "agreement": attempt.agreement,
+        "verdicts": [
+            {
+                "image_id": verdict.image_id,
+                "accepted": verdict.accepted,
+                "confidence": verdict.confidence,
+                "reasoning": verdict.reasoning,
+                "overlay_id": verdict.overlay_id,
+                "prediction_count": verdict.prediction_count,
+                "target_present": verdict.target_present,
+            }
+            for verdict in attempt.verdicts
+        ],
     }
 
 

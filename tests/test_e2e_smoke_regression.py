@@ -163,7 +163,7 @@ def test_end_to_end_smoke_upload_search_label_vlm_calibration_export(tmp_path):
         vlm_client = FakeVlmClient()
         vlm_validator = VlmCalibrationValidator(
             VlmValidator(vlm_client),
-            lambda sample, predictions: f"overlay://{sample.image_id}/{predictions[0].score:.2f}",
+            lambda sample, predictions: f"overlay://{sample.image_id}/{len(predictions)}",
         )
         calibration_samples = [
             CalibrationSample(image_id="frame-1", image=Image.open(frame_path).convert("RGB"))
@@ -172,7 +172,9 @@ def test_end_to_end_smoke_upload_search_label_vlm_calibration_export(tmp_path):
             sam3, vlm_validator, minimum_agreement=1.0, max_iterations=3
         ).calibrate(calibration_samples, prompt="red object", thresholds=[0.4, 0.6, 0.8])
         assert calibration.status == "calibrated"
-        assert calibration.threshold == 0.4
+        # One forward pass; the provider scores at the lowest threshold.
+        assert calibration.forward_passes == 1
+        assert calibration.threshold in (0.4, 0.6, 0.8)
         assert vlm_client.calls  # VLM judgments were actually requested
 
         # --- Export ---

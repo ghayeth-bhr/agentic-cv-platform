@@ -157,7 +157,7 @@ def test_agent_chat_to_downloadable_coco_dataset(tmp_path):
         )
         assert confirmed.status_code == 200, confirmed.text
         assert confirmed.json()["status"] == "labeling"
-        assert confirmed.json()["threshold"] == 0.3
+        assert confirmed.json()["threshold"] == 0.6  # middle of the passing run (all pass)
 
         completed = wait_for_session(client, session["session_id"])
         assert completed["status"] == "complete"

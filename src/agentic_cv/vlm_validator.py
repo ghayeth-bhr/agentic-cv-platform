@@ -110,6 +110,7 @@ class VlmValidator:
             self.client.judge(overlay_uri=overlay_uri, prompt=prompt)
         )
         self._calls += 1
+        self._released = False  # loaded again; a later release() must unload it
         self._cache[key] = judgment
         return judgment
 
@@ -167,11 +168,7 @@ class VlmCalibrationValidator:
         threshold: float | None = None,
     ) -> CalibrationTrace:
         if not predictions:
-            return CalibrationTrace(
-                accepted=False,
-                confidence=0.0,
-                reasoning="SAM 3 returned no masks to validate at this threshold",
-            )
+            return self._presence_trace(sample, prompt)
         low_score_count = sum(
             1 for prediction in predictions
             if prediction.score < self.minimum_prediction_score
@@ -208,6 +205,65 @@ class VlmCalibrationValidator:
             confidence=judgment.confidence,
             reasoning=judgment.reasoning,
             overlay_id=artifact.overlay_id,
+            target_present=judgment.target_present,
+        )
+
+    def _presence_trace(self, sample: CalibrationSample, prompt: str) -> CalibrationTrace:
+        """SAM 3 found nothing: correct if, and only if, the target is absent.
+
+        The plain image is judged once per sample (its overlay digest does not
+        change across thresholds, so the VLM cache answers the rest).
+        """
+
+        target = prompt.strip()
+        if self._failure_notice is not None:
+            return CalibrationTrace(
+                accepted=False,
+                confidence=0.0,
+                reasoning="SAM 3 returned no masks, and the vision check is unavailable.",
+            )
+        artifact = self._overlay_artifact(sample, [])
+        try:
+            judgment = self.validator.validate(
+                overlay_uri=artifact.uri,
+                prompt=_presence_instruction(target),
+                model_revision=self.model_revision,
+            )
+        except Exception as exc:
+            if self.fallback is None:
+                raise
+            self._failure_notice = (
+                "Vision validation failed during calibration "
+                f"({type(exc).__name__}: {exc}). Calibration continued with the "
+                "fallback \"at least one prediction\" check."
+            )
+            return CalibrationTrace(
+                accepted=False,
+                confidence=0.0,
+                reasoning="SAM 3 returned no masks, and the vision check is unavailable.",
+            )
+        # Measured on qwen3-vl:4b: for a plain image it answers
+        # target_present=false correctly ("a buffalo, not an elephant") but
+        # with a low confidence, because the instruction tells it to leave
+        # the mask fields false. Presence is the only question here, so the
+        # boolean decides.
+        if not judgment.target_present:
+            return CalibrationTrace(
+                accepted=True,
+                confidence=judgment.confidence,
+                reasoning=(
+                    f"No {target} in this image, so returning no masks is correct. "
+                    f"{judgment.reasoning}"
+                ),
+                overlay_id=artifact.overlay_id,
+                target_present=False,
+            )
+        return CalibrationTrace(
+            accepted=False,
+            confidence=judgment.confidence,
+            reasoning=f"SAM 3 found nothing, but the image shows a {target}. {judgment.reasoning}",
+            overlay_id=artifact.overlay_id,
+            target_present=bool(judgment.target_present),
         )
 
     def _fallback_trace(
@@ -267,5 +323,15 @@ def _validation_instruction(prompt: str) -> str:
         f"fully_detected: every visible {target} is covered by a mask. "
         f"false_positive: a mask covers background or something that is not a {target}. "
         "mask_tight: the mask follows the object boundary closely. "
+        "Return confidence from 0 to 1 and one short reasoning sentence."
+    )
+
+
+def _presence_instruction(target: str) -> str:
+    return (
+        f"Target object: {target}. The image has NO masks or boxes drawn on it. "
+        f"Answer one question: does at least one {target} appear anywhere in the photo? "
+        f"target_present: true if a {target} is visible, even partly; false otherwise. "
+        "Set fully_detected, false_positive and mask_tight to false. "
         "Return confidence from 0 to 1 and one short reasoning sentence."
     )

@@ -165,6 +165,7 @@ def default_validator_selection(
                 model=model,
                 base_url=base_url,
                 timeout_sec=timeout_sec,
+                max_side=_env_int("AGENTIC_CV_VLM_MAX_SIDE", 768),
             ),
             max_calls=max_calls,
             minimum_confidence=minimum_confidence,
@@ -210,3 +211,10 @@ def _prediction_digest(image_id: str, predictions: list[Sam3Prediction]) -> str:
         if prediction.mask is not None:
             digest.update(np.asarray(prediction.mask, dtype=np.uint8).tobytes())
     return digest.hexdigest()[:24]
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.getenv(name, str(default))))
+    except ValueError:
+        return default
