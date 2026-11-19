@@ -38,7 +38,8 @@ def test_vlm_calibration_validator_bridges_calibration_and_reuses_cache():
 
     assert validator(sample, predictions) is True
     assert validator(sample, predictions) is True
-    assert client.calls == [("overlay://image-1", "image-1")]
+    assert client.calls[0][0] == "overlay://image-1"
+    assert "Target object: image-1" in client.calls[0][1]
 
 
 def test_vlm_calibration_validator_runs_inside_calibration():
@@ -55,4 +56,55 @@ def test_vlm_calibration_validator_runs_inside_calibration():
 
     assert result.status == "calibrated"
     assert result.threshold == 0.6
-    assert client.calls == [("overlay://image-1/0.6", "bear")]
+    assert client.calls[0][0] == "overlay://image-1/0.6"
+    assert "Target object: bear" in client.calls[0][1]
+    verdict = result.attempts[0].verdicts[0]
+    assert verdict.accepted is True
+    assert verdict.confidence == 0.9
+    assert verdict.reasoning == "The target is fully visible."
+    assert verdict.overlay_id == "0.6"
+
+
+def test_vlm_calibration_trace_skips_empty_predictions_without_a_vlm_call():
+    client = FakeVlmClient()
+    validator = VlmCalibrationValidator(
+        VlmValidator(client),
+        lambda sample, predictions: f"overlay://{sample.image_id}",
+    )
+    sample = CalibrationSample(image_id="empty", image=Image.new("RGB", (1, 1)))
+
+    trace = validator.validate_with_trace(sample, [], "bear", threshold=0.9)
+
+    assert trace.accepted is False
+    assert trace.overlay_id is None
+    assert "no masks" in (trace.reasoning or "").lower()
+    assert client.calls == []
+
+
+def test_vlm_runtime_failure_falls_back_once_and_reports_the_reason():
+    class FailingClient:
+        def __init__(self):
+            self.calls = 0
+
+        def judge(self, *, overlay_uri, prompt):
+            self.calls += 1
+            raise RuntimeError("Ollama request timed out")
+
+    client = FailingClient()
+    validator = VlmCalibrationValidator(
+        VlmValidator(client),
+        lambda sample, predictions: f"overlay://{sample.image_id}",
+        fallback=lambda sample, predictions: len(predictions) > 0,
+    )
+    sample = CalibrationSample(image_id="image-1", image=Image.new("RGB", (1, 1)))
+    predictions = [Sam3Prediction(score=0.8, box=(0, 0, 1, 1), mask=None)]
+
+    first = validator.validate_with_trace(sample, predictions, "bear")
+    second = validator.validate_with_trace(sample, predictions, "bear")
+
+    assert first.accepted is True
+    assert second.accepted is True
+    assert first.overlay_id is None
+    assert "timed out" in (validator.failure_notice or "")
+    assert "fallback" in (validator.failure_notice or "")
+    assert client.calls == 1

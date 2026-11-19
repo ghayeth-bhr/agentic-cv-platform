@@ -48,6 +48,8 @@ class VectorIndex(Protocol):
 
     def get_record(self, record_id: str) -> ImageRecord | None: ...
 
+    def get_embedding(self, record_id: str) -> np.ndarray | None: ...
+
     def search(
         self,
         query_embedding: Sequence[float],
@@ -80,6 +82,12 @@ class LocalVectorIndex:
         if item is None:
             return None
         return item[0]
+
+    def get_embedding(self, record_id: str) -> np.ndarray | None:
+        item = self._records.get(record_id)
+        if item is None:
+            return None
+        return item[1].copy()
 
     def search(
         self,

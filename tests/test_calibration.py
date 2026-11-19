@@ -1,7 +1,12 @@
 from PIL import Image
 import pytest
 
-from agentic_cv.calibration import CalibrationSample, Sam3Calibrator
+from agentic_cv.calibration import (
+    CalibrationCancelled,
+    CalibrationSample,
+    CalibrationTrace,
+    Sam3Calibrator,
+)
 from agentic_cv.sam3 import Sam3Prediction
 
 
@@ -42,6 +47,52 @@ def test_calibration_reports_max_iterations_without_false_success():
     assert result.threshold is None
     assert len(result.attempts) == 2
     assert result.reason is not None
+
+
+def test_calibration_keeps_per_sample_trace_evidence():
+    class TraceValidator:
+        def validate_with_trace(self, sample, predictions, prompt, *, threshold=None):
+            return CalibrationTrace(
+                accepted=sample.image_id != "1",
+                confidence=0.91,
+                reasoning=f"checked {sample.image_id}",
+                overlay_id=f"overlay-{sample.image_id}.png",
+            )
+
+    result = Sam3Calibrator(
+        FakeProvider(), TraceValidator(), minimum_agreement=0.4
+    ).calibrate(samples(2), prompt="bear", thresholds=[0.5])
+
+    verdicts = result.attempts[0].verdicts
+    assert [verdict.accepted for verdict in verdicts] == [True, False]
+    assert verdicts[0].confidence == 0.91
+    assert verdicts[0].reasoning == "checked 0"
+    assert verdicts[0].overlay_id == "overlay-0.png"
+
+
+def test_calibration_stops_between_images_when_cancelled():
+    class CountingProvider:
+        def __init__(self):
+            self.thresholds = []
+
+        def predict(self, image, prompt, *, threshold=None, mask_threshold=None):
+            self.thresholds.append(threshold)
+            return [Sam3Prediction(score=threshold, box=(0, 0, 1, 1), mask=None)]
+
+    provider = CountingProvider()
+
+    def should_cancel():
+        return len(provider.thresholds) >= 1
+
+    with pytest.raises(CalibrationCancelled):
+        Sam3Calibrator(provider, lambda sample, predictions: True).calibrate(
+            samples(3),
+            prompt="bear",
+            thresholds=[0.5],
+            should_cancel=should_cancel,
+        )
+
+    assert provider.thresholds == [0.5]
 
 
 @pytest.mark.parametrize(

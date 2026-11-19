@@ -15,6 +15,7 @@ from pycocotools.coco import COCO
 
 from agentic_cv.agent import RulesTaskPlanner
 from agentic_cv.application import LocalAppConfig, create_local_app
+from agentic_cv.calibration_validation import any_prediction_selection
 from agentic_cv.sam3 import Sam3Prediction
 
 
@@ -109,6 +110,9 @@ def test_manual_refinement_click_accept_rebuild_and_export_in_browser(tmp_path):
             sam3_provider=FakeSam3(),
             refinement_provider=FakeRefiner(),
             agent_planner=RulesTaskPlanner(),
+            calibration_validator_factory=(
+                lambda tenant_id, session_id: any_prediction_selection()
+            ),
             calibration_timeout_sec=30,
             start_workers=True,
             worker_poll_interval=0.05,
@@ -198,7 +202,7 @@ def test_manual_refinement_click_accept_rebuild_and_export_in_browser(tmp_path):
             refined = page.locator(".dataset-card").filter(has_text="refined").last
             expect(refined).to_be_visible()
             with page.expect_download(timeout=20_000) as download_info:
-                refined.get_by_role("button", name="Export COCO").click()
+                refined.get_by_role("button", name="Export", exact=True).click()
             download = download_info.value
             archive = tmp_path / "refined.zip"
             download.save_as(archive)

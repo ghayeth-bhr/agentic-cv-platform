@@ -37,6 +37,7 @@ UI_ROUTES = {
     "/v1/agent/sessions/{session_id}": {"get"},
     "/v1/agent/sessions/{session_id}/confirm": {"post"},
     "/v1/agent/sessions/{session_id}/cancel": {"post"},
+    "/v1/agent/sessions/{session_id}/calibration-overlays/{overlay_id}": {"get"},
     "/v1/datasets": {"get"},
     "/v1/datasets/{version_id}/images": {"get"},
     "/v1/datasets/{version_id}/images/{image_id}/file": {"get"},
@@ -148,4 +149,7 @@ def test_ui_selector_and_navigation_contract():
         "datasets",
         "jobs",
     ]
+    assert 'format.dataset.exportFormat = "true"' in javascript
+    for format_value in ("coco", "yolo-detection", "yolo-segmentation"):
+        assert f'["{format_value}", ' in javascript
     assert "tenant-id" not in html
