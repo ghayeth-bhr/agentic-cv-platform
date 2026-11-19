@@ -39,6 +39,7 @@ This repository now contains a working local product path: **Assets** for upload
 | Dataset-card COCO / YOLO detection / YOLO segmentation export selector | Added in P7 |
 | Doctor warning for CPU-only torch on an NVIDIA machine + Windows cu124 lock config | Added in P7 |
 | Real 20-image VLM journey: 5/5 verdicts, 5.82 GB whole-GPU peak, 383 s calibration/label/export | Measured in P7 |
+| Run-scoped annotation sets, tombstone deletes, persisted source-aware splits, 0-based YOLO with split folders, integer-id COCO, time-based shared video frames, SQLite WAL | Fixed in Phase 0 ([`docs/branches/data-correctness.md`](docs/branches/data-correctness.md)) |
 
 The original root README was a 950-line concatenation of 23 branch READMEs. Those are preserved verbatim in [`docs/branches/`](docs/branches/README.md).
 
@@ -220,6 +221,7 @@ Heavy dependencies are lazy or injectable. Default `pytest` runs with fakes and 
 | GET | `/v1/datasets/{id}/images` | list dataset images and their annotations |
 | GET | `/v1/datasets/{id}/images/{image_id}/file` | fetch the image bytes for review |
 | POST | `/v1/datasets/{id}/rebuild` | rebuild a version from its latest annotation revisions |
+| DELETE | `/v1/datasets/{id}/images/{image_id}/annotations/{annotation_id}` | retire an annotation (applied by the next rebuild) |
 | WS | `/v1/refinement/{version_id}/{image_id}` | click-point mask preview (tenant query parameter) |
 | POST | `/v1/refinements/{session_id}/accept` | save the previewed mask as an annotation revision |
 | POST | `/v1/calibration/run` | threshold calibration on uploaded images |
@@ -272,6 +274,8 @@ Default runtime uses SQLite; `AGENTIC_CV_POSTGRES_DSN` enables PostgreSQL stores
 | `AGENTIC_CV_EMBEDDING_VRAM_MB` | `2304` | SigLIP2 footprint used by the unload policy |
 | `AGENTIC_CV_SAM3_VRAM_MB` | `2048` | SAM 3 footprint used by the unload policy |
 | `AGENTIC_CV_POSTGRES_DSN` | unset | opt-in PostgreSQL + pgvector |
+| `AGENTIC_CV_VIDEO_SAMPLE_FPS` | `1.0` | video frames sampled per second (search and labeling share them) |
+| `AGENTIC_CV_VIDEO_MAX_FRAMES` | `1000` | per-video frame cap; `0` = unlimited (a warning is logged when reached) |
 | `AGENTIC_CV_AGENT_PLANNER` | `ollama` | set `rules` to skip the text model entirely |
 | `AGENTIC_CV_TEXT_MODEL` | `qwen3-vl:4b` | Ollama model used for task-spec JSON |
 | `AGENTIC_CV_OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint |

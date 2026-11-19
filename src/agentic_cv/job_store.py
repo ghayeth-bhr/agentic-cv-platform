@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Protocol
 from uuid import UUID, uuid4
+from .sqlite_utils import connect_sqlite
 
 JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
 ALLOWED_TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
@@ -73,7 +74,7 @@ class JobStoreBackend(Protocol):
 
 class JobStore:
     def __init__(self, path: str) -> None:
-        self._connection = sqlite3.connect(path, check_same_thread=False)
+        self._connection = connect_sqlite(path)
         self._connection.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self._connection.execute("PRAGMA foreign_keys = ON")

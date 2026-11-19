@@ -11,6 +11,7 @@ from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 from .dataset import Annotation, DatasetCategory, DatasetImage, DatasetVersion
+from .sqlite_utils import connect_sqlite
 
 
 def _utc_now() -> str:
@@ -46,7 +47,7 @@ class DatasetVersionBackend(Protocol):
 
 class DatasetVersionStore:
     def __init__(self, path: str) -> None:
-        self._connection = sqlite3.connect(path, check_same_thread=False)
+        self._connection = connect_sqlite(path)
         self._connection.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self._connection.execute(
@@ -145,10 +146,11 @@ class DatasetVersionStore:
 
 
 def _dataset_dict(dataset: DatasetVersion) -> dict:
-    return {
+    value = {
         "images": [
             {"image_id": image.image_id, "file_name": image.file_name,
-             "width": image.width, "height": image.height}
+             "width": image.width, "height": image.height,
+             **({"split": image.split} if image.split is not None else {})}
             for image in dataset.images
         ],
         "categories": [
@@ -163,6 +165,13 @@ def _dataset_dict(dataset: DatasetVersion) -> dict:
             for annotation in dataset.annotations
         ],
     }
+    # Optional keys are omitted when unset so versions created before they
+    # existed keep the same encoding (idempotency compares encodings).
+    if dataset.annotation_set is not None:
+        value["annotation_set"] = dataset.annotation_set
+    if dataset.source_asset_ids:
+        value["source_asset_ids"] = list(dataset.source_asset_ids)
+    return value
 
 
 def _dataset_from_dict(value: dict) -> DatasetVersion:
@@ -178,4 +187,6 @@ def _dataset_from_dict(value: dict) -> DatasetVersion:
             )
             for annotation in value["annotations"]
         ),
+        annotation_set=value.get("annotation_set"),
+        source_asset_ids=tuple(value.get("source_asset_ids", ())),
     )

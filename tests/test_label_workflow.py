@@ -13,6 +13,7 @@ from agentic_cv.label_workflow import DurableLabelWorkflow, JobCancelled, LabelW
 from agentic_cv.outbox import Outbox
 from agentic_cv.preview import PreviewStore
 from agentic_cv.sam3 import Sam3Prediction
+from agentic_cv.annotation_sets import job_set_id, scoped_id
 
 
 class FakeProvider:
@@ -59,7 +60,7 @@ def test_successful_workflow_persists_annotations_and_event(tmp_path, caplog):
 
     assert len(result.dataset.annotations) == 1
     assert jobs.get(job.job_id).status == "succeeded"
-    assert annotations.latest(tenant_id=tenant_id, image_id="frame-1", annotation_id="frame-1:0").revision == 1
+    assert annotations.latest(tenant_id=tenant_id, image_id="frame-1", annotation_id=scoped_id(job_set_id(job.job_id), "frame-1:0")).revision == 1
     assert outbox.pending()[0].event_type == "LabelRunCompleted"
     assert [event.image_id for event in preview.list_for_job(tenant_id=tenant_id, job_id=job.job_id)] == ["frame-1"]
     messages = [r.message for r in caplog.records if r.name == "agentic_cv.workflow"]

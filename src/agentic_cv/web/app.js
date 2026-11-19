@@ -2210,7 +2210,7 @@
     const hint = node(
       "p",
       "review-hint",
-      "A click ranks the SAM 3 masks for this image's category. Negative clicks push a mask away; if no preview appears, try another point."
+      "A click ranks the SAM 3 masks for this image's category. Click on an existing object to correct it, or elsewhere to add a missed one. Negative clicks push a mask away; if no preview appears, try another point."
     );
     controls.append(modes, save, hint);
     workspace.append(stage, labelEl, controls);
@@ -2415,6 +2415,27 @@
     reviewStatus("Finding the best mask for that point…", "busy");
   }
 
+  // Clicking on an existing object corrects that annotation; clicking anywhere
+  // else adds a new one. (Replacing the first annotation blindly overwrote
+  // correct labels when the user was adding a missed object.)
+  function annotationUnderClick(annotations, points) {
+    const positive = (points || []).find((point) => point.label === "positive");
+    if (!positive || !annotations || !annotations.length) return null;
+    let best = null;
+    let bestArea = Infinity;
+    for (const annotation of annotations) {
+      const [x, y, width, height] = annotation.bbox || [];
+      if (positive.x >= x && positive.x <= x + width && positive.y >= y && positive.y <= y + height) {
+        const area = width * height;
+        if (area < bestArea) {
+          best = annotation;
+          bestArea = area;
+        }
+      }
+    }
+    return best;
+  }
+
   async function acceptReview() {
     const review = state.review;
     const snapshot = review.snapshot;
@@ -2425,7 +2446,7 @@
     setBusy(save, true, "Saving…");
     reviewStatus("Saving the annotation revision…", "busy");
     try {
-      const existing = image.annotations && image.annotations.length ? image.annotations[0] : null;
+      const existing = annotationUnderClick(image.annotations, snapshot.points);
       const accepted = await request(
         `/v1/refinements/${encodeURIComponent(snapshot.session_id)}/accept`,
         {

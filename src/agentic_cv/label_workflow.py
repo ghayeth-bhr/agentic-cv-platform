@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Literal
 from uuid import UUID
 
+from .annotation_sets import job_set_id, live_in_set
 from .annotation_store import AnnotationRevisionBackend
 from .batch_labeling import BatchLabelResult, LabelImage, Sam3BatchLabeler
 from .contracts import EventEnvelope
@@ -96,14 +97,35 @@ class DurableLabelWorkflow:
             },
         )
 
+        set_id = job_set_id(job_id)
+
         def save_image_annotations(image_id, dataset_image, image_annotations) -> None:
             current = self.dependencies.jobs.get(job_id)
             if current.cancel_requested:
                 raise JobCancelled(f"job {job_id} cancellation requested")
+            written = set()
             for annotation in image_annotations:
                 self.dependencies.annotations.save(
                     tenant_id=tenant_id,
                     annotation=annotation,
+                    author_id="sam3-batch",
+                    expected_revision=None,
+                )
+                written.add(annotation.annotation_id)
+            # A retried job (expired lease) may have written more annotations
+            # for this image on an earlier attempt; retire the leftovers.
+            stale = live_in_set(
+                self.dependencies.annotations.list_latest(
+                    tenant_id=tenant_id, image_ids=[image_id]
+                ),
+                set_id,
+            )
+            for revision in stale:
+                if revision.annotation.annotation_id in written:
+                    continue
+                self.dependencies.annotations.save(
+                    tenant_id=tenant_id,
+                    annotation=replace(revision.annotation, deleted=True),
                     author_id="sam3-batch",
                     expected_revision=None,
                 )
@@ -142,6 +164,7 @@ class DurableLabelWorkflow:
                 images, prompt=prompt, threshold=threshold, category=category, task=task,
                 on_progress=checkpoint,
                 on_image=save_image_annotations,
+                annotation_namespace=set_id,
             )
             self.dependencies.jobs.transition(job.job_id, "succeeded")
             self.dependencies.outbox.enqueue(

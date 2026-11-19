@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from uuid import UUID
 
 from PIL import Image
 
+from .annotation_sets import job_set_id, live_in_set
 from .annotation_store import AnnotationRevisionBackend
 from .batch_labeling import LabelImage
 from .dataset import DatasetCategory, DatasetImage, DatasetVersion
@@ -75,14 +76,14 @@ class DatasetBuilder:
             name=str(payload["category_name"]),
         )
         label_images = self.images.resolve(tenant_id=tenant_id, asset_id=asset_id)
+        set_id = job_set_id(job_id)
         revisions = self.annotations.list_latest(
             tenant_id=tenant_id,
             image_ids=[image.image_id for image in label_images],
         )
         annotations = tuple(
             revision.annotation
-            for revision in revisions
-            if revision.annotation.category_id == category_id
+            for revision in live_in_set(revisions, set_id, category_ids={category_id})
         )
 
         dataset_images: list[DatasetImage] = []
@@ -103,7 +104,9 @@ class DatasetBuilder:
             images=tuple(dataset_images),
             categories=(category,),
             annotations=annotations,
-        )
+            annotation_set=set_id,
+            source_asset_ids=(asset_id,),
+        ).with_splits()
         record = self.versions.create(
             tenant_id=tenant_id,
             name=name.strip() or f"Label run {job_id}",
@@ -138,16 +141,12 @@ class DatasetBuilder:
             tenant_id=tenant_id,
             image_ids=[image.image_id for image in previous.dataset.images],
         )
+        set_id = previous.dataset.annotation_set
         annotations = tuple(
             revision.annotation
-            for revision in revisions
-            if revision.annotation.category_id in category_ids
+            for revision in live_in_set(revisions, set_id, category_ids=category_ids)
         )
-        dataset = DatasetVersion(
-            images=previous.dataset.images,
-            categories=previous.dataset.categories,
-            annotations=annotations,
-        )
+        dataset = replace(previous.dataset, annotations=annotations).with_splits()
         record = self.versions.create(
             tenant_id=tenant_id,
             name=name.strip() or f"{previous.name} — refined",

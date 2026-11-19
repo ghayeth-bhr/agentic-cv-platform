@@ -31,6 +31,7 @@ from agentic_cv.sam3 import Sam3Prediction
 from agentic_cv.semantic_search import ImageRecord, LocalVectorIndex, SemanticSearchService
 from agentic_cv.uploads import ResumableUploadService
 from agentic_cv.vlm_validator import VlmCalibrationValidator, VlmValidator
+from agentic_cv.annotation_sets import job_set_id, scoped_id
 
 
 class FakeEmbeddingProvider:
@@ -155,7 +156,7 @@ def test_end_to_end_smoke_upload_search_label_vlm_calibration_export(tmp_path):
         )
         assert jobs.get(label_job.job_id).status == "succeeded"
         assert len(label_result.dataset.annotations) == 1
-        assert annotations.latest(tenant_id=tenant_id, image_id="frame-1", annotation_id="frame-1:0").revision == 1
+        assert annotations.latest(tenant_id=tenant_id, image_id="frame-1", annotation_id=scoped_id(job_set_id(label_job.job_id), "frame-1:0")).revision == 1
         assert any(event.event_type == "LabelRunCompleted" for event in outbox.pending())
 
         # --- VLM calibration ---

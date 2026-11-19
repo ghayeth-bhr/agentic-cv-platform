@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol
 from uuid import UUID
+from .sqlite_utils import connect_sqlite
 
 
 def _utc_now() -> str:
@@ -49,7 +50,7 @@ class PreviewBackend(Protocol):
 
 class PreviewStore:
     def __init__(self, path: str) -> None:
-        self._connection = sqlite3.connect(path, check_same_thread=False)
+        self._connection = connect_sqlite(path)
         self._connection.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self._connection.execute(
