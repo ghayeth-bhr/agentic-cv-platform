@@ -241,7 +241,9 @@ async def _wait_index_job(client, headers, job: dict, *, timeout: float) -> dict
     raise TimeoutError(f"index job did not finish: {current}")
 
 
-async def _wait_session(client, headers, session_id: str, *, timeout: float) -> dict:
+async def _wait_session(
+    client, headers, session_id: str, *, timeout: float, phase_times: dict | None = None
+) -> dict:
     deadline = time.monotonic() + timeout
     last = None
     while time.monotonic() < deadline:
@@ -249,6 +251,8 @@ async def _wait_session(client, headers, session_id: str, *, timeout: float) -> 
         response.raise_for_status()
         body = response.json()
         last = body
+        if phase_times is not None:
+            phase_times.setdefault(body["status"], time.perf_counter())
         if body["status"] in {"complete", "failed", "cancelled", "needs_attention"}:
             return body
         await asyncio.sleep(0.25)
@@ -393,6 +397,8 @@ async def _run(args) -> dict:
                 if session["status"] != "awaiting_confirmation":
                     raise RuntimeError(f"unexpected agent status: {session}")
                 sampler.mark()
+                phase_times: dict[str, float] = {}
+                confirm_started = time.perf_counter()
                 confirmed = await client.post(
                     f"/v1/agent/sessions/{session['session_id']}/confirm",
                     headers=headers,
@@ -429,6 +435,10 @@ async def _run(args) -> dict:
                         for verdict in verdicts
                         if verdict.get("overlay_id")
                     ],
+                    "timings": calibration.get("timings") or {},
+                    "vlm_unloaded_after_calibration": calibration.get(
+                        "vlm_unloaded_after_calibration", False
+                    ),
                 }
                 if args.require_vlm and calibration.get("validator_mode") != "vlm":
                     raise RuntimeError(
@@ -450,6 +460,7 @@ async def _run(args) -> dict:
                     headers,
                     session["session_id"],
                     timeout=args.timeout,
+                    phase_times=phase_times,
                 )
                 checkpoint("calibrate_label_export", started)
                 if completed["status"] != "complete":
@@ -561,6 +572,39 @@ async def _run(args) -> dict:
                         checkpoint("refined_export", started)
 
                 report["api_info_end"] = (await client.get("/api-info")).json()
+        models = (
+            report["api_info_end"].get("model_runtime", {})
+            .get("resources", {})
+            .get("models", {})
+        )
+        model_load_sec = round(
+            sum(float(item.get("load_seconds", 0.0)) for item in models.values()), 2
+        )
+        labeling_sec = (
+            round(phase_times["exporting"] - phase_times["labeling"], 2)
+            if "exporting" in phase_times and "labeling" in phase_times
+            else None
+        )
+        export_sec = (
+            round(phase_times["complete"] - phase_times["exporting"], 2)
+            if "complete" in phase_times and "exporting" in phase_times
+            else None
+        )
+        report["phases"] = {
+            "model_load_sec": model_load_sec,
+            "model_load_detail_sec": {
+                name: item.get("load_seconds", 0.0) for name, item in models.items()
+            },
+            "calibration_sec": (report["calibration"].get("timings") or {}).get(
+                "calibration_sec"
+            ),
+            "validator_unload_sec": (report["calibration"].get("timings") or {}).get(
+                "validator_unload_sec"
+            ),
+            "labeling_sec": labeling_sec,
+            "export_sec": export_sec,
+            "confirm_to_complete_sec": round(time.perf_counter() - confirm_started, 2),
+        }
         sampler.stop()
         report["peak"] = _peak(torch)
         report["nvidia_smi"] = sampler.report()

@@ -7,6 +7,7 @@ import os
 import queue
 import re
 import threading
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -337,6 +338,7 @@ class AgentService:
 
         record = replace(record, status="calibrating", error=None)
         record = self.dependencies.store.save(record)
+        selection: ValidatorSelection | None = None
         try:
             selection = self._select_validator(
                 tenant_id=tenant_id, session_id=session_id
@@ -345,6 +347,7 @@ class AgentService:
             if initial_notice:
                 record = self._append(record, "assistant", initial_notice)
                 record = self.dependencies.store.save(record)
+            calibration_started = time.perf_counter()
             label_images = self._sample_images(
                 tenant_id=tenant_id,
                 asset_id=record.asset_id,
@@ -384,26 +387,34 @@ class AgentService:
                 finally:
                     with self._calibration_lock:
                         self._calibration_cancels.pop(session_id, None)
-                calibration = _calibration_payload(result, selection)
+                timing = {
+                    "calibration_sec": round(time.perf_counter() - calibration_started, 2)
+                }
                 final_notice = selection.current_notice()
                 if final_notice and final_notice != initial_notice:
                     record = self._append(record, "assistant", final_notice)
                     record = self.dependencies.store.save(record)
+                record, release_timing = self._release_validator(selection, record)
+                timing.update(release_timing)
+                calibration = _calibration_payload(result, selection, timings=timing)
                 if result.status != "calibrated" or result.threshold is None:
+                    target = record.prompt or "that object"
                     record = replace(
                         record,
                         status="needs_attention",
                         calibration=calibration,
                         error=(
-                            "Calibration did not find a threshold with enough sample agreement. "
-                            "Retry with different samples, or run with a fixed threshold."
+                            f"I can't segment reliably: no threshold met the sample agreement "
+                            f"for “{target}”. Retry with different samples, or run with a "
+                            "fixed threshold."
                         ),
                     )
                     record = self._append(
                         record,
                         "assistant",
-                        "Calibration did not reach agreement. I can retry, or you can run at "
-                        "a fixed threshold such as 0.50.",
+                        f"I can't segment reliably from these images for “{target}”. I can "
+                        "retry with different samples, or you can run at a fixed threshold "
+                        "such as 0.50.",
                     )
                     return self.view(self.dependencies.store.save(record))
                 chosen_threshold = result.threshold
@@ -413,6 +424,7 @@ class AgentService:
                     prompt=record.prompt or "", threshold=threshold
                 )
                 samples = []
+                record, _ = self._release_validator(selection, record)
 
             # A cancel request can arrive while calibration is running. Do not
             # start labeling after the user has already cancelled the run.
@@ -456,11 +468,15 @@ class AgentService:
             record = self.dependencies.store.save(record)
             return self.view(record)
         except CalibrationTimeoutError as exc:
+            if selection is not None:
+                record, _ = self._release_validator(selection, record)
             record = replace(record, status="failed", error=str(exc))
             record = self._append(record, "assistant", str(exc))
             self.dependencies.store.save(record)
             raise
         except CalibrationCancelled as exc:
+            if selection is not None:
+                record, _ = self._release_validator(selection, record)
             current = self.dependencies.store.get(
                 tenant_id=tenant_id, session_id=session_id
             )
@@ -471,11 +487,15 @@ class AgentService:
             self.dependencies.store.save(record)
             raise
         except ModelUnavailableError as exc:
+            if selection is not None:
+                record, _ = self._release_validator(selection, record)
             record = replace(record, status="failed", error=str(exc))
             record = self._append(record, "assistant", str(exc))
             self.dependencies.store.save(record)
             raise
         except Exception as exc:
+            if selection is not None:
+                record, _ = self._release_validator(selection, record)
             record = replace(record, status="failed", error=str(exc))
             record = self._append(record, "assistant", f"The labeling run could not start: {exc}")
             self.dependencies.store.save(record)
@@ -673,6 +693,31 @@ class AgentService:
                     embeddings[image.image_id] = vector
         return select_calibration_images(images, count=count, embeddings=embeddings)
 
+    def _release_validator(
+        self, selection: ValidatorSelection, record: AgentSessionRecord
+    ) -> tuple[AgentSessionRecord, dict[str, Any]]:
+        release = selection.release
+        if release is None:
+            return record, {"vlm_unloaded": False, "validator_unload_sec": 0.0}
+        started = time.perf_counter()
+        try:
+            unloaded = bool(release())
+        except Exception:
+            logger.warning("validator unload after calibration failed", exc_info=True)
+            unloaded = False
+        timing = {
+            "vlm_unloaded": unloaded,
+            "validator_unload_sec": round(time.perf_counter() - started, 2),
+        }
+        if unloaded:
+            record = self._append(
+                record,
+                "assistant",
+                "Unloaded the vision validator after calibration; whole-asset labeling "
+                "continues with SAM 3 only.",
+            )
+        return record, timing
+
     def _select_validator(
         self, *, tenant_id: UUID, session_id: UUID
     ) -> ValidatorSelection:
@@ -747,8 +792,12 @@ class AgentService:
 
 
 def _calibration_payload(
-    result: CalibrationResult, selection: ValidatorSelection
+    result: CalibrationResult,
+    selection: ValidatorSelection,
+    *,
+    timings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    timings = timings or {}
     return {
         "status": result.status,
         "prompt": result.prompt,
@@ -776,6 +825,8 @@ def _calibration_payload(
             for attempt in result.attempts
         ],
         "reason": result.reason,
+        "timings": timings,
+        "vlm_unloaded_after_calibration": bool(timings.get("vlm_unloaded", False)),
     }
 
 

@@ -85,6 +85,7 @@ class VlmValidator:
         self.max_calls = max_calls
         self.minimum_confidence = minimum_confidence
         self._calls = 0
+        self._released = False
         self._cache: dict[tuple[str, str, str], ValidationJudgment] = {}
 
     @property
@@ -115,6 +116,19 @@ class VlmValidator:
     def accepts(self, **kwargs: Any) -> bool:
         return self.validate(**kwargs).accepted(minimum_confidence=self.minimum_confidence)
 
+    def release(self) -> bool:
+        """Unload the VLM after calibration; safe to call more than once."""
+
+        if self._released or self.calls_made == 0:
+            return False
+        unload = getattr(self.client, "unload", None)
+        if not callable(unload):
+            return False
+        released = bool(unload())
+        if released:
+            self._released = True
+        return released
+
 
 class VlmCalibrationValidator:
     """Adapt VLM judgments to the callable contract used by calibration."""
@@ -126,16 +140,23 @@ class VlmCalibrationValidator:
         *,
         model_revision: str = "default",
         fallback: Validator | None = None,
+        minimum_prediction_score: float = 0.0,
     ) -> None:
+        if not 0 <= minimum_prediction_score <= 1:
+            raise ValueError("minimum_prediction_score must be between 0 and 1")
         self.validator = validator
         self.overlay_builder = overlay_builder
         self.model_revision = model_revision
         self.fallback = fallback
+        self.minimum_prediction_score = minimum_prediction_score
         self._failure_notice: str | None = None
 
     @property
     def failure_notice(self) -> str | None:
         return self._failure_notice
+
+    def release(self) -> bool:
+        return self.validator.release()
 
     def validate_with_trace(
         self,
@@ -150,6 +171,19 @@ class VlmCalibrationValidator:
                 accepted=False,
                 confidence=0.0,
                 reasoning="SAM 3 returned no masks to validate at this threshold",
+            )
+        low_score_count = sum(
+            1 for prediction in predictions
+            if prediction.score < self.minimum_prediction_score
+        )
+        if low_score_count:
+            return CalibrationTrace(
+                accepted=False,
+                confidence=0.0,
+                reasoning=(
+                    f"Rejected {low_score_count} low-score mask(s) below "
+                    f"{self.minimum_prediction_score:.2f}; this threshold is too permissive."
+                ),
             )
         if self._failure_notice is not None:
             return self._fallback_trace(sample, predictions)

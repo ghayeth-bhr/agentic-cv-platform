@@ -562,3 +562,67 @@ def test_cancel_during_calibration_stops_the_run(tmp_path):
         response = response_holder["response"]
         assert response.status_code == 200, response.text
         assert response.json()["status"] == "cancelled"
+
+
+def test_absent_target_ends_with_cant_segment_reliably(tmp_path):
+    with TestClient(
+        make_app(tmp_path, NoPredictionSam3(), start_workers=False),
+        raise_server_exceptions=False,
+    ) as client:
+        asset_id = upload_image(client, name="absent")
+        session = create_session(
+            client, asset_id, message="Create a segmentation dataset of purple unicorns."
+        )
+        confirmed = client.post(
+            f"/v1/agent/sessions/{session['session_id']}/confirm",
+            headers=headers(),
+            json={},
+        )
+        assert confirmed.status_code == 200, confirmed.text
+        body = confirmed.json()
+        assert body["status"] == "needs_attention"
+        assert "can't segment reliably" in body["messages"][-1]["content"]
+        assert body["calibration"]["timings"]["calibration_sec"] >= 0
+
+
+def test_validator_is_released_before_the_labeling_message(tmp_path):
+    events: list[str] = []
+
+    def factory(tenant_id, session_id):
+        def release() -> bool:
+            events.append("release")
+            return True
+
+        return ValidatorSelection(
+            validator=lambda sample, predictions: True,
+            mode="custom",
+            model="release-probe",
+            release=release,
+        )
+
+    with TestClient(
+        make_app(tmp_path, FakeSam3(), start_workers=False, validator_factory=factory),
+        raise_server_exceptions=False,
+    ) as client:
+        asset_id = upload_image(client)
+        session = create_session(client, asset_id)
+        confirmed = client.post(
+            f"/v1/agent/sessions/{session['session_id']}/confirm",
+            headers=headers(),
+            json={},
+        )
+        assert confirmed.status_code == 200, confirmed.text
+        body = confirmed.json()
+        assert events == ["release"]
+        assert body["status"] == "labeling"
+        calibration = body["calibration"]
+        assert calibration["vlm_unloaded_after_calibration"] is True
+        assert calibration["timings"]["vlm_unloaded"] is True
+        contents = [message["content"] for message in body["messages"]]
+        unload_index = next(
+            index for index, text in enumerate(contents) if "Unloaded the vision validator" in text
+        )
+        label_index = next(
+            index for index, text in enumerate(contents) if "Labeling 1 image" in text
+        )
+        assert unload_index < label_index
