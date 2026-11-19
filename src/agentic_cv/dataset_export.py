@@ -10,10 +10,18 @@ from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
-from .dataset import export_coco, export_yolo
+from .dataset import (
+    SPLITS,
+    DatasetVersion,
+    export_coco,
+    export_yolo,
+    subset,
+    yolo_class_indices,
+)
 from .dataset_store import DatasetVersionBackend
 
 ExportFormat = Literal["coco", "yolo-detection", "yolo-segmentation"]
+YOLO_SPLIT_DIRS = {"train": "train", "validation": "val", "test": "test"}
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -48,28 +56,21 @@ class DatasetExportService:
         if format not in ("coco", "yolo-detection", "yolo-segmentation"):
             raise ValueError("format must be coco, yolo-detection, or yolo-segmentation")
         record = self.versions.get(tenant_id=tenant_id, version_id=version_id)
+        dataset = record.dataset.with_splits()
         output_dir = self.output_root / str(tenant_id) / str(version_id) / format
+        if output_dir.exists():
+            # Re-exports must not keep files from an older layout.
+            shutil.rmtree(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+        source_images = self.images_root / str(tenant_id) / str(version_id) / "images"
 
         if format == "coco":
-            output_path = output_dir / "annotations.json"
-            output_path.write_text(json.dumps(export_coco(record.dataset), indent=2), encoding="utf-8")
-            files = (output_path,)
+            files = self._write_coco(dataset, output_dir)
+            image_files = self._copy_images(source_images, dataset, output_dir, by_split=False)
         else:
-            labels_dir = output_dir / "labels"
-            labels_dir.mkdir(exist_ok=True)
             task = "detection" if format == "yolo-detection" else "segmentation"
-            exported = export_yolo(record.dataset, task)
-            label_files = tuple(labels_dir / filename for filename in sorted(exported))
-            for path, content in zip(label_files, (exported[name] for name in sorted(exported))):
-                path.write_text(content, encoding="utf-8")
-            data_path = output_dir / "data.yaml"
-            data_path.write_text(_yolo_data_yaml(record.dataset), encoding="utf-8")
-            files = (*label_files, data_path)
-
-        image_files = self._copy_dataset_images(
-            tenant_id=tenant_id, version_id=version_id, output_dir=output_dir
-        )
+            files = self._write_yolo(dataset, output_dir, task)
+            image_files = self._copy_images(source_images, dataset, output_dir, by_split=True)
         files = (*files, *image_files)
 
         manifest = output_dir / "manifest.json"
@@ -79,7 +80,11 @@ class DatasetExportService:
                     "tenant_id": str(tenant_id),
                     "version_id": str(version_id),
                     "format": format,
-                    "files": [str(path.relative_to(output_dir)) for path in files],
+                    "splits": {
+                        split: sum(1 for image in dataset.images if image.split == split)
+                        for split in SPLITS
+                    },
+                    "files": [str(path.relative_to(output_dir).as_posix()) for path in files],
                 },
                 indent=2,
             ),
@@ -93,15 +98,70 @@ class DatasetExportService:
             output_dir=output_dir, files=files + (manifest,), archive_path=archive,
         )
 
-    def _copy_dataset_images(
-        self, *, tenant_id: UUID, version_id: UUID, output_dir: Path
+    @staticmethod
+    def _write_coco(dataset: DatasetVersion, output_dir: Path) -> tuple[Path, ...]:
+        """``annotations.json`` (all images, each tagged with its split) plus
+        ``annotations/instances_<split>.json`` for every non-empty split."""
+
+        combined = output_dir / "annotations.json"
+        combined.write_text(json.dumps(export_coco(dataset), indent=2), encoding="utf-8")
+        written = [combined]
+        split_dir = output_dir / "annotations"
+        for split in SPLITS:
+            part = subset(dataset, split)
+            if not part.images:
+                continue
+            split_dir.mkdir(exist_ok=True)
+            path = split_dir / f"instances_{split}.json"
+            path.write_text(json.dumps(export_coco(part), indent=2), encoding="utf-8")
+            written.append(path)
+        return tuple(written)
+
+    @staticmethod
+    def _write_yolo(
+        dataset: DatasetVersion, output_dir: Path, task: str
     ) -> tuple[Path, ...]:
-        source_images = self.images_root / str(tenant_id) / str(version_id) / "images"
+        written: list[Path] = []
+        for split in SPLITS:
+            part = subset(dataset, split)
+            if not part.images:
+                continue
+            labels_dir = output_dir / "labels" / YOLO_SPLIT_DIRS[split]
+            labels_dir.mkdir(parents=True, exist_ok=True)
+            exported = export_yolo(part, task)  # type: ignore[arg-type]
+            for name in sorted(exported):
+                path = labels_dir / name
+                path.write_text(exported[name], encoding="utf-8")
+                written.append(path)
+        data_path = output_dir / "data.yaml"
+        data_path.write_text(_yolo_data_yaml(dataset), encoding="utf-8")
+        written.append(data_path)
+        return tuple(written)
+
+    @staticmethod
+    def _copy_images(
+        source_images: Path,
+        dataset: DatasetVersion,
+        output_dir: Path,
+        *,
+        by_split: bool,
+    ) -> tuple[Path, ...]:
         if not source_images.is_dir():
             return ()
-        target_images = output_dir / "images"
-        shutil.copytree(source_images, target_images, dirs_exist_ok=True)
-        return tuple(sorted(path for path in target_images.rglob("*") if path.is_file()))
+        copied: list[Path] = []
+        for image in dataset.images:
+            name = Path(image.file_name).name
+            source = source_images / name
+            if not source.is_file():
+                continue
+            if by_split:
+                target = output_dir / "images" / YOLO_SPLIT_DIRS[image.split or "train"] / name
+            else:
+                target = output_dir / "images" / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            copied.append(target)
+        return tuple(sorted(copied))
 
     def archive_path_for(
         self, *, tenant_id: UUID, version_id: UUID, format: ExportFormat
@@ -124,8 +184,24 @@ class DatasetExportService:
         return archive
 
 
-def _yolo_data_yaml(dataset) -> str:
-    lines = ["path: .", "train: images", "val: images", "names:"]
-    for category in dataset.categories:
-        lines.append(f"  {category.category_id}: {json.dumps(category.name)}")
+def _yolo_data_yaml(dataset: DatasetVersion) -> str:
+    """Ultralytics data.yaml: 0-based contiguous names and real split folders.
+
+    Ultralytics requires a ``val`` entry; a dataset too small to own a
+    validation image validates on train, and the file says so.
+    """
+
+    present = {image.split for image in dataset.images}
+    lines = ["path: .", "train: images/train"]
+    if "validation" in present:
+        lines.append("val: images/val")
+    else:
+        lines.append("val: images/train  # too few images for a separate validation split")
+    if "test" in present:
+        lines.append("test: images/test")
+    indices = yolo_class_indices(dataset)
+    lines.append(f"nc: {len(indices)}")
+    lines.append("names:")
+    for category in sorted(dataset.categories, key=lambda item: indices[item.category_id]):
+        lines.append(f"  {indices[category.category_id]}: {json.dumps(category.name)}")
     return "\n".join(lines) + "\n"

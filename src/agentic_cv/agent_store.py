@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Literal, Protocol
 from uuid import UUID, uuid4
+from .sqlite_utils import connect_sqlite
 
 AgentSessionStatus = Literal[
     "awaiting_confirmation",
@@ -82,7 +83,7 @@ class AgentSessionBackend(Protocol):
 
 class AgentSessionStore:
     def __init__(self, path: str) -> None:
-        self._connection = sqlite3.connect(path, check_same_thread=False)
+        self._connection = connect_sqlite(path)
         self._connection.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self._connection.execute(

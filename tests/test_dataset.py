@@ -42,8 +42,10 @@ def test_yolo_detection_and_segmentation_exports_are_normalized():
     detection = export_yolo(dataset, "detection")["frame.txt"].split()
     segmentation = export_yolo(dataset, "segmentation")["frame.txt"].split()
 
-    assert detection == ["2", "0.3", "0.3", "0.4", "0.4"]
-    assert segmentation == ["2", "0.1", "0.1", "0.5", "0.1", "0.5", "0.5", "0.1", "0.5"]
+    # YOLO class indices are contiguous and 0-based (category 2 is the only
+    # class, so it is index 0); Ultralytics rejects indices >= nc.
+    assert detection == ["0", "0.3", "0.3", "0.4", "0.4"]
+    assert segmentation == ["0", "0.1", "0.1", "0.5", "0.1", "0.5", "0.5", "0.1", "0.5"]
 
 
 def test_invalid_geometry_and_missing_segmentation_fail():

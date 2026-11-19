@@ -40,17 +40,50 @@ class BatchLabelResult:
     dataset: DatasetVersion
 
 
-def mask_polygons(mask: np.ndarray) -> tuple[tuple[float, ...], ...]:
-    binary = (mask.astype(np.uint8) > 0).astype(np.uint8)
+POLYGON_EPSILON_RATIO = 0.002
+MIN_PART_AREA_PX = 9.0
+MIN_PART_AREA_RATIO = 0.01
+
+
+def mask_polygons(
+    mask: np.ndarray,
+    *,
+    epsilon_ratio: float = POLYGON_EPSILON_RATIO,
+    min_area_px: float = MIN_PART_AREA_PX,
+    min_area_ratio: float = MIN_PART_AREA_RATIO,
+) -> tuple[tuple[float, ...], ...]:
+    """Mask → simplified polygons, largest first.
+
+    Raw contours carry one vertex per boundary pixel step, which bloats
+    labels; ``approxPolyDP`` with a perimeter-relative epsilon keeps the shape
+    (mask IoU stays ~0.98) at a fraction of the size. Speckles smaller than
+    ``min_area_px`` or ``min_area_ratio`` of the largest part are dropped.
+    """
+
+    binary = (np.asarray(mask).astype(np.uint8) > 0).astype(np.uint8)
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    polygons = []
+    candidates: list[tuple[float, np.ndarray]] = []
     for contour in contours:
         if len(contour) < 3:
             continue
-        polygon = tuple(float(value) for point in contour.reshape(-1, 2) for value in point)
+        candidates.append((float(cv2.contourArea(contour)), contour))
+    if not candidates:
+        return ()
+    largest = max(area for area, _ in candidates)
+    polygons: list[tuple[float, tuple[float, ...]]] = []
+    for area, contour in candidates:
+        is_largest = area == largest
+        if not is_largest and (area < min_area_px or area < largest * min_area_ratio):
+            continue
+        epsilon = max(0.5, epsilon_ratio * cv2.arcLength(contour, True))
+        simplified = cv2.approxPolyDP(contour, epsilon, True)
+        if len(simplified) < 3:
+            simplified = contour
+        polygon = tuple(float(value) for point in simplified.reshape(-1, 2) for value in point)
         if len(polygon) >= 6:
-            polygons.append(polygon)
-    return tuple(polygons)
+            polygons.append((area, polygon))
+    polygons.sort(key=lambda item: -item[0])
+    return tuple(polygon for _, polygon in polygons)
 
 
 class Sam3BatchLabeler:
@@ -67,6 +100,7 @@ class Sam3BatchLabeler:
         task: BatchTask,
         on_progress: ProgressCallback | None = None,
         on_image: ImageCallback | None = None,
+        annotation_namespace: str | None = None,
     ) -> BatchLabelResult:
         if not images:
             raise ValueError("at least one image is required")
@@ -108,8 +142,13 @@ class Sam3BatchLabeler:
                     continue
                 x1, y1, x2, y2 = clipped
                 segmentation = mask_polygons(prediction.mask) if task == "segmentation" else ()
+                local_id = f"{image.image_id}:{index}"
                 annotation = Annotation(
-                    annotation_id=f"{image.image_id}:{index}",
+                    annotation_id=(
+                        f"{annotation_namespace}/{local_id}"
+                        if annotation_namespace
+                        else local_id
+                    ),
                     image_id=image.image_id,
                     category_id=category.category_id,
                     bbox=(x1, y1, x2 - x1, y2 - y1),

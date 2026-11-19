@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Protocol
 from uuid import UUID, uuid4
+from .sqlite_utils import connect_sqlite
 
 
 UploadStatus = Literal["active", "completed", "aborted"]
@@ -99,7 +100,7 @@ class AssetSummary:
 
 class AssetRegistry:
     def __init__(self, path: Path | str) -> None:
-        self._connection = sqlite3.connect(path, check_same_thread=False)
+        self._connection = connect_sqlite(path)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
         self._lock = threading.RLock()

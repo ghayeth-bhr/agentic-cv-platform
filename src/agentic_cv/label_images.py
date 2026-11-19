@@ -8,7 +8,7 @@ from uuid import UUID
 from .asset_registry import AssetRegistryBackend
 from .batch_labeling import LabelImage
 from .semantic_indexing import path_from_file_uri
-from .video_frames import FrameExtractionConfig, extract_frames
+from .video_frames import extract_frames_cached, frames_dir_for
 
 
 _IMAGE_EXTENSIONS = {
@@ -77,13 +77,8 @@ class LabelImageResolver:
                 )
                 continue
             if media_type.startswith("video/"):
-                frames_dir = (
-                    self.data_dir / "derived" / "label-frames" / asset_key / source_key
-                )
-                frames = extract_frames(
-                    path,
-                    frames_dir,
-                    config=FrameExtractionConfig(frame_stride=30, max_frames=120),
+                frames = extract_frames_cached(
+                    path, frames_dir_for(self.data_dir, asset_key, source_key)
                 )
                 if not frames:
                     raise ValueError(f"video source produced no frames: {path}")

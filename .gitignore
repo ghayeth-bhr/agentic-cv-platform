@@ -6,3 +6,7 @@ __pycache__/
 .env.*
 data/
 .agentic-cv/
+
+# Local agent handoff notes (personal details) and demo data
+HANDOFF.md
+.agentic-cv-demo/

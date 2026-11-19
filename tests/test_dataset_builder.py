@@ -19,6 +19,7 @@ from agentic_cv.label_workflow import DurableLabelWorkflow, LabelWorkflowDepende
 from agentic_cv.outbox import Outbox
 from agentic_cv.preview import PreviewStore
 from agentic_cv.sam3 import Sam3Prediction
+from agentic_cv.annotation_sets import job_set_id, scoped_id
 
 
 class FakeProvider:
@@ -82,7 +83,7 @@ def test_builder_uses_latest_revisions_and_exports_images(tmp_path):
         category=DatasetCategory(category_id=0, name="worker"),
     )
     annotation = Annotation(
-        annotation_id=f"{images[0].image_id}:0",
+        annotation_id=scoped_id(job_set_id(job.job_id), f"{images[0].image_id}:0"),
         image_id=images[0].image_id,
         category_id=0,
         bbox=(1, 1, 4, 4),

@@ -2,21 +2,21 @@
 
 from __future__ import annotations
 
-import hashlib
 import io
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Literal
 from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from PIL import Image
 from pydantic import BaseModel, Field
 
-from .annotation_store import AnnotationRevisionBackend
+from .annotation_sets import in_set, job_set_id, live_in_set, manual_annotation_id
+from .annotation_store import AnnotationRevisionBackend, RevisionConflictError
 from .asset_registry import AssetRegistry
 from .auth import Authorizer
 from .batch_labeling import mask_polygons
@@ -303,6 +303,13 @@ class RefinementAcceptRequest(BaseModel):
     expected_revision: int | None = None
 
 
+class AnnotationDeleteResponse(BaseModel):
+    image_id: str
+    annotation_id: str
+    revision: int
+    deleted: bool = True
+
+
 class RefinementAcceptResponse(BaseModel):
     session_id: UUID
     image_id: str
@@ -373,15 +380,17 @@ def _color_hex(category_id: int) -> str:
     return f"#{red:02x}{green:02x}{blue:02x}"
 
 
-def _display_split(image_id: str) -> str:
-    """Stable display split for an image, derived from its durable image id."""
+def _dataset_source(
+    record: DatasetVersionRecord, asset_names: dict[str, str] | None
+) -> str:
+    """Name the source asset(s) from recorded ids; parse the name for old versions."""
 
-    value = hashlib.sha256(image_id.encode("utf-8")).digest()[0] % 10
-    if value < 8:
-        return "train"
-    if value < 9:
-        return "validation"
-    return "test"
+    ids = record.dataset.source_asset_ids
+    if ids and asset_names is not None:
+        names = [asset_names[asset_id] for asset_id in ids if asset_id in asset_names]
+        if names:
+            return ", ".join(names)
+    return _source_asset_name(record.name)
 
 
 def _source_asset_name(name: str) -> str:
@@ -391,7 +400,9 @@ def _source_asset_name(name: str) -> str:
     return name
 
 
-def _dataset_summary(record: DatasetVersionRecord) -> DatasetSummaryResponse:
+def _dataset_summary(
+    record: DatasetVersionRecord, asset_names: dict[str, str] | None = None
+) -> DatasetSummaryResponse:
     categories = {
         category.category_id: category.name for category in record.dataset.categories
     }
@@ -417,7 +428,7 @@ def _dataset_summary(record: DatasetVersionRecord) -> DatasetSummaryResponse:
             for category in record.dataset.categories
         ],
         created_at=record.created_at,
-        source_asset=_source_asset_name(record.name),
+        source_asset=_dataset_source(record, asset_names),
         status="ready",
         class_counts=class_counts,
     )
@@ -461,6 +472,16 @@ def _snapshot_payload(snapshot: RefinementSnapshot) -> dict:
             for prediction in snapshot.predictions
         ],
     }
+
+
+def _asset_names(registry, tenant_id: UUID) -> dict[str, str]:
+    try:
+        return {
+            str(asset.asset_id): asset.name
+            for asset in registry.list_assets(tenant_id=tenant_id)
+        }
+    except Exception:
+        return {}
 
 
 def _credential(authorization: str | None, api_key: str | None) -> str | None:
@@ -1196,10 +1217,9 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                 )
                 category_id = int(job.payload.get("category_id", 1))
                 category_name = str(job.payload.get("category_name") or "object")
-                revisions = [
-                    revision for revision in revisions
-                    if revision.annotation.category_id == category_id
-                ]
+                revisions = live_in_set(
+                    revisions, job_set_id(job_id), category_ids={category_id}
+                )
                 try:
                     with Image.open(match.path) as source:
                         overlay = render_annotation_overlay(
@@ -1241,7 +1261,9 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
             except ValueError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
-            return _dataset_summary(result.record)
+            return _dataset_summary(
+                result.record, _asset_names(dependencies.registry, tenant_id)
+            )
 
         @app.get("/v1/datasets", response_model=list[DatasetSummaryResponse])
         def list_datasets(
@@ -1251,7 +1273,11 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
         ) -> list[DatasetSummaryResponse]:
             tenant_id = _tenant(x_tenant_id)
             _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="labels:read")
-            return [_dataset_summary(record) for record in versions.list(tenant_id=tenant_id)]
+            names = _asset_names(dependencies.registry, tenant_id)
+            return [
+                _dataset_summary(record, names)
+                for record in versions.list(tenant_id=tenant_id)
+            ]
 
         @app.get("/v1/datasets/{version_id}", response_model=DatasetSummaryResponse)
         def get_dataset(
@@ -1266,7 +1292,7 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                 record = versions.get(tenant_id=tenant_id, version_id=version_id)
             except KeyError as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
-            return _dataset_summary(record)
+            return _dataset_summary(record, _asset_names(dependencies.registry, tenant_id))
 
         @app.get(
             "/v1/datasets/{version_id}/images",
@@ -1297,6 +1323,9 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
             for annotation in record.dataset.annotations:
                 by_image.setdefault(annotation.image_id, []).append(annotation)
             page = list(record.dataset.images[offset : offset + limit])
+            splits = {
+                image.image_id: record.dataset.split_of(image) for image in page
+            }
 
             def image_size(image: object) -> int:
                 if dependencies.datasets is None or dependencies.datasets.images_root is None:
@@ -1318,7 +1347,7 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                         file_name=image.file_name,
                         width=image.width,
                         height=image.height,
-                        split=_display_split(image.image_id),
+                        split=splits[image.image_id],
                         file_size=image_size(image),
                         annotations=[
                             DatasetAnnotationResponse(
@@ -1408,7 +1437,9 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
             except ValueError as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
-            return _dataset_summary(result.record)
+            return _dataset_summary(
+                result.record, _asset_names(dependencies.registry, tenant_id)
+            )
 
     if (
         dependencies.refinement is not None
@@ -1488,7 +1519,13 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                 )
 
             latest = None
+            set_id = version_record.dataset.annotation_set
             annotation_id = request.annotation_id
+            if annotation_id is not None and not in_set(annotation_id, set_id):
+                raise HTTPException(
+                    status_code=422,
+                    detail="annotation does not belong to this dataset",
+                )
             if annotation_id is not None:
                 try:
                     latest = annotations.latest(
@@ -1506,17 +1543,10 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                         detail="annotation belongs to a different category",
                     )
             else:
-                for revision in annotations.list_latest(
-                    tenant_id=tenant_id, image_ids=[snapshot.image_id]
-                ):
-                    if revision.annotation.category_id == snapshot.category_id:
-                        latest = revision
-                        annotation_id = revision.annotation.annotation_id
-                        break
-                if annotation_id is None:
-                    annotation_id = (
-                        f"manual:{snapshot.image_id}:{uuid4().hex[:8]}"
-                    )
+                # No target annotation means "add a new object". Replacing an
+                # existing mask must name it explicitly, so a click on a missed
+                # object never overwrites a correct one.
+                annotation_id = manual_annotation_id(set_id, snapshot.image_id)
 
             current_revision = latest.revision if latest is not None else 0
             if (
@@ -1555,6 +1585,65 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                 session_id=snapshot.session_id,
                 image_id=snapshot.image_id,
                 annotation_id=saved.annotation.annotation_id,
+                revision=saved.revision,
+            )
+
+        @app.delete(
+            "/v1/datasets/{version_id}/images/{image_id}/annotations/{annotation_id:path}",
+            response_model=AnnotationDeleteResponse,
+        )
+        def delete_annotation(
+            version_id: UUID,
+            image_id: str,
+            annotation_id: str,
+            expected_revision: int | None = Query(default=None, ge=0),
+            x_tenant_id: str = Header(...),
+            x_api_key: str | None = Header(None),
+            authorization: str | None = Header(None),
+        ) -> AnnotationDeleteResponse:
+            """Retire an annotation (e.g. a false positive) with a tombstone revision.
+
+            The version itself is immutable: the deletion shows up in the next
+            ``/rebuild`` of this version, like any other correction.
+            """
+
+            tenant_id = _tenant(x_tenant_id)
+            _authorize(
+                dependencies.authorizer,
+                credential=_credential(authorization, x_api_key),
+                tenant_id=tenant_id,
+                role="labels:write",
+            )
+            try:
+                version_record = versions.get(tenant_id=tenant_id, version_id=version_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            if not any(image.image_id == image_id for image in version_record.dataset.images):
+                raise HTTPException(status_code=404, detail="dataset image not found")
+            if not in_set(annotation_id, version_record.dataset.annotation_set):
+                raise HTTPException(status_code=404, detail="annotation not found")
+            try:
+                latest = annotations.latest(
+                    tenant_id=tenant_id, image_id=image_id, annotation_id=annotation_id
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail="annotation not found") from exc
+            if latest.annotation.deleted:
+                raise HTTPException(status_code=409, detail="annotation is already deleted")
+            try:
+                saved = annotations.save(
+                    tenant_id=tenant_id,
+                    annotation=replace(latest.annotation, deleted=True),
+                    author_id="manual-review",
+                    expected_revision=(
+                        latest.revision if expected_revision is None else expected_revision
+                    ),
+                )
+            except RevisionConflictError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            return AnnotationDeleteResponse(
+                image_id=image_id,
+                annotation_id=annotation_id,
                 revision=saved.revision,
             )
 
