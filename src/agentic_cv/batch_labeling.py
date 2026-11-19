@@ -16,6 +16,7 @@ from .sam3 import Sam3Prediction, Sam3Provider, clip_box
 
 BatchTask = Literal["detection", "segmentation"]
 ProgressCallback = Callable[[str, int, int], None]
+ImageCallback = Callable[[str, DatasetImage, tuple[Annotation, ...]], None]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -65,6 +66,7 @@ class Sam3BatchLabeler:
         category: DatasetCategory,
         task: BatchTask,
         on_progress: ProgressCallback | None = None,
+        on_image: ImageCallback | None = None,
     ) -> BatchLabelResult:
         if not images:
             raise ValueError("at least one image is required")
@@ -91,6 +93,7 @@ class Sam3BatchLabeler:
                 )
                 predictions = self.provider.predict(source, prompt, threshold=threshold)
                 width, height = source.width, source.height
+            image_annotations: list[Annotation] = []
             for index, prediction in enumerate(predictions):
                 raw_predictions.append(
                     RawPrediction(
@@ -105,16 +108,18 @@ class Sam3BatchLabeler:
                     continue
                 x1, y1, x2, y2 = clipped
                 segmentation = mask_polygons(prediction.mask) if task == "segmentation" else ()
-                annotations.append(
-                    Annotation(
-                        annotation_id=f"{image.image_id}:{index}",
-                        image_id=image.image_id,
-                        category_id=category.category_id,
-                        bbox=(x1, y1, x2 - x1, y2 - y1),
-                        segmentation=segmentation,
-                        score=prediction.score,
-                    )
+                annotation = Annotation(
+                    annotation_id=f"{image.image_id}:{index}",
+                    image_id=image.image_id,
+                    category_id=category.category_id,
+                    bbox=(x1, y1, x2 - x1, y2 - y1),
+                    segmentation=segmentation,
+                    score=prediction.score,
                 )
+                annotations.append(annotation)
+                image_annotations.append(annotation)
+            if on_image is not None:
+                on_image(image.image_id, dataset_images[-1], tuple(image_annotations))
             if on_progress is not None:
                 on_progress(image.image_id, len(dataset_images), len(images))
 

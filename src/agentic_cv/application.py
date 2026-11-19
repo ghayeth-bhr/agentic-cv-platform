@@ -456,6 +456,8 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
             calibration=CalibrationApiDependencies(provider=sam3_provider),
             orchestrator=TaskOrchestrator(),
             sam3=sam3_provider,
+            label_images=label_images,
+            annotations=annotations,
             jobs=jobs,
         )).router
     )

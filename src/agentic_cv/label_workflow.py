@@ -96,6 +96,18 @@ class DurableLabelWorkflow:
             },
         )
 
+        def save_image_annotations(image_id, dataset_image, image_annotations) -> None:
+            current = self.dependencies.jobs.get(job_id)
+            if current.cancel_requested:
+                raise JobCancelled(f"job {job_id} cancellation requested")
+            for annotation in image_annotations:
+                self.dependencies.annotations.save(
+                    tenant_id=tenant_id,
+                    annotation=annotation,
+                    author_id="sam3-batch",
+                    expected_revision=None,
+                )
+
         def checkpoint(image_id: str, processed: int, total: int) -> None:
             current = self.dependencies.jobs.get(job_id)
             if current.cancel_requested:
@@ -129,14 +141,8 @@ class DurableLabelWorkflow:
             result = self.dependencies.labeler.label(
                 images, prompt=prompt, threshold=threshold, category=category, task=task,
                 on_progress=checkpoint,
+                on_image=save_image_annotations,
             )
-            for annotation in result.dataset.annotations:
-                self.dependencies.annotations.save(
-                    tenant_id=tenant_id,
-                    annotation=annotation,
-                    author_id="sam3-batch",
-                    expected_revision=None,
-                )
             self.dependencies.jobs.transition(job.job_id, "succeeded")
             self.dependencies.outbox.enqueue(
                 EventEnvelope(

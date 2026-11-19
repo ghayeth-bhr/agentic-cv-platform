@@ -41,6 +41,8 @@ UI_ROUTES = {
     "/v1/datasets": {"get"},
     "/v1/datasets/{version_id}/images": {"get"},
     "/v1/datasets/{version_id}/images/{image_id}/file": {"get"},
+    "/v1/jobs/{job_id}/preview": {"get"},
+    "/v1/label-jobs/{job_id}/preview/{image_id}/image": {"get"},
     "/v1/datasets/{version_id}/rebuild": {"post"},
     "/v1/refinements/{session_id}/accept": {"post"},
     "/v1/dataset-exports": {"post"},
@@ -152,4 +154,15 @@ def test_ui_selector_and_navigation_contract():
     assert 'format.dataset.exportFormat = "true"' in javascript
     for format_value in ("coco", "yolo-detection", "yolo-segmentation"):
         assert f'["{format_value}", ' in javascript
+    for element_id in (
+        "dataset-gallery", "dataset-gallery-back", "gallery-filter-class",
+        "gallery-filter-split", "gallery-filter-unannotated",
+        "gallery-filter-lowconfidence", "gallery-toggle-boxes",
+        "gallery-toggle-masks", "gallery-toggle-labels", "gallery-counter",
+        "gallery-image", "gallery-overlay", "gallery-prev", "gallery-next",
+        "gallery-filmstrip", "gallery-details", "gallery-annotations",
+        "gallery-refine", "agent-live", "agent-live-grid", "agent-live-badge",
+        "agent-live-progress-bar", "agent-live-count", "agent-open-gallery",
+    ):
+        assert f'id="{element_id}"' in html, f"missing DOM id: {element_id}"
     assert "tenant-id" not in html

@@ -38,6 +38,8 @@
     searchPayload: null,
     searchResults: [],
     uploadFiles: [],
+    datasets: [],
+    datasetThumbUrls: [],
     agentSession: null,
     agentPollToken: 0,
     agentOverlayUrls: [],
@@ -47,6 +49,18 @@
       index: -1, image: null, objectUrl: null, socket: null, snapshot: null,
       mode: "positive", status: null, listEl: null, save: null, canvas: null,
       imageEl: null, labelEl: null,
+    },
+    gallery: {
+      open: false, versionId: null, dataset: null, images: [], visible: [], index: -1,
+      total: 0, offset: 0, hasMore: false, filters: {
+        categoryId: "all", split: "all", unannotated: false, lowConfidence: false,
+      },
+      toggles: { boxes: true, masks: true, labels: true },
+      objectUrls: [],
+    },
+    agentLive: {
+      sessionId: null, jobId: null, cursor: 0, processed: 0, total: 0,
+      images: [], stopped: false, controller: null, retryTimer: null, ready: false,
     },
   };
 
@@ -109,6 +123,30 @@
     if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(2)} MB`;
     if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
     return `${n} B`;
+  }
+
+  const CLASS_COLORS = ["#ff4040", "#40a0ff", "#40d278", "#f5b437", "#b07cff", "#ff7ac6"];
+
+  function classColor(categoryId) {
+    const index = Math.abs(Number(categoryId) || 0) % CLASS_COLORS.length;
+    return CLASS_COLORS[index];
+  }
+
+  function polygonArea(coords) {
+    if (!coords || coords.length < 6) return 0;
+    let sum = 0;
+    for (let i = 0; i + 3 < coords.length; i += 2) {
+      sum += coords[i] * coords[i + 3] - coords[i + 2] * coords[i + 1];
+    }
+    return Math.abs(sum) / 2;
+  }
+
+  function annotationArea(annotation, image) {
+    const polygons = (annotation.segmentation || []).map(polygonArea);
+    const maskArea = polygons.reduce((total, value) => total + value, 0);
+    if (maskArea > 0) return maskArea;
+    const box = annotation.bbox || [];
+    return Math.max(0, (Number(box[2]) || 0) * (Number(box[3]) || 0));
   }
 
   function node(tag, className, text) {
@@ -199,15 +237,38 @@
     if ($("view-title")) $("view-title").textContent = meta.title;
     if ($("view-eyebrow")) $("view-eyebrow").textContent = meta.eyebrow;
     if ($("view-desc")) $("view-desc").textContent = meta.desc;
-    if (name !== "datasets") closeReview();
+    if (name !== "datasets") {
+      closeReview();
+      closeDatasetGallery();
+    }
     if (name === "assets") loadAssets();
     if (name === "agent") initAgentView();
-    if (name === "datasets") loadDatasets();
+    if (name === "datasets") showDatasetsForHash();
     if (name === "jobs") loadJobs();
   }
 
   document.querySelectorAll(".nav-item").forEach((btn) => {
-    btn.addEventListener("click", () => showView(btn.dataset.view));
+    btn.addEventListener("click", () => {
+      if (btn.dataset.view === "datasets" && galleryVersionFromHash()) {
+        window.history.replaceState(null, "", "#/datasets");
+      }
+      showView(btn.dataset.view);
+    });
+  });
+
+  function galleryVersionFromHash() {
+    const match = /^#\/datasets\/([0-9a-f-]{36})$/i.exec(window.location.hash || "");
+    return match ? match[1] : null;
+  }
+
+  window.addEventListener("hashchange", () => {
+    const versionId = galleryVersionFromHash();
+    if (versionId) {
+      if (!$("view-datasets") || $("view-datasets").hidden) showView("datasets");
+      else openDatasetGallery(versionId);
+    } else if (window.location.hash === "#/datasets" && $("view-datasets") && !$("view-datasets").hidden) {
+      showDatasetList();
+    }
   });
 
   async function checkRuntime() {
@@ -1109,6 +1170,221 @@
     });
   }
 
+  function resetAgentLive() {
+    const live = state.agentLive;
+    stopAgentLiveStream(true);
+    Object.assign(live, {
+      sessionId: null, jobId: null, cursor: 0, processed: 0, total: 0,
+      images: [], stopped: false, ready: false,
+    });
+    const section = $("agent-live");
+    if (section) section.hidden = true;
+    const badge = $("agent-live-badge");
+    if (badge) badge.hidden = true;
+    const grid = $("agent-live-grid");
+    if (grid) grid.replaceChildren();
+    const galleryLink = $("agent-open-gallery");
+    if (galleryLink) galleryLink.hidden = true;
+    setStatus("agent-live-notice", "");
+  }
+
+  function stopAgentLiveStream(clear) {
+    const live = state.agentLive;
+    if (live.retryTimer) {
+      clearTimeout(live.retryTimer);
+      live.retryTimer = null;
+    }
+    if (live.controller) {
+      live.controller.abort();
+      live.controller = null;
+    }
+    live.reading = false;
+    live.stopped = !!clear;
+    if (clear) {
+      live.cursor = 0;
+      live.processed = 0;
+      live.total = 0;
+      live.images = [];
+    }
+  }
+
+  function updateAgentLiveMeta() {
+    const live = state.agentLive;
+    if ($("agent-live-count")) {
+      $("agent-live-count").textContent = `${live.processed} / ${live.total || "?"} images`;
+    }
+    const bar = $("agent-live-progress-bar");
+    if (bar) {
+      const pct = live.total ? Math.min(100, Math.round((live.processed / live.total) * 100)) : 0;
+      bar.style.width = `${pct}%`;
+    }
+  }
+
+  function renderAgentLiveGrid() {
+    const live = state.agentLive;
+    const grid = $("agent-live-grid");
+    if (!grid) return;
+    grid.replaceChildren();
+    live.images.forEach((image, index) => {
+      const figure = node("figure");
+      figure.dataset.imageId = String(image.imageId);
+      const img = node("img");
+      img.alt = `Live label preview ${index + 1}`;
+      img.loading = "lazy";
+      img.src = `/v1/label-jobs/${encodeURIComponent(live.jobId)}/preview/${encodeURIComponent(image.imageId)}/image?tenant_id=${encodeURIComponent(DEFAULT_TENANT)}`;
+      const caption = node("figcaption", null, cleanMessage(image.imageId).split(":").pop());
+      figure.append(img, caption);
+      grid.appendChild(figure);
+    });
+  }
+
+  function handlePreviewEvent(payload) {
+    const live = state.agentLive;
+    const eventId = Number(payload && payload.event_id) || 0;
+    if (eventId && eventId <= live.cursor) return;
+    if (eventId) live.cursor = eventId;
+    live.processed = Number(payload && payload.processed) || live.processed;
+    live.total = Number(payload && payload.total) || live.total;
+    const imageId = payload && payload.image_id;
+    if (imageId && !live.images.some((item) => item.imageId === String(imageId))) {
+      live.images.push({ imageId: String(imageId) });
+      renderAgentLiveGrid();
+    }
+    updateAgentLiveMeta();
+    setStatus("agent-live-notice", "");
+  }
+
+  async function readAgentLiveStream() {
+    const live = state.agentLive;
+    if (live.stopped || !live.jobId || live.reading) return;
+    live.reading = true;
+    try {
+      const response = await fetch(
+        `/v1/jobs/${encodeURIComponent(live.jobId)}/preview?after_event_id=${live.cursor}&tenant_id=${encodeURIComponent(DEFAULT_TENANT)}`,
+        { headers: tenantHeaders(false), signal: live.controller ? live.controller.signal : undefined }
+      );
+      if (!response.ok) throw new Error(`Live view unavailable (${response.status})`);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop();
+        parts.forEach((part) => {
+          const line = part.split("\n").find((item) => item.startsWith("data:"));
+          if (!line) return;
+          try { handlePreviewEvent(JSON.parse(line.slice(5).trim())); } catch { /* ignore malformed frames */ }
+        });
+      }
+      buffer += decoder.decode();
+      const trailing = buffer.split("\n\n").find((part) => part.includes("data:"));
+      if (trailing) {
+        const line = trailing.split("\n").find((item) => item.startsWith("data:"));
+        if (line) {
+          try { handlePreviewEvent(JSON.parse(line.slice(5).trim())); } catch { /* ignore malformed frames */ }
+        }
+      }
+    } catch (err) {
+      if (!live.stopped && !(err && err.name === "AbortError")) {
+        setStatus(
+          "agent-live-notice",
+          `Live view connection dropped (${cleanMessage(err.message || err)}). Reconnecting without losing displayed images.`,
+          "error"
+        );
+      }
+    } finally {
+      live.reading = false;
+      if (!live.stopped && live.jobId) {
+        live.retryTimer = setTimeout(readAgentLiveStream, 300);
+      }
+    }
+  }
+
+  function startAgentLiveStream(session) {
+    const live = state.agentLive;
+    const jobId = session.label_job_id ? String(session.label_job_id) : null;
+    if (!jobId) return;
+    if (live.jobId === jobId && (live.reading || live.retryTimer || live.controller)) return;
+    stopAgentLiveStream(true);
+    Object.assign(live, {
+      sessionId: String(session.session_id), jobId, cursor: 0, processed: 0,
+      total: live.total || 0, images: [], stopped: false, ready: false,
+      controller: new AbortController(), retryTimer: null, reading: false,
+    });
+    renderAgentLiveGrid();
+    updateAgentLiveMeta();
+    if ($("agent-live-phase")) $("agent-live-phase").textContent = "Streaming";
+    if ($("agent-live-summary")) $("agent-live-summary").textContent = "Images appear here as the label worker finishes each one.";
+    if ($("agent-live-badge")) $("agent-live-badge").hidden = false;
+    readAgentLiveStream();
+  }
+
+  function syncAgentLiveView(session) {
+    const section = $("agent-live");
+    if (!section) return;
+    const jobId = session.label_job_id ? String(session.label_job_id) : null;
+    const datasetVersionId = session.dataset_version_id ? String(session.dataset_version_id) : null;
+    if (!jobId) {
+      resetAgentLive();
+      return;
+    }
+    section.hidden = false;
+    const live = state.agentLive;
+    const running = !datasetVersionId && !["failed", "cancelled"].includes(session.status)
+      && ["queued", "running"].includes(session.label_status)
+      || session.status === "labeling";
+    if (running) {
+      startAgentLiveStream(session);
+      return;
+    }
+    stopAgentLiveStream(false);
+    if ($("agent-live-badge")) $("agent-live-badge").hidden = true;
+    if ($("agent-live-phase")) {
+      if (datasetVersionId) $("agent-live-phase").textContent = "Ready";
+      else if (session.label_status === "succeeded") $("agent-live-phase").textContent = "Labeling complete";
+      else if (session.status === "cancelled") $("agent-live-phase").textContent = "Cancelled";
+      else if (session.status === "failed") $("agent-live-phase").textContent = "Failed";
+      else $("agent-live-phase").textContent = "Stopped";
+    }
+    if ($("agent-live-summary")) {
+      $("agent-live-summary").textContent = datasetVersionId
+        ? `${live.images.length} images labeled. The dataset version is ready.`
+        : `${live.images.length} images labeled so far.`;
+    }
+    const link = $("agent-open-gallery");
+    if (link) {
+      link.hidden = !datasetVersionId;
+      if (datasetVersionId) {
+        link.href = `#/datasets/${encodeURIComponent(datasetVersionId)}`;
+        link.dataset.galleryVersion = datasetVersionId;
+      } else link.removeAttribute("href");
+    }
+    if (session.status === "cancelled") {
+      setStatus("agent-live-notice", "Run cancelled. Live view stopped.", "error");
+    } else if (session.status === "failed" || session.label_status === "failed") {
+      setStatus("agent-live-notice", "Labeling failed. Live view stopped.", "error");
+    } else if (datasetVersionId) {
+      setStatus("agent-live-notice", "Dataset ready. Open the gallery to inspect every image.", "ok");
+    }
+    if (live.images.length) setStatus("agent-live-notice",
+      datasetVersionId ? "Dataset ready. Open the gallery to inspect every image." :
+        (session.status === "cancelled" ? "Run cancelled. Live view stopped." : $("agent-live-notice").textContent),
+      datasetVersionId ? "ok" : (session.status === "cancelled" ? "error" : null));
+  }
+
+  if ($("agent-open-gallery")) {
+    $("agent-open-gallery").addEventListener("click", (event) => {
+      const versionId = event.currentTarget.dataset.galleryVersion;
+      if (!versionId) return;
+      event.preventDefault();
+      window.location.hash = `#/datasets/${versionId}`;
+      showView("datasets");
+    });
+  }
+
   function applyAgentSession(session) {
     state.agentSession = session;
     try { localStorage.setItem(AGENT_SESSION_KEY, String(session.session_id)); } catch { /* local storage is optional */ }
@@ -1121,6 +1397,7 @@
     renderAgentSpec(session);
     renderAgentProgress(session);
     renderAgentCalibration(session);
+    syncAgentLiveView(session);
 
     if ($("agent-run-title")) $("agent-run-title").textContent = session.prompt || session.asset_name || "Task plan";
     const pill = $("agent-run-pill");
@@ -1177,6 +1454,7 @@
     if (empty) empty.hidden = false;
     if (content) content.hidden = true;
     revokeAgentOverlays();
+    resetAgentLive();
     state.agentCalibrationKey = "";
     ["agent-spec", "agent-progress", "agent-calibration", "agent-run-error"].forEach((id) => {
       const el = $(id);
@@ -1405,7 +1683,453 @@
     };
   }
 
-  async function openDatasetReview(dataset, card) {
+  function showDatasetList(opts = {}) {
+    if (window.location.hash !== "#/datasets") {
+      window.history.replaceState(null, "", "#/datasets");
+    }
+    closeDatasetGallery();
+    if (!opts.keepCards) loadDatasets();
+  }
+
+  function showDatasetsForHash() {
+    const versionId = galleryVersionFromHash();
+    if (versionId) openDatasetGallery(versionId);
+    else {
+      closeDatasetGallery();
+      loadDatasets();
+    }
+  }
+
+  function closeDatasetGallery() {
+    const gallery = state.gallery;
+    gallery.objectUrls.forEach((url) => URL.revokeObjectURL(url));
+    gallery.objectUrls = [];
+    state.gallery.images.forEach((image) => { delete image._url; });
+    Object.assign(gallery, {
+      open: false, versionId: null, dataset: null, images: [], visible: [], index: -1,
+      total: 0, offset: 0, hasMore: false,
+    });
+    const section = $("dataset-gallery");
+    if (section) section.hidden = true;
+    const list = $("datasets-list");
+    if (list) list.hidden = false;
+  }
+
+  function galleryClassName(dataset, categoryId) {
+    const categories = (dataset && dataset.categories) || [];
+    const match = categories.find(
+      (category) => String(category.category_id) === String(categoryId)
+    );
+    return match ? match.name : `class ${categoryId}`;
+  }
+
+  function galleryStatus(message, kind) {
+    setStatus("gallery-status", message, kind);
+  }
+
+  async function openDatasetGallery(versionId, knownDataset = null) {
+    if (state.gallery.open && state.gallery.versionId === String(versionId)) return;
+    closeDatasetGallery();
+    const section = $("dataset-gallery");
+    const list = $("datasets-list");
+    if (!section) return;
+    if (list) list.hidden = true;
+    section.hidden = false;
+    Object.assign(state.gallery, {
+      open: true,
+      versionId: String(versionId),
+      dataset: knownDataset,
+      index: -1,
+      filters: { categoryId: "all", split: "all", unannotated: false, lowConfidence: false },
+      toggles: { boxes: true, masks: true, labels: true },
+    });
+    if ($("gallery-title")) $("gallery-title").textContent = "Dataset gallery";
+    if ($("gallery-subtitle")) $("gallery-subtitle").textContent = `Version ${String(versionId).slice(0, 8)}`;
+    if ($("gallery-filter-class")) $("gallery-filter-class").value = "all";
+    if ($("gallery-filter-split")) $("gallery-filter-split").value = "all";
+    if ($("gallery-filter-unannotated")) $("gallery-filter-unannotated").checked = false;
+    if ($("gallery-filter-lowconfidence")) $("gallery-filter-lowconfidence").checked = false;
+    if ($("gallery-toggle-boxes")) $("gallery-toggle-boxes").checked = true;
+    if ($("gallery-toggle-masks")) $("gallery-toggle-masks").checked = true;
+    if ($("gallery-toggle-labels")) $("gallery-toggle-labels").checked = true;
+    if ($("gallery-counter")) $("gallery-counter").textContent = "image 0 of 0";
+    galleryStatus("Loading dataset images…", "busy");
+    try {
+      if (!state.gallery.dataset) {
+        const datasets = await request("/v1/datasets", { headers: tenantHeaders(false) });
+        state.gallery.dataset = (datasets || []).find(
+          (item) => String(item.version_id) === String(versionId)
+        ) || null;
+      }
+      const dataset = state.gallery.dataset;
+      if (!dataset) throw new Error("Dataset version not found");
+      if ($("gallery-title")) $("gallery-title").textContent = dataset.name || "Dataset gallery";
+      if ($("gallery-subtitle")) {
+        $("gallery-subtitle").textContent = `${dataset.source_asset || "Source asset"} · ${formatDate(dataset.created_at)}`;
+      }
+      renderGalleryClassCounts();
+      const classSelect = $("gallery-filter-class");
+      if (classSelect) {
+        classSelect.innerHTML = "";
+        const all = node("option", null, "All classes");
+        all.value = "all";
+        classSelect.appendChild(all);
+        const counts = dataset.class_counts || dataset.categories || [];
+        counts.forEach((item) => {
+          const option = node("option", null, `${item.name}${item.count != null ? ` (${item.count})` : ""}`);
+          option.value = String(item.category_id);
+          classSelect.appendChild(option);
+        });
+      }
+      if (window.location.hash !== `#/datasets/${versionId}`) {
+        window.history.replaceState(null, "", `#/datasets/${versionId}`);
+      }
+      await loadGalleryImages(versionId, true);
+    } catch (err) {
+      galleryStatus(cleanMessage(err.message || err), "error");
+    }
+  }
+
+  function renderGalleryClassCounts() {
+    const row = $("gallery-class-counts");
+    if (!row) return;
+    row.replaceChildren();
+    const dataset = state.gallery.dataset;
+    const counts = (dataset && dataset.class_counts) || [];
+    if (!counts.length) {
+      row.appendChild(node("span", "gallery-empty-note", "No annotations in this version."));
+      return;
+    }
+    counts.forEach((item) => {
+      const chip = node("span", "category-chip", `${item.name} · ${item.count}`);
+      chip.dataset.classCount = String(item.category_id);
+      chip.style.borderColor = item.color || classColor(item.category_id);
+      row.appendChild(chip);
+    });
+  }
+
+  async function galleryImageUrl(image) {
+    if (image._url) return image._url;
+    const path = `/v1/datasets/${encodeURIComponent(state.gallery.versionId)}/images/${encodeURIComponent(image.image_id)}/file`;
+    const response = await fetch(path, { headers: tenantHeaders(false) });
+    if (!response.ok) throw new Error(`Image request failed (${response.status})`);
+    const url = URL.createObjectURL(await response.blob());
+    image._url = url;
+    state.gallery.objectUrls.push(url);
+    return url;
+  }
+
+  function galleryVisibleImages() {
+    const filters = state.gallery.filters;
+    return state.gallery.images.filter((image) => {
+      const annotations = image.annotations || [];
+      if (filters.categoryId !== "all" && !annotations.some(
+        (item) => String(item.category_id) === String(filters.categoryId)
+      )) return false;
+      if (filters.split !== "all" && image.split !== filters.split) return false;
+      if (filters.unannotated && annotations.length) return false;
+      if (filters.lowConfidence && !annotations.some(
+        (item) => item.score != null && Number(item.score) < 0.5
+      )) return false;
+      return true;
+    });
+  }
+
+  function applyGalleryFilters() {
+    const gallery = state.gallery;
+    gallery.visible = galleryVisibleImages();
+    if (gallery.index >= gallery.visible.length) {
+      gallery.index = gallery.visible.length ? gallery.visible.length - 1 : -1;
+    }
+  }
+
+  async function loadGalleryImages(versionId, reset) {
+    const gallery = state.gallery;
+    if (reset) {
+      gallery.images = [];
+      gallery.offset = 0;
+      gallery.total = 0;
+      gallery.hasMore = true;
+      gallery.index = -1;
+    }
+    if (!gallery.hasMore) return;
+    galleryStatus("Loading images…", "busy");
+    try {
+      const data = await request(
+        `/v1/datasets/${encodeURIComponent(versionId)}/images?limit=200&offset=${gallery.offset}`,
+        { headers: tenantHeaders(false) }
+      );
+      const page = (data && data.images) || [];
+      gallery.images = gallery.images.concat(page);
+      gallery.total = Number(data && data.total) || gallery.images.length;
+      gallery.offset = gallery.images.length;
+      gallery.hasMore = !!(data && data.has_more);
+      await Promise.all(gallery.images.map((image) => galleryImageUrl(image).catch(() => null)));
+      applyGalleryFilters();
+      if (gallery.visible.length && gallery.index < 0) gallery.index = 0;
+      renderGallery();
+      galleryStatus("", null);
+    } catch (err) {
+      galleryStatus(cleanMessage(err.message || err), "error");
+    }
+  }
+
+  async function selectGalleryImage(index) {
+    const gallery = state.gallery;
+    if (!gallery.open || index < 0 || index >= gallery.visible.length) return;
+    gallery.index = index;
+    const image = gallery.visible[index];
+    renderGallery();
+    try {
+      const url = await galleryImageUrl(image);
+      if (!gallery.open || gallery.visible[index] !== image) return;
+      const img = $("gallery-image");
+      if (!img) return;
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = () => reject(new Error("Could not display this image"));
+        img.src = url;
+      });
+      if (!gallery.open || gallery.visible[index] !== image) return;
+      drawGalleryOverlay();
+    } catch (err) {
+      galleryStatus(cleanMessage(err.message || err), "error");
+    }
+  }
+
+  function renderGallery() {
+    const gallery = state.gallery;
+    if (!gallery.open) return;
+    const visible = gallery.visible;
+    const image = visible[gallery.index] || null;
+    if ($("gallery-counter")) {
+      $("gallery-counter").textContent = `image ${image ? gallery.index + 1 : 0} of ${visible.length}`;
+    }
+    const filmstrip = $("gallery-filmstrip");
+    if (filmstrip) {
+      filmstrip.replaceChildren();
+      visible.forEach((item, index) => {
+        const button = node("button", "gallery-thumb");
+        button.type = "button";
+        button.dataset.galleryIndex = String(index);
+        button.dataset.annotated = String((item.annotations || []).length > 0);
+        button.setAttribute("aria-label", `Open ${cleanMessage(item.file_name)}`);
+        if (index === gallery.index) button.classList.add("is-active");
+        const thumb = node("img");
+        thumb.alt = "";
+        thumb.loading = "lazy";
+        if (item._url) thumb.src = item._url;
+        button.appendChild(thumb);
+        button.addEventListener("click", () => selectGalleryImage(index));
+        filmstrip.appendChild(button);
+      });
+    }
+    const loadMore = $("gallery-load-more");
+    if (loadMore) {
+      loadMore.hidden = !gallery.hasMore;
+      loadMore.textContent = `Load more images (${Math.max(0, gallery.total - gallery.images.length)} remaining)`;
+    }
+    if ($("gallery-prev")) $("gallery-prev").disabled = gallery.index <= 0;
+    if ($("gallery-next")) $("gallery-next").disabled = gallery.index < 0 || gallery.index >= visible.length - 1;
+    if ($("gallery-caption")) {
+      $("gallery-caption").textContent = image
+        ? `${cleanMessage(image.file_name)} · ${image.split || "train"}`
+        : "No images match these filters.";
+    }
+    const details = $("gallery-details");
+    if (details) {
+      details.replaceChildren();
+      const rows = image ? [
+        ["File", cleanMessage(image.file_name)],
+        ["Size", formatBytes(image.file_size)],
+        ["Split", image.split || "train"],
+        ["Dimensions", `${image.width}×${image.height}`],
+        ["Annotations", String((image.annotations || []).length)],
+      ] : [["File", "—"]];
+      rows.forEach(([term, value]) => {
+        details.appendChild(node("dt", null, term));
+        details.appendChild(node("dd", null, value));
+      });
+    }
+    const annotations = $("gallery-annotations");
+    if (annotations) {
+      annotations.replaceChildren();
+      const items = (image && image.annotations) || [];
+      if (!items.length) {
+        annotations.appendChild(node("p", "gallery-empty-note", "No annotations for this image."));
+      }
+      items.forEach((annotation) => {
+        const row = node("div", "gallery-annotation");
+        row.dataset.annotationId = String(annotation.annotation_id);
+        const swatch = node("span", "gallery-annotation-swatch");
+        swatch.style.background = classColor(annotation.category_id);
+        const copy = node("div");
+        const score = annotation.score == null ? "" : ` · ${Number(annotation.score).toFixed(2)}`;
+        copy.append(
+          node("strong", null, `${cleanMessage(galleryClassName(gallery.dataset, annotation.category_id))}${score}`),
+          node("span", "gallery-annotation-meta", `${Math.round(annotationArea(annotation, image))} px²`)
+        );
+        row.append(swatch, copy);
+        annotations.appendChild(row);
+      });
+    }
+    const refine = $("gallery-refine");
+    if (refine) refine.disabled = !image;
+    drawGalleryOverlay();
+  }
+
+  function drawGalleryOverlay() {
+    const gallery = state.gallery;
+    const canvas = $("gallery-overlay");
+    const img = $("gallery-image");
+    if (!canvas || !img || !img.complete || !img.naturalWidth) return;
+    const width = img.naturalWidth;
+    const height = img.naturalHeight;
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
+    canvas.dataset.boxes = String(gallery.toggles.boxes);
+    canvas.dataset.masks = String(gallery.toggles.masks);
+    canvas.dataset.labels = String(gallery.toggles.labels);
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, width, height);
+    const image = gallery.visible[gallery.index];
+    const annotations = (image && image.annotations) || [];
+    annotations.forEach((annotation) => {
+      const color = classColor(annotation.category_id);
+      if (gallery.toggles.masks) {
+        (annotation.segmentation || []).forEach((coords) => {
+          if (!coords || coords.length < 6) return;
+          ctx.beginPath();
+          ctx.moveTo(coords[0], coords[1]);
+          for (let i = 2; i + 1 < coords.length; i += 2) ctx.lineTo(coords[i], coords[i + 1]);
+          ctx.closePath();
+          ctx.fillStyle = `${color}2e`;
+          ctx.fill();
+          ctx.strokeStyle = color;
+          ctx.lineWidth = Math.max(1, width / 500);
+          ctx.stroke();
+        });
+      }
+      if (gallery.toggles.boxes) {
+        const [x, y, boxWidth, boxHeight] = annotation.bbox || [];
+        if (x != null && y != null && boxWidth != null && boxHeight != null) {
+          ctx.strokeStyle = color;
+          ctx.lineWidth = Math.max(2, width / 300);
+          ctx.strokeRect(x, y, boxWidth, boxHeight);
+        }
+      }
+      if (gallery.toggles.labels) {
+        const [x, y] = annotation.bbox || [];
+        const score = annotation.score == null ? "" : ` ${Number(annotation.score).toFixed(2)}`;
+        const text = `${galleryClassName(gallery.dataset, annotation.category_id)}${score}`;
+        const size = Math.max(11, Math.round(width / 44));
+        ctx.font = `${size}px sans-serif`;
+        const textWidth = ctx.measureText(text).width;
+        const labelY = Math.max(size, (Number(y) || 0) - 4);
+        ctx.fillStyle = color;
+        ctx.fillRect(Number(x) || 0, labelY - size, textWidth + 8, size + 3);
+        ctx.fillStyle = "#081015";
+        ctx.fillText(text, (Number(x) || 0) + 4, labelY);
+      }
+    });
+  }
+
+  async function refineGalleryImage() {
+    const gallery = state.gallery;
+    const image = gallery.visible[gallery.index];
+    if (!gallery.open || !image) return;
+    const fullIndex = gallery.images.indexOf(image);
+    let dataset = gallery.dataset;
+    let card = document.querySelector(`[data-version-id="${CSS.escape(String(gallery.versionId))}"]`);
+    if (!dataset || !card) {
+      await loadDatasets();
+      dataset = (state.datasets || []).find((item) => String(item.version_id) === String(gallery.versionId)) || dataset;
+      card = document.querySelector(`[data-version-id="${CSS.escape(String(gallery.versionId))}"]`);
+    }
+    showDatasetList({ keepCards: true });
+    if (dataset && card) openDatasetReview(dataset, card, Math.max(0, fullIndex));
+  }
+
+  if ($("dataset-gallery-back")) {
+    $("dataset-gallery-back").addEventListener("click", (event) => {
+      event.preventDefault();
+      showDatasetList();
+    });
+  }
+  if ($("gallery-prev")) $("gallery-prev").addEventListener("click", () => selectGalleryImage(state.gallery.index - 1));
+  if ($("gallery-next")) $("gallery-next").addEventListener("click", () => selectGalleryImage(state.gallery.index + 1));
+  if ($("gallery-image")) $("gallery-image").addEventListener("load", drawGalleryOverlay);
+  if ($("gallery-filter-class")) {
+    $("gallery-filter-class").addEventListener("change", (event) => {
+      state.gallery.filters.categoryId = event.target.value;
+      state.gallery.index = 0;
+      applyGalleryFilters();
+      renderGallery();
+    });
+  }
+  if ($("gallery-filter-split")) {
+    $("gallery-filter-split").addEventListener("change", (event) => {
+      state.gallery.filters.split = event.target.value;
+      state.gallery.index = 0;
+      applyGalleryFilters();
+      renderGallery();
+    });
+  }
+  if ($("gallery-filter-unannotated")) {
+    $("gallery-filter-unannotated").addEventListener("change", (event) => {
+      state.gallery.filters.unannotated = event.target.checked;
+      state.gallery.index = 0;
+      applyGalleryFilters();
+      renderGallery();
+    });
+  }
+  if ($("gallery-filter-lowconfidence")) {
+    $("gallery-filter-lowconfidence").addEventListener("change", (event) => {
+      state.gallery.filters.lowConfidence = event.target.checked;
+      state.gallery.index = 0;
+      applyGalleryFilters();
+      renderGallery();
+    });
+  }
+  if ($("gallery-reset-filters")) {
+    $("gallery-reset-filters").addEventListener("click", () => {
+      Object.assign(state.gallery.filters, { categoryId: "all", split: "all", unannotated: false, lowConfidence: false });
+      if ($("gallery-filter-class")) $("gallery-filter-class").value = "all";
+      if ($("gallery-filter-split")) $("gallery-filter-split").value = "all";
+      if ($("gallery-filter-unannotated")) $("gallery-filter-unannotated").checked = false;
+      if ($("gallery-filter-lowconfidence")) $("gallery-filter-lowconfidence").checked = false;
+      state.gallery.index = 0;
+      applyGalleryFilters();
+      renderGallery();
+    });
+  }
+  [["gallery-toggle-boxes", "boxes"], ["gallery-toggle-masks", "masks"], ["gallery-toggle-labels", "labels"]].forEach(([id, key]) => {
+    const input = $(id);
+    if (!input) return;
+    input.addEventListener("change", (event) => {
+      state.gallery.toggles[key] = event.target.checked;
+      drawGalleryOverlay();
+    });
+  });
+  if ($("gallery-load-more")) {
+    $("gallery-load-more").addEventListener("click", () => {
+      loadGalleryImages(state.gallery.versionId, false);
+    });
+  }
+  if ($("gallery-refine")) $("gallery-refine").addEventListener("click", refineGalleryImage);
+  document.addEventListener("keydown", (event) => {
+    if (!state.gallery.open || $("view-datasets").hidden) return;
+    if (["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement && document.activeElement.tagName)) return;
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      selectGalleryImage(state.gallery.index - 1);
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      selectGalleryImage(state.gallery.index + 1);
+    }
+  });
+
+  async function openDatasetReview(dataset, card, initialIndex = 0) {
     const panel = card.querySelector('[data-review-panel="true"]');
     if (!panel) return;
     if (state.review.open && state.review.versionId === String(dataset.version_id)) {
@@ -1521,7 +2245,7 @@
         button.addEventListener("click", () => selectReviewImage(index));
         list.appendChild(button);
       });
-      await selectReviewImage(0);
+      await selectReviewImage(initialIndex);
     } catch (err) {
       reviewStatus(cleanMessage(err.message || err), "error");
     }
@@ -1740,8 +2464,8 @@
     }
   }
 
-  async function loadDatasets() {
-    closeReview();
+  async function loadDatasets(opts = {}) {
+    if (!opts.keepGallery) closeReview();
     const list = $("datasets-list");
     const meta = $("datasets-meta");
     if (!list) return;
@@ -1752,9 +2476,10 @@
     list.appendChild(statePanel("loading", "Loading dataset versions…"));
     try {
       const datasets = await request("/v1/datasets", { headers: tenantHeaders(false) });
+      state.datasets = datasets || [];
       list.innerHTML = "";
       setBusyRegion("datasets-list", false);
-      if (!datasets || !datasets.length) {
+      if (!state.datasets.length) {
         list.appendChild(
           statePanel(
             "empty",
@@ -1765,9 +2490,19 @@
           )
         );
       } else {
-        datasets.forEach((dataset) => list.appendChild(renderDatasetCard(dataset)));
+        state.datasets.forEach((dataset) => list.appendChild(renderDatasetCard(dataset)));
+        loadDatasetMosaics(state.datasets);
       }
-      if (meta) meta.textContent = `${(datasets || []).length} dataset version${(datasets || []).length === 1 ? "" : "s"}`;
+      if (meta) meta.textContent = `${state.datasets.length} dataset version${state.datasets.length === 1 ? "" : "s"}`;
+      if (state.gallery.open) {
+        const current = state.datasets.find(
+          (item) => String(item.version_id) === String(state.gallery.versionId)
+        );
+        if (current) {
+          state.gallery.dataset = current;
+          renderGalleryClassCounts();
+        }
+      }
     } catch (err) {
       const message = cleanMessage(err.message || err);
       setStatus("datasets-status", message, "error");
@@ -1780,18 +2515,67 @@
     }
   }
 
+  async function loadDatasetMosaics(datasets) {
+    for (const dataset of datasets.slice(0, 12)) {
+      const card = document.querySelector(
+        `[data-version-id="${CSS.escape(String(dataset.version_id))}"]`
+      );
+      const mosaic = card && card.querySelector('[data-dataset-mosaic="true"]');
+      if (!mosaic) continue;
+      try {
+        const data = await request(
+          `/v1/datasets/${encodeURIComponent(dataset.version_id)}/images?limit=4&offset=0`,
+          { headers: tenantHeaders(false) }
+        );
+        const images = (data && data.images) || [];
+        mosaic.replaceChildren();
+        for (const image of images) {
+          const path = `/v1/datasets/${encodeURIComponent(dataset.version_id)}/images/${encodeURIComponent(image.image_id)}/file`;
+          const response = await fetch(path, { headers: tenantHeaders(false) });
+          if (!response.ok) continue;
+          const url = URL.createObjectURL(await response.blob());
+          state.datasetThumbUrls.push(url);
+          const thumb = node("img");
+          thumb.alt = cleanMessage(image.file_name);
+          thumb.loading = "lazy";
+          thumb.src = url;
+          mosaic.appendChild(thumb);
+        }
+      } catch {
+        /* A card still works without its thumbnail mosaic. */
+      }
+    }
+  }
+
   function renderDatasetCard(dataset) {
     const card = node("article", "card dataset-card");
+    card.dataset.versionId = String(dataset.version_id);
+    card.dataset.galleryOpen = "false";
     const head = node("div", "dataset-head");
     const title = node("div");
+    const openButton = node("button", "dataset-title-button");
+    openButton.type = "button";
+    openButton.dataset.openGallery = "true";
+    openButton.appendChild(node("h2", "card-title", dataset.name || "Untitled dataset"));
+    openButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openDatasetGallery(dataset.version_id, dataset);
+    });
     title.append(
-      node("h2", "card-title", dataset.name || "Untitled dataset"),
-      node("p", "dataset-meta", `${dataset.image_count} image${dataset.image_count === 1 ? "" : "s"} · ${dataset.annotation_count} annotation${dataset.annotation_count === 1 ? "" : "s"} · ${formatDate(dataset.created_at)}`)
+      openButton,
+      node(
+        "p",
+        "dataset-meta",
+        `${dataset.source_asset || "Source asset"} · ${dataset.image_count} image${dataset.image_count === 1 ? "" : "s"} · ${dataset.annotation_count} annotation${dataset.annotation_count === 1 ? "" : "s"} · ${formatDate(dataset.created_at)}`
+      )
     );
     const actions = node("div", "actions");
     const reviewButton = node("button", "btn btn-secondary btn-small", "Review labels");
     reviewButton.type = "button";
-    reviewButton.addEventListener("click", () => openDatasetReview(dataset, card));
+    reviewButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openDatasetReview(dataset, card);
+    });
     actions.appendChild(reviewButton);
     const format = node("select", "dataset-format");
     format.dataset.exportFormat = "true";
@@ -1809,25 +2593,49 @@
     const exportButton = node("button", "btn btn-secondary btn-small", "Export");
     exportButton.type = "button";
     exportButton.disabled = !dataset.annotation_count;
-    exportButton.addEventListener("click", () => exportDataset(dataset, exportButton, card, format.value));
+    exportButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      exportDataset(dataset, exportButton, card, format.value);
+    });
     actions.appendChild(exportButton);
     head.append(title, actions);
     card.appendChild(head);
 
-    if ((dataset.categories || []).length) {
+    const mosaic = node("div", "dataset-mosaic");
+    mosaic.dataset.datasetMosaic = "true";
+    card.appendChild(mosaic);
+
+    const counts = (dataset.class_counts || []).length
+      ? dataset.class_counts
+      : (dataset.categories || []).map((category) => ({
+          category_id: category.category_id,
+          name: category.name,
+          count: 0,
+          color: classColor(category.category_id),
+        }));
+    if (counts.length) {
       const categories = node("div", "category-row");
-      dataset.categories.forEach((category) => {
-        categories.appendChild(node("span", "category-chip", category.name));
+      counts.forEach((item) => {
+        const chip = node("span", "category-chip", `${item.name} · ${item.count}`);
+        chip.dataset.classCount = String(item.category_id);
+        chip.style.borderColor = item.color || classColor(item.category_id);
+        categories.appendChild(chip);
       });
       card.appendChild(categories);
     }
     const status = node("div", "status");
     status.dataset.datasetStatus = "true";
+    status.textContent = dataset.status || "ready";
+    status.dataset.kind = "ok";
     card.appendChild(status);
     const reviewPanel = node("div", "review-panel");
     reviewPanel.dataset.reviewPanel = "true";
     reviewPanel.hidden = true;
     card.appendChild(reviewPanel);
+    card.addEventListener("click", (event) => {
+      if (event.target.closest("button, select, a, input, .review-panel")) return;
+      openDatasetGallery(dataset.version_id, dataset);
+    });
     return card;
   }
 
@@ -1961,4 +2769,7 @@
   // Init
   checkRuntime();
   loadAssets({ quiet: true });
+  if (window.location.hash === "#/datasets" || galleryVersionFromHash()) {
+    showView("datasets");
+  }
 })();

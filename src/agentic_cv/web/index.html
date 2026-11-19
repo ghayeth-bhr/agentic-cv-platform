@@ -208,6 +208,26 @@
               <div id="agent-calibration" class="agent-calibration" hidden></div>
               <div id="agent-run-error" class="agent-error" hidden></div>
 
+              <section id="agent-live" class="agent-live" hidden aria-labelledby="agent-live-title">
+                <div class="agent-live-head">
+                  <div>
+                    <h3 id="agent-live-title" class="card-title">Live view</h3>
+                    <p id="agent-live-summary" class="card-desc">Waiting for the whole-asset run to start.</p>
+                  </div>
+                  <span id="agent-live-badge" class="live-badge" hidden>Live</span>
+                </div>
+                <div class="agent-live-progress">
+                  <div id="agent-live-progress-bar" class="agent-live-progress-bar"></div>
+                </div>
+                <div class="agent-live-meta">
+                  <span id="agent-live-count">0 / 0 images</span>
+                  <span id="agent-live-phase">Waiting</span>
+                </div>
+                <div id="agent-live-grid" class="agent-live-grid" aria-live="polite"></div>
+                <div id="agent-live-notice" class="status" role="status" aria-live="polite"></div>
+                <a id="agent-open-gallery" class="btn btn-primary" href="#" hidden>Open gallery</a>
+              </section>
+
               <div class="agent-run-actions">
                 <button type="button" class="btn btn-primary" id="agent-confirm">Confirm and calibrate</button>
                 <button type="button" class="btn btn-secondary" id="agent-retry" hidden>Run at 0.50</button>
@@ -226,6 +246,72 @@
         </div>
         <div id="datasets-status" class="status" role="status" aria-live="polite"></div>
         <div id="datasets-list" class="stack" aria-live="polite"></div>
+
+        <section id="dataset-gallery" class="dataset-gallery" hidden aria-labelledby="gallery-title">
+          <div class="gallery-top">
+            <div>
+              <a id="dataset-gallery-back" class="gallery-back" href="#/datasets">← Back to datasets</a>
+              <h2 id="gallery-title" class="card-title">Dataset gallery</h2>
+              <p id="gallery-subtitle" class="card-desc"></p>
+            </div>
+            <div id="gallery-counter" class="gallery-counter" aria-live="polite">image 0 of 0</div>
+          </div>
+
+          <div id="gallery-status" class="status" role="status" aria-live="polite"></div>
+          <div class="gallery-filters" role="group" aria-label="Dataset image filters">
+            <label class="field field-narrow">
+              <span>Class</span>
+              <select id="gallery-filter-class"><option value="all">All classes</option></select>
+            </label>
+            <label class="field field-narrow">
+              <span>Split</span>
+              <select id="gallery-filter-split">
+                <option value="all">All splits</option>
+                <option value="train">Train</option>
+                <option value="validation">Validation</option>
+                <option value="test">Test</option>
+              </select>
+            </label>
+            <label class="gallery-check">
+              <input id="gallery-filter-unannotated" type="checkbox">
+              <span>Images without annotations</span>
+            </label>
+            <label class="gallery-check">
+              <input id="gallery-filter-lowconfidence" type="checkbox">
+              <span>Low confidence only (&lt;0.50)</span>
+            </label>
+            <button id="gallery-reset-filters" type="button" class="btn btn-ghost btn-small">Reset filters</button>
+          </div>
+          <div id="gallery-class-counts" class="category-row gallery-class-counts" aria-live="polite"></div>
+
+          <div class="gallery-layout">
+            <div class="card gallery-main">
+              <div id="gallery-stage" class="gallery-stage">
+                <img id="gallery-image" alt="Selected dataset image">
+                <canvas id="gallery-overlay" aria-label="Annotation overlay"></canvas>
+              </div>
+              <div class="gallery-controls">
+                <button id="gallery-prev" type="button" class="btn btn-secondary btn-small">← Previous</button>
+                <div id="gallery-caption" class="gallery-caption">No image selected.</div>
+                <button id="gallery-next" type="button" class="btn btn-secondary btn-small">Next →</button>
+              </div>
+              <div class="gallery-toggles" role="group" aria-label="Overlay toggles">
+                <label class="gallery-check"><input id="gallery-toggle-boxes" type="checkbox" checked> <span>Boxes</span></label>
+                <label class="gallery-check"><input id="gallery-toggle-masks" type="checkbox" checked> <span>Masks</span></label>
+                <label class="gallery-check"><input id="gallery-toggle-labels" type="checkbox" checked> <span>Labels</span></label>
+              </div>
+              <div id="gallery-filmstrip" class="gallery-filmstrip" aria-label="Image thumbnails"></div>
+              <button id="gallery-load-more" type="button" class="btn btn-ghost btn-small" hidden>Load more images</button>
+            </div>
+            <aside class="card gallery-side">
+              <h3 class="card-title">Image details</h3>
+              <dl id="gallery-details" class="gallery-details"></dl>
+              <h4 class="gallery-side-heading">Annotations</h4>
+              <div id="gallery-annotations" class="gallery-annotations"></div>
+              <button id="gallery-refine" type="button" class="btn btn-secondary" disabled>Refine this image</button>
+            </aside>
+          </div>
+        </section>
       </section>
 
       <section id="view-jobs" class="view" aria-labelledby="jobs-heading" hidden>
