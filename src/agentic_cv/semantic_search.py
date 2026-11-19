@@ -140,3 +140,29 @@ class SemanticSearchService:
 
     def get_record(self, record_id: str) -> ImageRecord | None:
         return self.index.get_record(record_id)
+
+    def score_records(self, query: str, record_ids: list[str]) -> list[SearchResult]:
+        """Score exactly these records against a query, in the given order.
+
+        Used when the user picked results by hand: the server recomputes the
+        similarity instead of trusting scores sent by the client.
+        """
+
+        if not query.strip():
+            raise ValueError("query must not be empty")
+        query_vector = _normalize(self.provider.embed_text(query))
+        results: list[SearchResult] = []
+        for record_id in record_ids:
+            record = self.index.get_record(record_id)
+            embedding = self.index.get_embedding(record_id)
+            if record is None or embedding is None:
+                raise KeyError(f"unknown search record: {record_id}")
+            results.append(
+                SearchResult(
+                    record_id=record.record_id,
+                    asset_id=record.asset_id,
+                    image_path=record.image_path,
+                    score=float(np.dot(query_vector, _normalize(embedding))),
+                )
+            )
+        return results

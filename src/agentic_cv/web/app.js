@@ -37,6 +37,7 @@
     lineage: new Map(),
     searchPayload: null,
     searchResults: [],
+    searchSelected: new Set(),
     uploadFiles: [],
     datasets: [],
     datasetThumbUrls: [],
@@ -741,7 +742,9 @@
   // Search
   function currentSearchPayload() {
     const query = (($("search-query") && $("search-query").value) || "").trim();
-    const payload = { query, limit: 20 };
+    const requested = Number($("search-limit") && $("search-limit").value);
+    const limit = Number.isFinite(requested) ? Math.max(1, Math.min(500, Math.round(requested))) : 20;
+    const payload = { query, limit };
     const scope = $("search-scope") ? $("search-scope").value : "all";
     if (scope === "selected" && state.selectedAsset) {
       payload.asset_ids = [state.selectedAsset.asset_id];
@@ -753,12 +756,42 @@
     return new Map(state.assets.map((asset) => [String(asset.asset_id), asset]));
   }
 
+  function searchMinScore() {
+    const slider = $("search-min-score");
+    return slider ? Number(slider.value) / 100 : 0;
+  }
+
+  function updateSearchSelection() {
+    const selected = state.searchSelected;
+    const total = state.searchResults.length;
+    const count = state.searchResults.filter((result) => selected.has(result.record_id)).length;
+    if ($("search-selection")) $("search-selection").hidden = !total;
+    if ($("search-selected-count")) $("search-selected-count").textContent = `${count} of ${total} selected`;
+    const button = $("subasset-button");
+    if (button && !button.dataset.busy) {
+      button.disabled = !count;
+      button.textContent = count ? `Save ${count} selected as asset` : "Save selected as asset";
+    }
+    const threshold = searchMinScore();
+    if ($("search-min-score-value")) $("search-min-score-value").textContent = `${Math.round(threshold * 100)}%`;
+    document.querySelectorAll("#search-results .result-card").forEach((card) => {
+      const id = card.dataset.recordId;
+      const isSelected = selected.has(id);
+      card.classList.toggle("is-selected", isSelected);
+      card.setAttribute("aria-pressed", String(isSelected));
+      const box = card.querySelector(".result-check");
+      if (box) box.checked = isSelected;
+      card.classList.toggle("below-threshold", Number(card.dataset.score) < threshold);
+    });
+  }
+
   function renderSearchResults() {
     const container = $("search-results");
     if (!container) return;
     container.innerHTML = "";
     if (!state.searchResults.length) {
       container.appendChild(node("div", "results-empty", "No results yet. Try a description of the people, objects, or scene."));
+      updateSearchSelection();
       return;
     }
     const byId = assetsById();
@@ -766,9 +799,18 @@
     state.searchResults.forEach((result, index) => {
       const score = Number(result.score);
       const pct = Number.isFinite(score) ? Math.max(0, Math.min(100, score * 100)) : 0;
-      const card = node("button", "result-card");
-      card.type = "button";
-      card.setAttribute("aria-label", `Open match ${index + 1}`);
+      const card = node("div", "result-card");
+      card.dataset.recordId = result.record_id;
+      card.dataset.score = Number.isFinite(score) ? String(score) : "0";
+      card.tabIndex = 0;
+      card.setAttribute("role", "button");
+      card.setAttribute("aria-label", `Match ${index + 1}: include in the new asset`);
+      const check = document.createElement("input");
+      check.type = "checkbox";
+      check.className = "result-check";
+      check.tabIndex = -1;
+      check.setAttribute("aria-hidden", "true");
+      card.appendChild(check);
       if (result.image_url) {
         const thumb = node("div", "result-thumb");
         const img = document.createElement("img");
@@ -784,23 +826,54 @@
         node("span", "result-score", Number.isFinite(score) ? `${pct.toFixed(0)}%` : "—")
       );
       const parent = byId.get(String(result.asset_id));
-      card.append(
-        head,
-        node("p", "result-meta", parent ? assetName(parent) : "Source asset")
-      );
+      const open = node("button", "result-open", parent ? `${assetName(parent)} ↗` : "Source asset ↗");
+      open.type = "button";
+      open.title = "Open the source asset";
+      open.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (result.asset_id) selectAssetById(result.asset_id);
+        if ($("asset-detail")) $("asset-detail").scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+      card.append(head, open);
       const bar = node("div", "score-bar");
       const fill = document.createElement("i");
       fill.style.width = `${pct.toFixed(1)}%`;
       bar.appendChild(fill);
       card.appendChild(bar);
-      card.addEventListener("click", () => {
-        if (result.asset_id) selectAssetById(result.asset_id);
-        if ($("asset-detail")) $("asset-detail").scrollIntoView({ behavior: "smooth", block: "start" });
+      const toggle = () => {
+        if (state.searchSelected.has(result.record_id)) state.searchSelected.delete(result.record_id);
+        else state.searchSelected.add(result.record_id);
+        updateSearchSelection();
+      };
+      card.addEventListener("click", toggle);
+      card.addEventListener("keydown", (event) => {
+        if (event.key === " " || event.key === "Enter") {
+          event.preventDefault();
+          toggle();
+        }
       });
       grid.appendChild(card);
     });
     container.appendChild(grid);
+    updateSearchSelection();
   }
+
+  if ($("search-select-all")) $("search-select-all").addEventListener("click", () => {
+    state.searchResults.forEach((result) => state.searchSelected.add(result.record_id));
+    updateSearchSelection();
+  });
+  if ($("search-select-none")) $("search-select-none").addEventListener("click", () => {
+    state.searchSelected.clear();
+    updateSearchSelection();
+  });
+  if ($("search-min-score")) $("search-min-score").addEventListener("input", updateSearchSelection);
+  if ($("search-select-above")) $("search-select-above").addEventListener("click", () => {
+    const threshold = searchMinScore();
+    state.searchSelected = new Set(
+      state.searchResults.filter((result) => Number(result.score) >= threshold).map((result) => result.record_id)
+    );
+    updateSearchSelection();
+  });
 
   if ($("search-scope")) $("search-scope").addEventListener("change", syncSearchScopeOptions);
 
@@ -814,9 +887,9 @@
     setBusy(button, true, "Searching…");
     setStatus("search-status", "Searching…", "busy");
     state.searchResults = [];
+    state.searchSelected = new Set();
     state.searchPayload = null;
     renderSearchResults();
-    if ($("subasset-button")) $("subasset-button").disabled = true;
     try {
       const result = await request("/v1/search", {
         method: "POST",
@@ -824,10 +897,15 @@
         body: JSON.stringify(payload),
       });
       state.searchResults = (result && result.results) || [];
+      // Everything starts selected; untick the images that do not belong.
+      state.searchSelected = new Set(state.searchResults.map((item) => item.record_id));
       state.searchPayload = payload;
       renderSearchResults();
-      if ($("subasset-button")) $("subasset-button").disabled = !state.searchResults.length;
-      setStatus("search-status", `${state.searchResults.length} result${state.searchResults.length === 1 ? "" : "s"}.`, "ok");
+      setStatus(
+        "search-status",
+        `${state.searchResults.length} result${state.searchResults.length === 1 ? "" : "s"}. Untick the images that should not go into the new asset.`,
+        "ok",
+      );
     } catch (err) {
       setStatus("search-status", cleanMessage(err.message || err), "error");
     } finally {
@@ -838,27 +916,39 @@
   if ($("subasset-button")) $("subasset-button").addEventListener("click", async () => {
     const button = $("subasset-button");
     const payload = state.searchPayload || currentSearchPayload();
+    const recordIds = state.searchResults
+      .map((result) => result.record_id)
+      .filter((id) => state.searchSelected.has(id));
     if (!payload.query || !state.searchResults.length) {
       setStatus("search-status", "Run a search before saving results.", "error");
       return;
     }
+    if (!recordIds.length) {
+      setStatus("search-status", "Select at least one image to save.", "error");
+      return;
+    }
+    const name = (($("subasset-name") && $("subasset-name").value) || "").trim();
+    button.dataset.busy = "true";
     setBusy(button, true, "Saving…");
-    setStatus("search-status", "Saving search results as a sub-asset…", "busy");
+    setStatus("search-status", `Saving ${recordIds.length} selected image${recordIds.length === 1 ? "" : "s"} as a new asset…`, "busy");
     try {
       const record = await request("/v1/sub-assets/from-search", {
         method: "POST",
         headers: tenantHeaders(true),
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ query: payload.query, record_ids: recordIds, ...(name ? { name } : {}) }),
       });
+      if ($("subasset-name")) $("subasset-name").value = "";
       await loadAssets({ quiet: true });
       if (record.asset_id) selectAssetById(record.asset_id);
-      const count = Number.isFinite(record.source_count) ? record.source_count : state.searchResults.length;
+      const count = Number.isFinite(record.source_count) ? record.source_count : recordIds.length;
       setStatus("search-status", `Saved “${record.asset_name || "Sub-asset"}” with ${count} matched image${count === 1 ? "" : "s"}.`, "ok");
       setStatus("gallery-status", `Sub-asset saved from search: “${record.query || payload.query}”.`, "ok");
     } catch (err) {
       setStatus("search-status", cleanMessage(err.message || err), "error");
     } finally {
+      delete button.dataset.busy;
       setBusy(button, false);
+      updateSearchSelection();
     }
   });
 

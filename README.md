@@ -41,6 +41,7 @@ This repository now contains a working local product path: **Assets** for upload
 | Real 20-image VLM journey: 5/5 verdicts, 5.82 GB whole-GPU peak, 383 s calibration/label/export | Measured in P7 |
 | Run-scoped annotation sets, tombstone deletes, persisted source-aware splits, 0-based YOLO with split folders, integer-id COCO, time-based shared video frames, SQLite WAL | Fixed in Phase 0 ([`docs/branches/data-correctness.md`](docs/branches/data-correctness.md)) |
 | Conversational agent: asks for missing details, several assets and classes per run, SAM 3 prompt agent, COCO/YOLO chosen in chat | Added in Phase 1 ([`docs/branches/agent-dialogue.md`](docs/branches/agent-dialogue.md)) |
+| Select individual search results (checkboxes, min-score slider) and save only the selection as a named asset; tenant-scoped search | Added in [`docs/branches/search-selection.md`](docs/branches/search-selection.md) |
 
 The original root README was a 950-line concatenation of 23 branch READMEs. Those are preserved verbatim in [`docs/branches/`](docs/branches/README.md).
 
@@ -112,7 +113,7 @@ The workbench has two primary sections, **Assets** and **Agent**, plus a small *
 1. **Assets**: list assets by name and thumbnail. Open a card to inspect its sources, media type, and lineage.
 2. **Upload media**: create one asset from several images/videos. Files are hashed and uploaded in 5 MB chunks; a durable search-index job is queued automatically when upload finishes.
 3. **Search the library**: search all assets or only the selected asset with a natural-language description. Results show images and scores.
-4. **Save results as sub-asset**: materializes the matches as a real gallery asset with parent-asset query lineage shown in its detail panel.
+4. **Save selected as asset**: every result starts selected; untick the images that do not belong (or use the min-score slider), name the asset, and only the selection is copied into a new gallery asset with query lineage.
 5. **Agent**: choose an asset, describe the task, inspect the extracted specification, and confirm. The agent selects a diverse sample using stored SigLIP vectors, calibrates a threshold with the real VLM, and shows the validator mode, thresholds tried, sample overlays, and each verdict. It then labels the whole asset in the background, builds a dataset version, packages a COCO archive, and exposes a download button. Sessions survive a page reload; failures, fallbacks, and timeouts are shown in the chat.
 6. **Datasets**: list dataset versions built from label revisions and export them as COCO, YOLO detection, or YOLO segmentation.
 7. **Review labels**: in a dataset card, open **Review labels**, click an image, place positive/negative points, accept the previewed mask, and the app writes a new annotation revision, rebuilds a fresh dataset version, and leaves it ready to export.
@@ -204,7 +205,7 @@ Heavy dependencies are lazy or injectable. Default `pytest` runs with fakes and 
 | GET | `/v1/index-jobs/{id}` | read index-job status |
 | POST | `/v1/search` | semantic search |
 | GET | `/v1/search/records/{id}/image` | search-result image |
-| POST | `/v1/sub-assets/from-search` | create a sub-asset (and gallery asset) |
+| POST | `/v1/sub-assets/from-search` | create an asset from the selected `record_ids` (or, without them, from every result) |
 | GET | `/v1/sub-assets` | list sub-assets with parent names and lineage |
 | GET | `/v1/jobs` | list background jobs for the tenant |
 | POST/GET | `/v1/agent/sessions` | start an agent conversation (one or more `asset_ids`) / list sessions |
