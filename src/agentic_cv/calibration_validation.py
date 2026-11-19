@@ -30,6 +30,7 @@ class ValidatorSelection:
     model: str | None = None
     notice: str | None = None
     notice_provider: Callable[[], str | None] | None = None
+    release: Callable[[], bool] | None = None
 
     def current_notice(self) -> str | None:
         if self.notice_provider is not None:
@@ -145,6 +146,13 @@ def default_validator_selection(
         )
     except ValueError:
         minimum_confidence = 0.7
+    try:
+        minimum_prediction_score = min(
+            1.0,
+            max(0.0, float(os.getenv("AGENTIC_CV_VLM_MIN_PREDICTION_SCORE", "0.2"))),
+        )
+    except ValueError:
+        minimum_prediction_score = 0.2
 
     overlay_builder = build_overlay_builder(
         overlay_root=overlay_root,
@@ -164,12 +172,14 @@ def default_validator_selection(
         overlay_builder,
         model_revision=model,
         fallback=at_least_one_prediction,
+        minimum_prediction_score=minimum_prediction_score,
     )
     return ValidatorSelection(
         validator=validator,
         mode="vlm",
         model=model,
         notice_provider=lambda: validator.failure_notice,
+        release=validator.release,
     )
 
 

@@ -16,6 +16,7 @@ observations, not targets or production capacity claims.
 | App commit for baseline | P4 tip `8505a7f` |
 | App commit for post-change run | P5 worktree (resource manager + box clipping) |
 | App branch for P7 run | `feature/real-validation-loop` (20-image run on 2026-11-19) |
+| App branch for P8 runs | `feature/validator-reliability-gpu` (30-image reliability + 20-image journey on 2026-11-19) |
 
 Windows reports physical VRAM through `torch.cuda.mem_get_info()`; the discrete
 6 GB figure and the reported 6140.5 MB differ because the driver reserves some
@@ -251,6 +252,140 @@ real VLM image validation on the same 6 GB GPU, not a fixed overhead target.
 - Numbers will vary with driver state, desktop GPU usage, image resolution,
   model cache state, and whether Ollama has already loaded the VLM.
 
+## Post-P8 validator reliability, unload, and phase timings
+
+P8 measures the validator instead of assuming it is correct, and releases the
+Ollama VLM before whole-asset labeling. The raw reports are
+`..\p8-reliability.json`, `..\p8-reliability-after-guard.json`, and
+`..\p8-full-journey.json`.
+
+### Reliability harness
+
+Synthetic 320x320 images with known orange-rectangle masks give IoU ground
+truth without hand-labeling production photos. The harness also drives the real
+HTTP confirm path for an absent prompt.
+
+```powershell
+..\frames-extractor\.venv\Scripts\python.exe scripts/validate_calibration_reliability.py `
+  --images 30 --json-out ..\p8-reliability.json
+```
+
+The first run found a real failure. It agreed with IoU on 30/30 cases and the
+absent-prompt chat check passed, but the too-low threshold check **failed**:
+
+```text
+threshold=0.02, prediction_count=12, best_iou=0.2767,
+false_positive_masks=2, vlm_accepted=True, vlm_confidence=0.55
+reasoning: The orange shape is completely covered by the masks. Extra masks
+appear to outline different parts of the same object rather than separate
+background objects. The overlay matches the target.
+```
+
+The VLM was not reliable at rejecting an obviously over-permissive threshold on
+its own. `VlmCalibrationValidator` now applies a deterministic
+`minimum_prediction_score=0.2` guard before the VLM call, configurable with
+`AGENTIC_CV_VLM_MIN_PREDICTION_SCORE`. Thresholds at or above 0.3 are unchanged;
+low-score mask sets are rejected without spending a VLM call.
+
+The same command was re-run to `..\p8-reliability-after-guard.json`. Exact
+summary:
+
+```json
+{
+  "case_count": 30,
+  "vlm_calls": 51,
+  "agreement_count": 30,
+  "agreement_rate": 1.0,
+  "false_accepts": 0,
+  "false_rejects": 0,
+  "wall_sec": 332.73,
+  "low_threshold_rejected": true,
+  "absent_prompt_message_ok": true
+}
+```
+
+The low-score check now reports `prediction_count=11`,
+`best_iou=0.2845`, `false_positive_masks=4`, `vlm_accepted=False`, and this
+reason: `Rejected 11 low-score mask(s) below 0.20; this threshold is too
+permissive.` The absent-prompt check ended in `needs_attention` with the exact
+message: `I can't segment reliably from these images for “purple unicorn”. I
+can retry with different samples, or you can run at a fixed threshold such as
+0.50.` The VLM was unloaded at the end of the harness. This is still a
+synthetic-target measurement; production-photo quality remains a human check.
+
+### Full journey with VLM unload
+
+```powershell
+$env:AGENTIC_CV_VLM_TIMEOUT_SEC = "180"
+..\frames-extractor\.venv\Scripts\python.exe scripts/measure_full_journey.py `
+  --images 20 --source .agentic-cv/derived/semantic-frames `
+  --message "Create a segmentation dataset of animals." --prompt "animals" `
+  --require-vlm --timeout 900 --calibration-timeout 600 `
+  --json-out ..\p8-full-journey.json
+```
+
+The run calibrated at 0.30 on the first attempt with five VLM verdicts, all
+five accepted, and five overlay ids. The calibration card recorded
+`vlm_unloaded_after_calibration: true`; the unload call took 2.06 s and the chat
+received `Unloaded the vision validator after calibration; whole-asset labeling
+continues with SAM 3 only.` before the labeling message. The agent produced 34
+annotations; the COCO download was 3,602,151 bytes and the refined download
+3,602,149 bytes.
+
+| Checkpoint | Wall time | Peak allocated VRAM |
+|---|---:|---:|
+| Upload 20 files | 1.09 s | 0.0 MB |
+| Durable index job | 32.69 s | 2217.4 MB |
+| Agent confirm + VLM calibration + labeling + export | 369.05 s | 4202.8 MB |
+| Click refinement | 0.74 s | 4202.8 MB |
+| Accept + rebuild + refined export | 1.74 s | 4202.8 MB |
+
+| Phase inside the confirm checkpoint | Seconds |
+|---|---:|
+| SigLIP2 model load (during index) | 30.00 |
+| SAM 3 model load (during calibration) | 18.38 |
+| Total first model load | 48.38 |
+| VLM calibration, including SAM 3 setup | 351.39 |
+| VLM unload after calibration | 2.06 |
+| Label 20 images | 13.91 |
+| Dataset/COCO export | 0.54 |
+| Confirm to complete | 371.24 |
+
+These phase numbers explain P7's 383.21 s checkpoint. It was dominated by real
+VLM calibration, not by labeling or export; P8's equivalent checkpoint was
+369.05 s, of which 351.39 s was calibration, 13.91 s labeling, and 0.54 s
+export. The model-load total of 48.38 s is charged to the index and calibration
+windows, not added again. P7 had no phase instrumentation, so its number cannot
+be decomposed further after the fact; the difference from P8 is run variance.
+
+Whole-GPU measurement, re-run after the unload change:
+
+```json
+{
+  "peak": {
+    "peak_allocated_mb": 4202.8,
+    "peak_reserved_mb": 4390.0
+  },
+  "nvidia_smi": {
+    "available": true,
+    "peak_used_mb": 5914.0,
+    "total_mb": 6141.0,
+    "calibration_baseline_mb": 2375.0,
+    "calibration_peak_mb": 5914.0,
+    "calibration_growth_mb": 3539.0
+  }
+}
+```
+
+The app's PyTorch peak is unchanged at 4,202.8 MB allocated / 4,390.0 MB
+reserved. `nvidia-smi` saw 5,914 MB of 6,141 MB at its peak while SAM 3 and the
+VLM were both active during calibration. After the 2.06 s unload, labeling ran
+without the Ollama model resident. These counters are not additive; on Windows
+WDDM allocations can be backed by shared system memory. The unload is evidenced
+by the timing and the recorded signal, not by a lower peak: the peak happens
+before the unload. Another process loading several GB before calibration can
+still cause an OOM because Ollama is outside the app's model manager.
+
 ## How to reproduce
 
 The two harnesses are not collected by pytest; they load real model weights and
@@ -261,7 +396,15 @@ write JSON. Use them with the CUDA environment:
 ..\frames-extractor\.venv\Scripts\python.exe scripts/measure_full_journey.py --images 20 --source .agentic-cv/derived/semantic-frames
 ```
 
-For the P7 validator path, add `--require-vlm` and set
+For the P8 validator reliability checks, run the separate harness with real
+SAM 3 and Ollama. It deliberately writes failed cases into the JSON report:
+
+```powershell
+..\frames-extractor\.venv\Scripts\python.exe scripts/validate_calibration_reliability.py `
+  --images 30 --json-out ..\p8-reliability-after-guard.json
+```
+
+For the P7/P8 VLM journey, add `--require-vlm` and set
 `AGENTIC_CV_VLM_TIMEOUT_SEC` high enough for the first model load:
 
 ```powershell

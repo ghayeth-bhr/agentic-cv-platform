@@ -163,6 +163,7 @@ class ModelResourceManager:
                 models[name] = {
                     "loaded": _loaded(entry.provider),
                     "estimated_mb": entry.estimated_mb,
+                    "load_seconds": _load_seconds(entry.provider),
                     "idle_sec": (
                         round(now - last_used, 2) if last_used is not None else None
                     ),
@@ -232,6 +233,16 @@ class ModelResourceManager:
     def _record(self, event: str) -> None:
         self._events.append(f"{round(self._clock(), 3)} {event}")
         del self._events[:-20]
+
+
+def _load_seconds(provider: Any) -> float:
+    value = getattr(provider, "load_seconds", None)
+    if value is None:
+        return 0.0
+    try:
+        return round(float(value), 2)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _loaded(provider: Any) -> bool:

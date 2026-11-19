@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -84,6 +85,7 @@ class LocalSam3Provider:
         self._resources = resources
         self._resource_name = resource_name
         self._local_lock = threading.RLock()
+        self._load_seconds = 0.0
         if resources is not None:
             resources.register(
                 resource_name, self, estimated_mb=estimated_vram_mb
@@ -93,12 +95,25 @@ class LocalSam3Provider:
     def is_loaded(self) -> bool:
         return self._model is not None
 
+    @property
+    def load_seconds(self) -> float:
+        return self._load_seconds
+
     def _guard(self):
         if self._resources is not None:
             return self._resources.lease(self._resource_name)
         return self._local_lock
 
     def _load(self) -> None:
+        if self._model is not None:
+            return
+        started = time.perf_counter()
+        try:
+            self._load_model()
+        finally:
+            self._load_seconds += time.perf_counter() - started
+
+    def _load_model(self) -> None:
         if self._model is not None:
             return
         if self._loader is not None:
