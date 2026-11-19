@@ -121,7 +121,60 @@ The 10 skips are the opt-in PostgreSQL tests.
 
 ## Fresh-clone gate
 
-To be recorded after the clean clone run.
+A clean clone of local commit `7fb079d` was made at
+`C:\Users\bhrga\AppData\Local\Temp\opencode\p8-fresh-clone`:
+
+```text
+$ git clone --branch feature/validator-reliability-gpu <local repo> p8-fresh-clone
+$ git rev-parse HEAD
+7fb079df524b26fe7ddebb56ed4b4cc22a679b10
+
+$ uv sync --extra ml
+Using CPython 3.12.13
+Creating virtual environment at: .venv
+Resolved 90 packages in 1ms
+Prepared 2 packages in 17.50s
+Installed 69 packages in 11.84s
+ + torch==2.6.0+cu124
+ + torchvision==0.21.0+cu124
+```
+
+Doctor in the fresh clone:
+
+```text
+$ .venv\Scripts\agentic-cv.exe doctor --no-network --port 8126
+[ok] Model runtime: device=cuda, precision=float16
+[ok] PyTorch: torch 2.6.0+cu124; CUDA: NVIDIA GeForce RTX 4050 Laptop GPU (6.0 GiB)
+[ok] torchvision: torchvision 0.21.0+cu124
+Summary: 11 ok, 0 warn, 0 fail
+```
+
+The smoke script needed two corrections before the gate passed. First it
+started the app with `start_workers=False`, so the durable index job stayed
+`queued` and the script raised `TimeoutError: job did not finish ... status:
+queued`. Second it read `final["image_count"]` where the agent view places the
+counts under `dataset`, raising `KeyError: 'image_count'`. Both were harness
+script errors, not app failures; the final run used `start_workers=True` and
+read `final["dataset"]`.
+
+Final real search and agent run in the clean clone:
+
+```json
+{
+  "real_search_results": 3,
+  "search_scores": [0.1344, 0.1286, 0.1273],
+  "agent_status": "complete",
+  "agent_image_count": 3,
+  "agent_annotation_count": 3,
+  "coco_download_bytes": 2483,
+  "archive_entries": 5,
+  "validator_mode": "manual"
+}
+```
+
+The agent run used `AGENTIC_CV_AGENT_VALIDATOR=any-prediction` so the gate did
+not repeat the already-measured Ollama path. The COCO download was read and
+opened as a zip.
 
 ## Limits
 

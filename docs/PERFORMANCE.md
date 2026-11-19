@@ -386,6 +386,18 @@ by the timing and the recorded signal, not by a lower peak: the peak happens
 before the unload. Another process loading several GB before calibration can
 still cause an OOM because Ollama is outside the app's model manager.
 
+### Fresh-clone gate
+
+A clean clone of commit `7fb079d` ran `uv sync --extra ml` (90 packages, 69
+installed, CUDA wheels `torch==2.6.0+cu124` / `torchvision==0.21.0+cu124`). Its
+`doctor --no-network --port 8126` reported `device=cuda` and `11 ok, 0 warn, 0
+fail`. The same clone then produced 3 real `/v1/search` results and a complete
+agent run with 3 images, 3 annotations, and a 2,483-byte COCO zip. The smoke
+script first failed with `start_workers=False` (queued index job) and then with
+a wrong response key; both were harness-script errors and were corrected before
+the passing run. Full output is in
+[`docs/branches/validator-reliability-gpu.md`](branches/validator-reliability-gpu.md).
+
 ## How to reproduce
 
 The two harnesses are not collected by pytest; they load real model weights and
