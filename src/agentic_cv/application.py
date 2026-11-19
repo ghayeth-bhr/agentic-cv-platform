@@ -363,6 +363,8 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
                 or default_validator_factory(config.data_dir)
             ),
             vectors=vector_index,
+            text_embedder=embedding_provider.embed_text,
+            release_models=lambda name: model_resources.close(name, reason="calibration"),
             overlay_root=config.data_dir / "calibration-overlays",
         )
     )

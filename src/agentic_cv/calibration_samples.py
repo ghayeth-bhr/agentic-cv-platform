@@ -96,3 +96,51 @@ def _evenly_spaced(images: list[LabelImage], count: int) -> list[LabelImage]:
         round(index * (len(images) - 1) / (count - 1)) for index in range(count)
     ]
     return [images[index] for index in indices]
+
+
+def select_samples_for_target(
+    images: list[LabelImage],
+    *,
+    count: int,
+    embeddings: Mapping[str, Sequence[float]],
+    text_embedding: Sequence[float] | None,
+    positive_share: float = 0.6,
+) -> list[LabelImage]:
+    """Calibration samples that mostly contain the target, plus diverse negatives.
+
+    Pure diversity sampling picks the visual outliers, which in a curated
+    asset are often exactly the frames *without* the target (measured: 3 of 5
+    samples had no elephant). Here ``ceil(count * positive_share)`` samples are
+    the images most similar to the class text (SigLIP text-image similarity),
+    and the rest are chosen farthest-first so a false-positive-prone threshold
+    still gets tested. Falls back to :func:`select_calibration_images` when the
+    text or any image vector is missing.
+    """
+
+    if not images:
+        return []
+    count = max(1, min(count, len(images)))
+    if count >= len(images):
+        return list(images)
+    vectors = _vectors_for(images, embeddings)
+    if text_embedding is None or vectors is None:
+        return select_calibration_images(images, count=count, embeddings=embeddings)
+    text = np.asarray(text_embedding, dtype=np.float32)
+    norm = float(np.linalg.norm(text))
+    if text.ndim != 1 or text.size != vectors.shape[1] or not np.isfinite(norm) or norm == 0:
+        return select_calibration_images(images, count=count, embeddings=embeddings)
+    similarity = vectors @ (text / norm)
+    positives = max(1, min(count, int(np.ceil(count * positive_share))))
+    # Highest similarity first; lowest index breaks ties deterministically.
+    ranked = sorted(range(len(images)), key=lambda index: (-float(similarity[index]), index))
+    selected = ranked[:positives]
+    remaining = set(range(len(images))) - set(selected)
+    while len(selected) < count and remaining:
+        nearest = (vectors[selected] @ vectors.T).max(axis=0)
+        _, next_index = max(
+            ((1.0 - float(nearest[index]), index) for index in remaining),
+            key=lambda item: (item[0], -item[1]),
+        )
+        selected.append(next_index)
+        remaining.remove(next_index)
+    return [images[index] for index in sorted(selected)]

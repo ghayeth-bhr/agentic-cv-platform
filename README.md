@@ -42,6 +42,7 @@ This repository now contains a working local product path: **Assets** for upload
 | Run-scoped annotation sets, tombstone deletes, persisted source-aware splits, 0-based YOLO with split folders, integer-id COCO, time-based shared video frames, SQLite WAL | Fixed in Phase 0 ([`docs/branches/data-correctness.md`](docs/branches/data-correctness.md)) |
 | Conversational agent: asks for missing details, several assets and classes per run, SAM 3 prompt agent, COCO/YOLO chosen in chat | Added in Phase 1 ([`docs/branches/agent-dialogue.md`](docs/branches/agent-dialogue.md)) |
 | Select individual search results (checkboxes, min-score slider) and save only the selection as a named asset; tenant-scoped search | Added in [`docs/branches/search-selection.md`](docs/branches/search-selection.md) |
+| Calibration engine: one SAM 3 pass per sample, best threshold, correct negatives via VLM presence check, target-aware samples, prompt alternatives, SAM 3/VLM never co-resident (real run: 459 s failed → 142 s calibrated) | Added in Phase 2a ([`docs/branches/calibration-engine.md`](docs/branches/calibration-engine.md)) |
 
 The original root README was a 950-line concatenation of 23 branch READMEs. Those are preserved verbatim in [`docs/branches/`](docs/branches/README.md).
 
@@ -290,6 +291,7 @@ Default runtime uses SQLite; `AGENTIC_CV_POSTGRES_DSN` enables PostgreSQL stores
 | `AGENTIC_CV_VLM_TIMEOUT_SEC` | `100` | per-VLM-request timeout; raise for first-load/warm-up on a 6 GB GPU |
 | `AGENTIC_CV_VLM_MAX_CALLS` | `50` | hard cap on VLM calls per calibration run |
 | `AGENTIC_CV_VLM_MIN_CONFIDENCE` | `0.7` | minimum VLM confidence for an accepted verdict |
+| `AGENTIC_CV_VLM_MAX_SIDE` | `768` | longest side of images sent to the VLM; `0` sends full size |
 | `AGENTIC_CV_VLM_PROBE_TIMEOUT_SEC` | `1.0` | Ollama `/api/tags` reachability probe timeout |
 | `AGENTIC_CV_OIDC_ISSUER/AUDIENCE/JWKS_URL` | unset | opt-in OIDC/JWT auth |
 | `AGENTIC_CV_S3_BUCKET/ENDPOINT_URL` + `AWS_REGION` | unset | opt-in S3/MinIO storage |

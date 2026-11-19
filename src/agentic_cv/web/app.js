@@ -1285,12 +1285,18 @@
       return;
     }
     const perClass = calibration.classes || [];
+    if (perClass.length <= 1 && (calibration.prompts_tried || []).length > 1) {
+      box.appendChild(node("p", "agent-calibration-notice", `Prompts tried: ${calibration.prompts_tried.map((prompt) => `“${cleanMessage(prompt)}”`).join(", ")}`));
+    }
     if (perClass.length > 1) {
       perClass.forEach((item) => {
         const result = item.status === "calibrated" && item.threshold != null
           ? `threshold ${Number(item.threshold).toFixed(2)}`
           : "no threshold passed";
         box.appendChild(node("h4", "agent-calibration-class", `${cleanMessage(item.name)} · “${cleanMessage(item.prompt)}” · ${result}`));
+        if ((item.prompts_tried || []).length > 1) {
+          box.appendChild(node("p", "agent-calibration-notice", `Prompts tried: ${item.prompts_tried.map((prompt) => `“${cleanMessage(prompt)}”`).join(", ")}`));
+        }
         renderCalibrationAttempts(box, item, session);
       });
       return;
@@ -1321,7 +1327,10 @@
         const row = node("div", "agent-calibration-sample");
         row.dataset.accepted = verdict.accepted ? "true" : "false";
         const copy = node("div", "agent-calibration-sample-copy");
-        const verdictText = verdict.accepted ? "Accepted" : "Rejected";
+        const emptyResult = verdict.prediction_count === 0;
+        const verdictText = verdict.accepted
+          ? (emptyResult ? "Correct · no target" : "Accepted")
+          : (emptyResult && verdict.target_present ? "Missed" : "Rejected");
         const confidence = verdict.confidence == null ? "" : ` · confidence ${Number(verdict.confidence).toFixed(2)}`;
         copy.append(
           node("strong", null, `${verdictText} · ${cleanMessage(verdict.image_id)}${confidence}`),

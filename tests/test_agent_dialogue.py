@@ -487,3 +487,132 @@ def test_browser_conversation_with_quick_reply(tmp_path):
             expect(page.locator("#agent-calibration")).to_contain_text("safety vests")
             expect(page.locator("#agent-progress")).to_contain_text("COCO archive ready to download")
             browser.close()
+
+
+def test_calibration_falls_back_to_the_prompt_agents_alternative(tmp_path):
+    import numpy as np
+
+    from agentic_cv.sam3 import Sam3Prediction
+
+    class PromptSensitiveSam3:
+        """Finds the object only for the phrasing SAM 3 knows ("safety helmet")."""
+
+        def __init__(self):
+            self.prompts = []
+
+        def predict(self, image, prompt, *, threshold=None, mask_threshold=None):
+            self.prompts.append(prompt)
+            if prompt != "safety helmet":
+                return []
+            width, height = image.size
+            return [Sam3Prediction(score=0.9, box=(1, 1, width - 1, height - 1), mask=np.ones((height, width), dtype=bool))]
+
+    class HelmetEnhancer:
+        def enhance(self, description):
+            return PromptEnhancement(source_description=description, prompts=("safety helmet",))
+
+    sam3 = PromptSensitiveSam3()
+    app = create_local_app(
+        LocalAppConfig(
+            data_dir=tmp_path / "data",
+            sam3_provider=sam3,
+            agent_planner=RulesTaskPlanner(),
+            agent_prompt_enhancer=HelmetEnhancer(),
+            calibration_timeout_sec=60,
+            calibration_validator_factory=lambda tenant_id, session_id: any_prediction_selection(),
+            start_workers=True,
+            worker_poll_interval=0.05,
+        )
+    )
+    with TestClient(app, raise_server_exceptions=False) as client:
+        asset_id = upload_image(client)
+        session = client.post(
+            "/v1/agent/sessions", headers=headers(),
+            json={"asset_ids": [asset_id], "message": "detect helmets"},
+        ).json()
+        assert session["classes"][0]["prompts"] == ["helmets", "safety helmet"]
+        confirmed = client.post(f"/v1/agent/sessions/{session['session_id']}/confirm", headers=headers()).json()
+        assert confirmed["status"] == "labeling", confirmed["messages"][-1]
+        calibration = confirmed["calibration"]
+        assert calibration["prompts_tried"] == ["helmets", "safety helmet"]
+        assert calibration["prompt"] == "safety helmet"
+        assert calibration["forward_passes"] == 1
+        done = wait_for_session(client, session["session_id"])
+        assert done["dataset"]["annotation_count"] == 1
+        # The label job used the prompt that calibrated.
+        assert sam3.prompts[-1] == "safety helmet"
+
+
+def test_calibration_never_keeps_sam3_and_the_vlm_loaded_together(tmp_path, monkeypatch):
+    """Phased rounds: SAM 3 for every pending class, unload SAM 3, then validate."""
+
+    import numpy as np
+
+    from agentic_cv.calibration_validation import ValidatorSelection
+    from agentic_cv.model_resources import ModelResourceManager
+    from agentic_cv.sam3 import Sam3Prediction
+
+    events = []
+    original_close = ModelResourceManager.close
+
+    def recording_close(self, name, *, reason="close"):
+        if reason == "calibration":
+            events.append(f"release:{name}")
+        return original_close(self, name, reason=reason)
+
+    monkeypatch.setattr(ModelResourceManager, "close", recording_close)
+
+    class LoggingSam3:
+        def predict(self, image, prompt, *, threshold=None, mask_threshold=None):
+            events.append(f"sam3:{prompt}")
+            if prompt == "helmets":
+                return []
+            width, height = image.size
+            return [Sam3Prediction(score=0.9, box=(1, 1, width - 1, height - 1), mask=np.ones((height, width), dtype=bool))]
+
+    def validator(sample, predictions):
+        events.append(f"validate:{len(predictions)}")
+        return bool(predictions)
+
+    def selection(tenant_id, session_id):
+        return ValidatorSelection(
+            validator=validator, mode="custom",
+            release=lambda: events.append("release:vlm") or True,
+        )
+
+    class Enhancer:
+        def enhance(self, description):
+            return PromptEnhancement(source_description=description, prompts=("safety helmet",))
+
+    app = create_local_app(
+        LocalAppConfig(
+            data_dir=tmp_path / "data",
+            sam3_provider=LoggingSam3(),
+            agent_planner=RulesTaskPlanner(),
+            agent_prompt_enhancer=Enhancer(),
+            calibration_timeout_sec=60,
+            calibration_validator_factory=selection,
+            start_workers=False,
+        )
+    )
+    with TestClient(app, raise_server_exceptions=False) as client:
+        asset_id = upload_image(client)
+        session = client.post(
+            "/v1/agent/sessions", headers=headers(),
+            json={"asset_ids": [asset_id], "message": "detect helmets and vests"},
+        ).json()
+        events.clear()
+        confirmed = client.post(f"/v1/agent/sessions/{session['session_id']}/confirm", headers=headers()).json()
+        assert confirmed["status"] == "labeling", confirmed["messages"][-1]
+
+    # Round 1: SAM 3 for both classes, then SAM 3 is unloaded, then validation.
+    first_validate = next(i for i, event in enumerate(events) if event.startswith("validate:"))
+    round_one = events[:first_validate]
+    assert [event for event in round_one if event.startswith("sam3:")] == ["sam3:helmets", "sam3:vests"]
+    assert round_one[-1] == "release:sam3"
+    # Round 2 ("helmets" found nothing): the VLM is released before SAM 3 runs again,
+    # and SAM 3 is released again before validating the new prompt.
+    retry = events.index("sam3:safety helmet")
+    assert "release:vlm" in events[first_validate:retry]
+    assert events[retry + 1] == "release:sam3"
+    assert events[retry + 2].startswith("validate:")
