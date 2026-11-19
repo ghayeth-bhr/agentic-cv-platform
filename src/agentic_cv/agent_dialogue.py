@@ -40,6 +40,7 @@ _DETECTION_HINTS = re.compile(
 _YOLO = re.compile(r"\byolo\w*\b", re.I)
 _COCO = re.compile(r"\bcoco\b", re.I)
 _APPEND = re.compile(r"^\s*(?:please\s+)?(?:(?:also|add|plus|and|include)\b[\s:,]*)+", re.I)
+_ONLY = re.compile(r"\bonly\s+(?:the\s+)?(.+)$", re.I)
 _REMOVE = re.compile(
     r"^\s*(?:please\s+)?(?:remove|drop|delete|exclude|without|no(?:t)?(?: more)?)\b[\s:,]*", re.I
 )
@@ -70,6 +71,7 @@ _TRAILING = [
     re.compile(r"[\s,;]*\b(?:please|thanks|thank you)\b.*$", re.I),
     re.compile(r"[\s,;]*\b(?:yolo|coco)(?:\s+format)?\s*$", re.I),
     re.compile(r"\s+(?:(?:detection|segmentation)\s+)?(?:dataset|data\s*set|labels|annotations)\s*$", re.I),
+    re.compile(r"\s+(?:now|instead|too|as well|then|only)\s*$", re.I),
 ]
 _LEAD_ONLY_TASK = re.compile(
     r"^\s*(?:(?:object\s+)?detection|segmentation|instance segmentation|boxes|masks|bounding boxes)\s*[.!]?\s*$",
@@ -242,7 +244,14 @@ def clean_class_phrase(text: str) -> str:
         phrase = _LEAD.sub("", phrase, count=1)
         for pattern in _TRAILING:
             phrase = pattern.sub("", phrase)
-    phrase = re.sub(r"^(?:all|every|each|any)\s+", "", phrase, flags=re.I)
+    # "their tusks" -> "tusks": a possessive or determiner is not part of the
+    # class (and confuses SAM 3's noun-phrase prompt).
+    phrase = re.sub(
+        r"^(?:(?:all|every|each|any|the|a|an|their|its|his|her|our|my|your|these|those|this|that)\s+)+",
+        "",
+        phrase,
+        flags=re.I,
+    )
     return phrase.strip(" .,:;!?-\"'“”")
 
 
@@ -307,7 +316,11 @@ class RulesDraftExtractor:
         export_format = detect_export_format(text)
         mode: ClassesMode = "replace"
         body = text
-        if _REMOVE.match(body):
+        only = _ONLY.search(body)
+        if only and draft.classes:
+            # "drop the hard hats, only people now" -> the list becomes [people].
+            body = only.group(1)
+        elif _REMOVE.match(body):
             mode = "remove"
             body = _REMOVE.sub("", body, count=1)
         elif _APPEND.match(body) and draft.classes:
@@ -471,7 +484,14 @@ def rules_prompt(item: ClassSpec) -> str:
     ]
     if not attributes:
         return name or "object"
-    return f"{name} with {', '.join(attributes)}"
+    # One-word attributes are adjectives ("orange safety vest"); longer ones
+    # describe something the object has ("worker with yellow vest").
+    adjectives = [attribute for attribute in attributes if len(attribute.split()) == 1]
+    phrases = [attribute for attribute in attributes if len(attribute.split()) > 1]
+    prompt = " ".join((*adjectives, name))
+    if phrases:
+        prompt = f"{prompt} with {', '.join(phrases)}"
+    return prompt
 
 
 def join_names(classes: tuple[ClassSpec, ...]) -> str:

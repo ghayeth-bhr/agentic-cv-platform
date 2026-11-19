@@ -52,6 +52,7 @@ from test_agent_chat_e2e import FakeSam3, headers, upload_image, wait_for_sessio
         ("I need masks of the forklifts and pallets on my warehouse footage, YOLO please",
          "segmentation", ["forklifts", "pallets"], "yolo"),
         ("give me boxes around the trucks in these videos", "detection", ["trucks"], None),
+        ("elephants and their tusks", None, ["elephants", "tusks"], None),
     ],
 )
 def test_rules_extractor(message, task_type, classes, export_format):
@@ -115,6 +116,45 @@ def test_questions_follow_slot_order_and_task_type_is_assumed_after_one_ask():
 def test_rules_prompt_adds_missing_attributes_only():
     assert rules_prompt(ClassSpec(name="worker", attributes=("yellow vest",))) == "worker with yellow vest"
     assert rules_prompt(ClassSpec(name="yellow vests", attributes=("yellow",))) == "yellow vests"
+    assert rules_prompt(ClassSpec(name="safety vest", attributes=("orange",))) == "orange safety vest"
+
+
+def test_model_patch_ignores_unreliable_changed_flag_and_merges_duplicates():
+    # Shapes measured from qwen3-vl:4b: good classes, classes_changed false,
+    # an invented task type, and a duplicate with the attribute split out.
+    draft = TaskDraft(asset_ids=("a",), pending_slot="classes")
+    message = "hard hats and the orange safety vests"
+    payload = {
+        "task_type": "segmentation",
+        "classes_changed": False,
+        "classes": [
+            {"name": "hard hat", "attributes": []},
+            {"name": "orange safety vest", "attributes": []},
+            {"name": "safety vest", "attributes": ["orange"]},
+        ],
+        "export_format": "unknown",
+    }
+    rules = RulesDraftExtractor().extract(message, draft=draft, pending_slot="classes").patch
+    patch = _patch_from_model(payload, rules=rules, message=message, draft=draft)
+    assert [item.name for item in patch.classes] == ["hard hat", "orange safety vest"]
+    assert patch.task_type is None
+
+
+def test_unchanged_model_list_defers_to_rules_for_only_and_small_talk():
+    draft = TaskDraft(asset_ids=("a",), classes=(ClassSpec(name="hard hat"), ClassSpec(name="gloves")))
+    same = {
+        "task_type": "unknown",
+        "classes_changed": False,
+        "classes": [{"name": "hard hat", "attributes": []}, {"name": "gloves", "attributes": []}],
+        "export_format": "unknown",
+    }
+    for message, expected in [
+        ("drop the hard hats, only people now", ["people"]),
+        ("go ahead", ["hard hat", "gloves"]),
+    ]:
+        rules = RulesDraftExtractor().extract(message, draft=draft, pending_slot=None).patch
+        patch = _patch_from_model(same, rules=rules, message=message, draft=draft)
+        assert [item.name for item in apply_patch(draft, patch).classes] == expected
 
 
 def test_model_patch_drops_classes_not_grounded_in_the_conversation():
@@ -357,9 +397,10 @@ def test_prompt_agent_proposes_phrases_and_keeps_the_rules_fallback(tmp_path):
             json={"asset_ids": [asset_id], "message": "segment forklifts"},
         ).json()
         assert enhancer.calls == ["forklifts"]
-        assert session["classes"][0]["prompts"] == ["forklifts object", "forklifts"]
-        assert session["prompt"] == "forklifts object"
-        assert "SAM 3 prompt “forklifts object”" in session["messages"][-1]["content"]
+        # The user's phrase leads; short enhancer phrases that still name the
+        # object are kept as alternatives for calibration.
+        assert session["classes"][0]["prompts"] == ["forklifts", "forklifts object"]
+        assert session["prompt"] == "forklifts"
 
     failing = FakeEnhancer(fail=True)
     with TestClient(make_app(tmp_path / "b", enhancer=failing), raise_server_exceptions=False) as client:
