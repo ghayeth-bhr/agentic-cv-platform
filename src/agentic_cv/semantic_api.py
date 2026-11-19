@@ -26,7 +26,14 @@ from .sub_assets import SubAssetBackend, SubAssetRecord
 class SearchRequest(BaseModel):
     query: str
     asset_ids: list[str] | None = None
-    limit: int = 20
+    limit: int = Field(default=20, le=500)
+    # Drop matches below this cosine similarity (search and legacy save).
+    min_score: float | None = Field(default=None, ge=-1, le=1)
+    # Save exactly these results (the user's selection) instead of
+    # re-running the query and saving every match.
+    record_ids: list[str] | None = Field(default=None, max_length=1000)
+    # Name for the asset created from the selection.
+    name: str | None = Field(default=None, max_length=120)
 
 
 class SearchResultResponse(BaseModel):
@@ -119,10 +126,11 @@ def _materialize_search_asset(
     tenant_id: UUID,
     query: str,
     results: list[SearchResult],
+    name: str | None = None,
 ) -> tuple[UUID, str, int]:
     if not results:
         raise ValueError("search returned no results to save as a sub-asset")
-    name = f"Sub-asset: {query.strip()[:80] or 'search results'}"
+    name = (name or "").strip() or f"Sub-asset: {query.strip()[:80] or 'search results'}"
     asset = registry.create_asset(tenant_id=tenant_id, name=name)
     added: list[str] = []
     for index, result in enumerate(results, start=1):
@@ -145,6 +153,34 @@ def _materialize_search_asset(
     if not added:
         raise ValueError("search result images are unavailable on disk")
     return asset.asset_id, asset.name, len(added)
+
+
+def _tenant_asset_ids(dependencies: "SemanticApiDependencies", tenant_id: UUID | None) -> set[str] | None:
+    """The tenant's assets, or None when no registry/tenant is available."""
+
+    registry = dependencies.registry or (dependencies.indexer.registry if dependencies.indexer else None)
+    if registry is None or tenant_id is None:
+        return None
+    return {str(item.asset_id) for item in registry.list_assets(tenant_id=tenant_id)}
+
+
+def _scoped_asset_ids(
+    dependencies: "SemanticApiDependencies", tenant_id: UUID | None, requested: list[str] | None
+) -> set[str] | None:
+    """Search only the tenant's assets; requested ids outside it match nothing."""
+
+    owned = _tenant_asset_ids(dependencies, tenant_id)
+    if requested is None:
+        return owned
+    if owned is None:
+        return set(requested)
+    return set(requested) & owned
+
+
+def _apply_min_score(results: list[SearchResult], min_score: float | None) -> list[SearchResult]:
+    if min_score is None:
+        return results
+    return [result for result in results if result.score >= min_score]
 
 
 def _validate_request(request: SearchRequest) -> None:
@@ -235,12 +271,12 @@ def create_app(dependencies: SemanticApiDependencies) -> FastAPI:
         try:
             results = dependencies.search.search(
                 request.query,
-                asset_ids=set(request.asset_ids) if request.asset_ids is not None else None,
+                asset_ids=_scoped_asset_ids(dependencies, tenant_id, request.asset_ids),
                 limit=request.limit,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return _result_response(results, tenant_id=tenant_id)
+        return _result_response(_apply_min_score(results, request.min_score), tenant_id=tenant_id)
 
     @app.get("/v1/search/records/{record_id}/image")
     def search_record_image(
@@ -379,11 +415,26 @@ def create_app(dependencies: SemanticApiDependencies) -> FastAPI:
         _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="subassets:write")
         _validate_request(request)
         try:
-            results = dependencies.search.search(
-                request.query,
-                asset_ids=set(request.asset_ids) if request.asset_ids is not None else None,
-                limit=request.limit,
-            )
+            if request.record_ids is not None:
+                selected = list(dict.fromkeys(item for item in request.record_ids if item))
+                if not selected:
+                    raise ValueError("select at least one search result")
+                try:
+                    results = dependencies.search.score_records(request.query, selected)
+                except KeyError as exc:
+                    raise HTTPException(status_code=404, detail="unknown search record") from exc
+                owned = _tenant_asset_ids(dependencies, tenant_id)
+                if owned is not None and any(result.asset_id not in owned for result in results):
+                    raise HTTPException(status_code=404, detail="unknown search record")
+            else:
+                results = _apply_min_score(
+                    dependencies.search.search(
+                        request.query,
+                        asset_ids=_scoped_asset_ids(dependencies, tenant_id, request.asset_ids),
+                        limit=request.limit,
+                    ),
+                    request.min_score,
+                )
             record = dependencies.sub_assets.create_from_results(
                 tenant_id=tenant_id, query=request.query, results=results
             )
@@ -391,7 +442,11 @@ def create_app(dependencies: SemanticApiDependencies) -> FastAPI:
             registry = dependencies.registry or (dependencies.indexer.registry if dependencies.indexer else None)
             if registry is not None:
                 asset_id, _, source_count = _materialize_search_asset(
-                    registry=registry, tenant_id=tenant_id, query=request.query, results=results
+                    registry=registry,
+                    tenant_id=tenant_id,
+                    query=request.query,
+                    results=results,
+                    name=request.name,
                 )
                 record = dependencies.sub_assets.link_asset(
                     record.sub_asset_id, asset_id=asset_id

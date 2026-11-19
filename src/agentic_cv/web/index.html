@@ -132,10 +132,31 @@
                     <option value="selected">Selected asset</option>
                   </select>
                 </label>
+                <label class="field field-tiny">
+                  <span>Results</span>
+                  <input id="search-limit" type="number" min="1" max="500" step="1" value="20">
+                </label>
                 <button id="search-button" type="button" class="btn btn-primary">Search</button>
               </div>
-              <div class="actions">
-                <button id="subasset-button" type="button" class="btn btn-secondary" disabled>Save results as sub-asset</button>
+              <div id="search-selection" class="search-selection" hidden>
+                <div class="search-selection-row">
+                  <strong id="search-selected-count" class="search-selected-count">0 selected</strong>
+                  <button id="search-select-all" type="button" class="btn btn-ghost btn-small">Select all</button>
+                  <button id="search-select-none" type="button" class="btn btn-ghost btn-small">Clear</button>
+                  <label class="search-threshold">
+                    <span>Min score <output id="search-min-score-value">0%</output></span>
+                    <input id="search-min-score" type="range" min="0" max="100" step="1" value="0">
+                  </label>
+                  <button id="search-select-above" type="button" class="btn btn-ghost btn-small">Select ≥ min score</button>
+                </div>
+                <p class="card-desc">Click an image to include or exclude it. Only the selected images go into the new asset.</p>
+              </div>
+              <div class="actions subasset-actions">
+                <label class="field field-grow">
+                  <span>New asset name</span>
+                  <input id="subasset-name" type="text" maxlength="120" placeholder="Defaults to “Sub-asset: your query”" autocomplete="off">
+                </label>
+                <button id="subasset-button" type="button" class="btn btn-secondary" disabled>Save selected as asset</button>
               </div>
               <div id="search-status" class="status" role="status" aria-live="polite"></div>
               <div id="search-results" class="results-area" aria-live="polite"></div>
