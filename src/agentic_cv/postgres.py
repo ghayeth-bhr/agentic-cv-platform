@@ -298,6 +298,18 @@ MIGRATIONS: tuple[Migration, ...] = (
             """,
         ),
     ),
+    Migration(
+        version=7,
+        name="sub_assets_materialized_asset",
+        statements=(
+            "ALTER TABLE sub_assets ADD COLUMN IF NOT EXISTS asset_id UUID",
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS sub_assets_asset_idx
+                ON sub_assets (asset_id)
+                WHERE asset_id IS NOT NULL
+            """,
+        ),
+    ),
 )
 
 

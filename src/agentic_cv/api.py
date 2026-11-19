@@ -8,21 +8,32 @@ from pathlib import Path
 from typing import Callable, Literal
 from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Response, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from PIL import Image
 from pydantic import BaseModel, Field
 
+from .annotation_store import AnnotationRevisionBackend
 from .asset_registry import AssetRegistry
 from .auth import Authorizer
+from .batch_labeling import mask_polygons
 from .calibration import CalibrationSample, CalibrationStatus, Sam3Calibrator
-from .click_refinement import ClickPoint, ClickRefinementService, RefinementSnapshot
+from .click_refinement import (
+    ClickPoint,
+    ClickRefinementService,
+    RefinementSnapshot,
+    RefinementTarget,
+)
 from .contracts import EventEnvelope, TaskSpec
+from .dataset import Annotation
+from .dataset_builder import DatasetBuilder
 from .dataset_export import ExportFormat
 from .dataset_export_workflow import DatasetExportWorkflow
+from .dataset_store import DatasetVersionBackend, DatasetVersionRecord
 from .errors import ModelUnavailableError, install_model_unavailable_handler
-from .job_store import JobRecord
+from .job_store import JobRecord, JobStoreBackend
 from .label_workflow import DurableLabelWorkflow
 from .orchestrator import TaskOrchestrationRequest, TaskOrchestrator
 from .outbox import Outbox
@@ -98,10 +109,26 @@ class DatasetExportJobResponse(BaseModel):
     error: str | None
 
 
+class JobSummaryResponse(BaseModel):
+    job_id: UUID
+    kind: str
+    status: str
+    attempts: int
+    error: str | None
+    created_at: str
+    updated_at: str
+
+
+class JobListResponse(BaseModel):
+    jobs: list[JobSummaryResponse]
+
+
 @dataclass(frozen=True, kw_only=True)
 class RefinementApiDependencies:
     service: ClickRefinementService
-    image_loader: Callable[[str], Image.Image]
+    image_loader: Callable[[str], Image.Image] | None = None
+    annotations: AnnotationRevisionBackend | None = None
+    dataset_loader: Callable[[UUID, UUID, str], RefinementTarget] | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -112,6 +139,13 @@ class ExportApiDependencies:
 @dataclass(frozen=True, kw_only=True)
 class LabelApiDependencies:
     workflow: DurableLabelWorkflow
+
+
+@dataclass(frozen=True, kw_only=True)
+class DatasetApiDependencies:
+    builder: DatasetBuilder
+    versions: DatasetVersionBackend
+    images_root: Path | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -135,9 +169,11 @@ class ApiDependencies:
     authorizer: Authorizer | None = None
     exports: ExportApiDependencies | None = None
     labels: LabelApiDependencies | None = None
+    datasets: DatasetApiDependencies | None = None
     calibration: CalibrationApiDependencies | None = None
     orchestrator: TaskOrchestrator | None = None
     sam3: Sam3Provider | None = None
+    jobs: JobStoreBackend | None = None
 
 
 def _authorize(
@@ -192,6 +228,65 @@ class LabelJobResponse(BaseModel):
     lease_owner: str | None
     cancel_requested: bool
     payload: dict
+
+
+class DatasetCreateRequest(BaseModel):
+    job_id: UUID
+    name: str = ""
+    idempotency_key: str
+
+
+class DatasetCategoryResponse(BaseModel):
+    category_id: int
+    name: str
+
+
+class DatasetSummaryResponse(BaseModel):
+    version_id: UUID
+    name: str
+    image_count: int
+    annotation_count: int
+    categories: list[DatasetCategoryResponse]
+    created_at: str
+
+
+class DatasetAnnotationResponse(BaseModel):
+    annotation_id: str
+    category_id: int
+    bbox: list[float]
+    segmentation: list[list[float]]
+    score: float | None
+
+
+class DatasetImageResponse(BaseModel):
+    image_id: str
+    file_name: str
+    width: int
+    height: int
+    annotations: list[DatasetAnnotationResponse]
+
+
+class DatasetImagesResponse(BaseModel):
+    images: list[DatasetImageResponse]
+
+
+class DatasetRebuildRequest(BaseModel):
+    name: str = ""
+    idempotency_key: str
+
+
+class RefinementAcceptRequest(BaseModel):
+    annotation_id: str | None = None
+    prediction_index: int = 0
+    refinement_revision: int | None = None
+    expected_revision: int | None = None
+
+
+class RefinementAcceptResponse(BaseModel):
+    session_id: UUID
+    image_id: str
+    annotation_id: str
+    revision: int
 
 
 class CalibrationAttemptResponse(BaseModel):
@@ -252,6 +347,36 @@ def _label_job_response(job: JobRecord) -> LabelJobResponse:
     )
 
 
+def _dataset_summary(record: DatasetVersionRecord) -> DatasetSummaryResponse:
+    return DatasetSummaryResponse(
+        version_id=record.version_id,
+        name=record.name,
+        image_count=len(record.dataset.images),
+        annotation_count=len(record.dataset.annotations),
+        categories=[
+            DatasetCategoryResponse(category_id=category.category_id, name=category.name)
+            for category in record.dataset.categories
+        ],
+        created_at=record.created_at,
+    )
+
+
+
+def _dataset_image_path(
+    images_root: Path,
+    *,
+    tenant_id: UUID,
+    version_id: UUID,
+    file_name: str,
+) -> Path:
+    root = (images_root / str(tenant_id) / str(version_id)).resolve()
+    path = (root / file_name).resolve()
+    if path != root and root not in path.parents:
+        raise HTTPException(status_code=400, detail="invalid dataset image path")
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="dataset image not found")
+    return path
+
 
 def _snapshot_payload(snapshot: RefinementSnapshot) -> dict:
     return {
@@ -259,6 +384,8 @@ def _snapshot_payload(snapshot: RefinementSnapshot) -> dict:
         "session_id": str(snapshot.session_id),
         "image_id": snapshot.image_id,
         "revision": snapshot.revision,
+        "prompt": snapshot.prompt,
+        "category_id": snapshot.category_id,
         "points": [
             {"x": point.x, "y": point.y, "label": point.label}
             for point in snapshot.points
@@ -599,6 +726,49 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
             content_sha256=source.content_sha256,
         )
 
+    if dependencies.jobs is not None:
+        @app.get("/v1/jobs", response_model=JobListResponse)
+        def list_jobs(
+            status: str | None = Query(None),
+            kind: str | None = Query(None),
+            x_tenant_id: str = Header(...),
+            x_api_key: str | None = Header(None),
+            authorization: str | None = Header(None),
+        ) -> JobListResponse:
+            tenant_id = _tenant(x_tenant_id)
+            _authorize(
+                dependencies.authorizer,
+                credential=_credential(authorization, x_api_key),
+                tenant_id=tenant_id,
+                role="jobs:read",
+            )
+            if status is not None and status not in {
+                "queued", "running", "succeeded", "failed", "cancelled"
+            }:
+                raise HTTPException(status_code=422, detail="invalid job status")
+            records = dependencies.jobs.list(status=status, kind=kind)  # type: ignore[arg-type]
+            return JobListResponse(jobs=[
+                JobSummaryResponse(
+                    job_id=job.job_id,
+                    kind=job.kind,
+                    status=job.status,
+                    attempts=job.attempts,
+                    error=job.error,
+                    created_at=(
+                        job.created_at.isoformat()
+                        if hasattr(job.created_at, "isoformat")
+                        else str(job.created_at)
+                    ),
+                    updated_at=(
+                        job.updated_at.isoformat()
+                        if hasattr(job.updated_at, "isoformat")
+                        else str(job.updated_at)
+                    ),
+                )
+                for job in records
+                if job.tenant_id == tenant_id
+            ])
+
     if dependencies.exports is not None:
         export_workflow = dependencies.exports.workflow
 
@@ -660,42 +830,171 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             return _job_response(job)
 
+        @app.get("/v1/dataset-exports/{job_id}/download")
+        def download_dataset_export(
+            job_id: UUID,
+            x_tenant_id: str = Header(...),
+            x_api_key: str | None = Header(None),
+            authorization: str | None = Header(None),
+        ) -> FileResponse:
+            tenant_id = _tenant(x_tenant_id)
+            _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="exports:read")
+            try:
+                job = export_workflow.dependencies.jobs.get(job_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            if job.tenant_id != tenant_id or job.kind != "dataset-export":
+                raise HTTPException(status_code=404, detail="unknown export job")
+            if job.status != "succeeded":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"export job is not ready for download; current status is {job.status}",
+                )
+            version_id = UUID(job.payload["version_id"])
+            format = job.payload["format"]
+            try:
+                archive = export_workflow.dependencies.exports.package(
+                    tenant_id=tenant_id, version_id=version_id, format=format
+                )
+            except FileNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            return FileResponse(
+                archive,
+                media_type="application/zip",
+                filename=f"{version_id}-{format}.zip",
+            )
+
     if dependencies.refinement is not None:
         refinement = dependencies.refinement
 
-        @app.websocket("/v1/refinement/{image_id}")
-        async def refinement_socket(websocket: WebSocket, image_id: str) -> None:
-            await websocket.accept()
-            try:
-                image = refinement.image_loader(image_id)
-                snapshot = refinement.service.create(image_id=image_id, image=image)
-            except (KeyError, ValueError) as exc:
-                await websocket.close(code=1008, reason=str(exc))
-                return
-            await websocket.send_json(_snapshot_payload(snapshot))
-            try:
-                while True:
-                    message = await websocket.receive_json()
-                    message_type = message.get("type")
-                    if message_type == "click":
-                        try:
-                            snapshot = refinement.service.click(
-                                snapshot.session_id,
-                                expected_revision=message["expected_revision"],
-                                point=ClickPoint(
-                                    x=message["x"], y=message["y"], label=message["label"]
-                                ),
+        if refinement.image_loader is not None:
+            @app.websocket("/v1/refinement/{image_id}")
+            async def refinement_socket(websocket: WebSocket, image_id: str) -> None:
+                await websocket.accept()
+                try:
+                    assert refinement.image_loader is not None
+                    image = refinement.image_loader(image_id)
+                    snapshot = refinement.service.create(image_id=image_id, image=image)
+                except (KeyError, ValueError) as exc:
+                    await websocket.close(code=1008, reason=str(exc))
+                    return
+                await websocket.send_json(_snapshot_payload(snapshot))
+                try:
+                    while True:
+                        message = await websocket.receive_json()
+                        message_type = message.get("type")
+                        if message_type == "click":
+                            try:
+                                snapshot = refinement.service.click(
+                                    snapshot.session_id,
+                                    expected_revision=message["expected_revision"],
+                                    point=ClickPoint(
+                                        x=message["x"],
+                                        y=message["y"],
+                                        label=message["label"],
+                                    ),
+                                )
+                            except (KeyError, TypeError, ValueError) as exc:
+                                await websocket.send_json(
+                                    {"type": "error", "detail": str(exc)}
+                                )
+                                continue
+                            await websocket.send_json(_snapshot_payload(snapshot))
+                        elif message_type == "get":
+                            await websocket.send_json(
+                                _snapshot_payload(
+                                    refinement.service.get(snapshot.session_id)
+                                )
                             )
-                        except (KeyError, TypeError, ValueError) as exc:
-                            await websocket.send_json({"type": "error", "detail": str(exc)})
-                            continue
-                        await websocket.send_json(_snapshot_payload(snapshot))
-                    elif message_type == "get":
-                        await websocket.send_json(_snapshot_payload(refinement.service.get(snapshot.session_id)))
-                    else:
-                        await websocket.send_json({"type": "error", "detail": "unsupported message type"})
-            except WebSocketDisconnect:
-                return
+                        else:
+                            await websocket.send_json(
+                                {
+                                    "type": "error",
+                                    "detail": "unsupported message type",
+                                }
+                            )
+                except WebSocketDisconnect:
+                    return
+
+        if refinement.dataset_loader is not None:
+            dataset_loader = refinement.dataset_loader
+
+            @app.websocket("/v1/refinement/{version_id}/{image_id}")
+            async def dataset_refinement_socket(
+                websocket: WebSocket, version_id: str, image_id: str
+            ) -> None:
+                await websocket.accept()
+                tenant_raw = websocket.query_params.get("tenant_id")
+                if not tenant_raw:
+                    await websocket.close(
+                        code=1008, reason="tenant_id query parameter is required"
+                    )
+                    return
+                try:
+                    tenant_id = _tenant(tenant_raw)
+                    _authorize(
+                        dependencies.authorizer,
+                        credential=_credential(
+                            None, websocket.query_params.get("api_key")
+                        ),
+                        tenant_id=tenant_id,
+                        role="labels:write",
+                    )
+                    target = dataset_loader(tenant_id, UUID(version_id), image_id)
+                    snapshot = refinement.service.create(
+                        image_id=image_id,
+                        image=target.image,
+                        tenant_id=tenant_id,
+                        version_id=UUID(version_id),
+                        prompt=target.prompt,
+                        category_id=target.category_id,
+                    )
+                except (HTTPException, KeyError, ValueError, FileNotFoundError) as exc:
+                    detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+                    await websocket.close(code=1008, reason=str(detail))
+                    return
+                await websocket.send_json(_snapshot_payload(snapshot))
+                try:
+                    while True:
+                        message = await websocket.receive_json()
+                        message_type = message.get("type")
+                        if message_type == "click":
+                            try:
+                                snapshot = refinement.service.click(
+                                    snapshot.session_id,
+                                    expected_revision=message["expected_revision"],
+                                    point=ClickPoint(
+                                        x=message["x"],
+                                        y=message["y"],
+                                        label=message["label"],
+                                    ),
+                                )
+                            except ModelUnavailableError as exc:
+                                await websocket.send_json(
+                                    {"type": "error", "detail": str(exc)}
+                                )
+                                continue
+                            except (KeyError, TypeError, ValueError) as exc:
+                                await websocket.send_json(
+                                    {"type": "error", "detail": str(exc)}
+                                )
+                                continue
+                            await websocket.send_json(_snapshot_payload(snapshot))
+                        elif message_type == "get":
+                            await websocket.send_json(
+                                _snapshot_payload(
+                                    refinement.service.get(snapshot.session_id)
+                                )
+                            )
+                        else:
+                            await websocket.send_json(
+                                {
+                                    "type": "error",
+                                    "detail": "unsupported message type",
+                                }
+                            )
+                except WebSocketDisconnect:
+                    return
 
     orchestrator = dependencies.orchestrator or TaskOrchestrator()
 
@@ -791,6 +1090,328 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
             except ValueError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             return _label_job_response(job)
+
+    if dependencies.datasets is not None:
+        dataset_builder = dependencies.datasets.builder
+        versions = dependencies.datasets.versions
+
+        @app.post("/v1/datasets", response_model=DatasetSummaryResponse, status_code=201)
+        def create_dataset(
+            request: DatasetCreateRequest,
+            x_tenant_id: str = Header(...),
+            x_api_key: str | None = Header(None),
+            authorization: str | None = Header(None),
+        ) -> DatasetSummaryResponse:
+            tenant_id = _tenant(x_tenant_id)
+            _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="labels:write")
+            if not request.idempotency_key.strip():
+                raise HTTPException(status_code=422, detail="idempotency_key must not be empty")
+            try:
+                result = dataset_builder.build_from_job(
+                    tenant_id=tenant_id,
+                    job_id=request.job_id,
+                    name=request.name,
+                    idempotency_key=request.idempotency_key,
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except PermissionError as exc:
+                raise HTTPException(status_code=403, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            return _dataset_summary(result.record)
+
+        @app.get("/v1/datasets", response_model=list[DatasetSummaryResponse])
+        def list_datasets(
+            x_tenant_id: str = Header(...),
+            x_api_key: str | None = Header(None),
+            authorization: str | None = Header(None),
+        ) -> list[DatasetSummaryResponse]:
+            tenant_id = _tenant(x_tenant_id)
+            _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="labels:read")
+            return [_dataset_summary(record) for record in versions.list(tenant_id=tenant_id)]
+
+        @app.get("/v1/datasets/{version_id}", response_model=DatasetSummaryResponse)
+        def get_dataset(
+            version_id: UUID,
+            x_tenant_id: str = Header(...),
+            x_api_key: str | None = Header(None),
+            authorization: str | None = Header(None),
+        ) -> DatasetSummaryResponse:
+            tenant_id = _tenant(x_tenant_id)
+            _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="labels:read")
+            try:
+                record = versions.get(tenant_id=tenant_id, version_id=version_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            return _dataset_summary(record)
+
+        @app.get(
+            "/v1/datasets/{version_id}/images",
+            response_model=DatasetImagesResponse,
+        )
+        def list_dataset_images(
+            version_id: UUID,
+            x_tenant_id: str = Header(...),
+            x_api_key: str | None = Header(None),
+            authorization: str | None = Header(None),
+        ) -> DatasetImagesResponse:
+            tenant_id = _tenant(x_tenant_id)
+            _authorize(
+                dependencies.authorizer,
+                credential=_credential(authorization, x_api_key),
+                tenant_id=tenant_id,
+                role="labels:read",
+            )
+            try:
+                record = versions.get(tenant_id=tenant_id, version_id=version_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            by_image: dict[str, list[Annotation]] = {
+                image.image_id: [] for image in record.dataset.images
+            }
+            for annotation in record.dataset.annotations:
+                by_image.setdefault(annotation.image_id, []).append(annotation)
+            return DatasetImagesResponse(
+                images=[
+                    DatasetImageResponse(
+                        image_id=image.image_id,
+                        file_name=image.file_name,
+                        width=image.width,
+                        height=image.height,
+                        annotations=[
+                            DatasetAnnotationResponse(
+                                annotation_id=annotation.annotation_id,
+                                category_id=annotation.category_id,
+                                bbox=list(annotation.bbox),
+                                segmentation=[
+                                    list(polygon) for polygon in annotation.segmentation
+                                ],
+                                score=annotation.score,
+                            )
+                            for annotation in by_image[image.image_id]
+                        ],
+                    )
+                    for image in record.dataset.images
+                ]
+            )
+
+        @app.get("/v1/datasets/{version_id}/images/{image_id}/file")
+        def get_dataset_image_file(
+            version_id: UUID,
+            image_id: str,
+            x_tenant_id: str = Header(...),
+            x_api_key: str | None = Header(None),
+            authorization: str | None = Header(None),
+        ) -> FileResponse:
+            tenant_id = _tenant(x_tenant_id)
+            _authorize(
+                dependencies.authorizer,
+                credential=_credential(authorization, x_api_key),
+                tenant_id=tenant_id,
+                role="labels:read",
+            )
+            if dependencies.datasets.images_root is None:
+                raise HTTPException(status_code=404, detail="dataset images are unavailable")
+            try:
+                record = versions.get(tenant_id=tenant_id, version_id=version_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            image = next(
+                (item for item in record.dataset.images if item.image_id == image_id),
+                None,
+            )
+            if image is None:
+                raise HTTPException(status_code=404, detail="dataset image not found")
+            path = _dataset_image_path(
+                dependencies.datasets.images_root,
+                tenant_id=tenant_id,
+                version_id=version_id,
+                file_name=image.file_name,
+            )
+            return FileResponse(path)
+
+        @app.post(
+            "/v1/datasets/{version_id}/rebuild",
+            response_model=DatasetSummaryResponse,
+            status_code=201,
+        )
+        def rebuild_dataset(
+            version_id: UUID,
+            request: DatasetRebuildRequest,
+            x_tenant_id: str = Header(...),
+            x_api_key: str | None = Header(None),
+            authorization: str | None = Header(None),
+        ) -> DatasetSummaryResponse:
+            tenant_id = _tenant(x_tenant_id)
+            _authorize(
+                dependencies.authorizer,
+                credential=_credential(authorization, x_api_key),
+                tenant_id=tenant_id,
+                role="labels:write",
+            )
+            if not request.idempotency_key.strip():
+                raise HTTPException(status_code=422, detail="idempotency_key must not be empty")
+            try:
+                result = dataset_builder.rebuild_from_version(
+                    tenant_id=tenant_id,
+                    version_id=version_id,
+                    name=request.name,
+                    idempotency_key=request.idempotency_key,
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            return _dataset_summary(result.record)
+
+    if (
+        dependencies.refinement is not None
+        and dependencies.refinement.annotations is not None
+        and dependencies.datasets is not None
+    ):
+        refinement = dependencies.refinement
+        annotations = refinement.annotations
+        versions = dependencies.datasets.versions
+
+        @app.post(
+            "/v1/refinements/{session_id}/accept",
+            response_model=RefinementAcceptResponse,
+        )
+        def accept_refinement(
+            session_id: UUID,
+            request: RefinementAcceptRequest,
+            x_tenant_id: str = Header(...),
+            x_api_key: str | None = Header(None),
+            authorization: str | None = Header(None),
+        ) -> RefinementAcceptResponse:
+            tenant_id = _tenant(x_tenant_id)
+            _authorize(
+                dependencies.authorizer,
+                credential=_credential(authorization, x_api_key),
+                tenant_id=tenant_id,
+                role="labels:write",
+            )
+            try:
+                snapshot = refinement.service.get(session_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            if (
+                snapshot.tenant_id != tenant_id
+                or snapshot.version_id is None
+            ):
+                raise HTTPException(status_code=404, detail="refinement session not found")
+            if (
+                request.refinement_revision is not None
+                and request.refinement_revision != snapshot.revision
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"refinement revision moved to {snapshot.revision}; "
+                        "click again to refresh the mask"
+                    ),
+                )
+            if not 0 <= request.prediction_index < len(snapshot.predictions):
+                raise HTTPException(
+                    status_code=409,
+                    detail="there is no mask preview to accept; click the image first",
+                )
+
+            try:
+                version_record = versions.get(
+                    tenant_id=tenant_id, version_id=snapshot.version_id
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            dataset_image = next(
+                (
+                    image
+                    for image in version_record.dataset.images
+                    if image.image_id == snapshot.image_id
+                ),
+                None,
+            )
+            if dataset_image is None:
+                raise HTTPException(status_code=404, detail="dataset image not found")
+            if snapshot.category_id not in {
+                category.category_id for category in version_record.dataset.categories
+            }:
+                raise HTTPException(
+                    status_code=422,
+                    detail="the refinement category is not part of this dataset",
+                )
+
+            latest = None
+            annotation_id = request.annotation_id
+            if annotation_id is not None:
+                try:
+                    latest = annotations.latest(
+                        tenant_id=tenant_id,
+                        image_id=snapshot.image_id,
+                        annotation_id=annotation_id,
+                    )
+                except KeyError as exc:
+                    raise HTTPException(
+                        status_code=404, detail="annotation not found"
+                    ) from exc
+                if latest.annotation.category_id != snapshot.category_id:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="annotation belongs to a different category",
+                    )
+            else:
+                for revision in annotations.list_latest(
+                    tenant_id=tenant_id, image_ids=[snapshot.image_id]
+                ):
+                    if revision.annotation.category_id == snapshot.category_id:
+                        latest = revision
+                        annotation_id = revision.annotation.annotation_id
+                        break
+                if annotation_id is None:
+                    annotation_id = (
+                        f"manual:{snapshot.image_id}:{uuid4().hex[:8]}"
+                    )
+
+            current_revision = latest.revision if latest is not None else 0
+            if (
+                request.expected_revision is not None
+                and request.expected_revision != current_revision
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"annotation revision moved to {current_revision}; "
+                        "reload the dataset and try again"
+                    ),
+                )
+
+            prediction = snapshot.predictions[request.prediction_index]
+            x1, y1, x2, y2 = (float(value) for value in prediction.box)
+            annotation = Annotation(
+                annotation_id=str(annotation_id),
+                image_id=snapshot.image_id,
+                category_id=snapshot.category_id,
+                bbox=(x1, y1, max(0.0, x2 - x1), max(0.0, y2 - y1)),
+                segmentation=mask_polygons(prediction.mask),
+                score=None,
+            )
+            try:
+                annotation.validate(dataset_image)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            saved = annotations.save(
+                tenant_id=tenant_id,
+                annotation=annotation,
+                author_id="manual-refinement",
+                expected_revision=current_revision,
+            )
+            return RefinementAcceptResponse(
+                session_id=snapshot.session_id,
+                image_id=snapshot.image_id,
+                annotation_id=saved.annotation.annotation_id,
+                revision=saved.revision,
+            )
 
     if dependencies.calibration is not None:
         @app.post("/v1/calibration/run", response_model=CalibrationResponse)

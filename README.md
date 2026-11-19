@@ -2,7 +2,7 @@
 
 A local-first platform for managing image/video assets, searching them semantically, and building detection/segmentation datasets with prompted SAM 3 labeling.
 
-This repository currently contains a **strong infrastructure core and a partial product surface**. The P0 branch (`fix/runtime-foundation`) makes the local environment honest and diagnosable; the agent chat, end-to-end labeling execution, dataset builder, and download flow are still the next phases.
+This repository now contains a working local product path: **Assets** for upload/index/search/sub-assets, an **Agent** chat that plans a task, calibrates a threshold with the real local VLM, labels the whole asset, builds a dataset version, and offers a downloadable COCO archive, and a **Review labels** flow that turns a positive/negative click into an annotation revision and a fresh dataset version. P0 (`fix/runtime-foundation`) made the runtime honest and diagnosable. P1 (`feature/label-execution-engine`) added durable label execution, dataset builds, and COCO/YOLO archives. P2 (`feature/assets-experience`) replaced the UUID-driven workbench with one workspace. P3 (`feature/agent-chat`) connects the chat to the existing execution engine and adds durable sessions, a planner with a visible local fallback, calibration timeouts, cancellation, and browser download. P4 (`feature/manual-refinement-ui`) wires the click refinement service to dataset images, annotation revisions, and a rebuilt/exportable dataset version. P5 (`feature/gpu-resource-manager`) serializes local model inference, unloads models under memory pressure, and records a real 20-image whole-journey measurement on the 6 GB laptop. P6 (`feature/ux-e2e-quality`) makes loading, empty, and recoverable error states explicit across the workspace and adds browser-state and UI/API contract tests. P7 (`feature/real-validation-loop`) makes the VLM the default calibration validator, stores sample overlays and verdict evidence, makes calibration cancellable, selects diverse samples from SigLIP vectors, and adds a COCO/YOLO selector to dataset export.
 
 ## Current status
 
@@ -15,10 +15,30 @@ This repository currently contains a **strong infrastructure core and a partial 
 | Prompted SAM 3 on a selected asset source/frame (`/v1/assets/{id}/predict`) | Implemented |
 | Auth, RBAC, OIDC/JWT, metrics, worker leases, CI/load/failure tests | Implemented |
 | `agentic-cv doctor` environment diagnostics and typed `503 model_unavailable` errors | Added in P0 |
-| **Agent chat** (task spec → confirm → calibrate → label → dataset) | **Not built yet** |
-| **Label job execution** through the app/worker | **Not built yet** (jobs are submitted but remain queued) |
-| **Dataset builder + export download** from label results | **Not built yet** |
-| **Manual refinement UI**, dataset gallery, live step cards | **Not built yet** |
+| Background label worker + asset→image/video-frame resolver | Added in P1 |
+| Dataset builder over latest annotation revisions | Added in P1 |
+| COCO/YOLO export archives with images and `zip` download | Added in P1 |
+| Single-workspace Assets UI with no tenant/UUID controls | Added in P2 |
+| Multi-file chunked uploads + durable auto-index jobs | Added in P2 |
+| Asset detail, in-asset search, and sub-asset lineage | Added in P2 |
+| Datasets and Jobs lists readable from the workbench | Added in P2 |
+| Browser upload → index → search → sub-asset journey covered by Playwright | Added in P2 |
+| Agent chat: plan → confirm → calibrate → label whole asset → dataset → COCO download | Added in P3 |
+| Durable agent sessions/messages with browser restore and cancel/timeout handling | Added in P3 |
+| Ollama task planner with a visible deterministic rules fallback | Added in P3 |
+| Agent chat covered by HTTP and Playwright end-to-end tests | Added in P3 |
+| Real 20-image SAM 3 run: 20/20 annotations, 1.96 GB peak VRAM, 54 s total | Measured in P3 |
+| Review labels: click a dataset image, preview a mask, accept a revision, rebuild and export | Added in P4 |
+| Manual refinement covered by HTTP and Playwright end-to-end tests | Added in P4 |
+| Shared GPU model lock, memory-pressure unload, idle unload, `/api-info` model status | Added in P5 |
+| Real 20-image HTTP journey: upload → index → agent label → COCO download → refine → rebuilt export, 4.20 GB peak VRAM, no OOM | Measured in P5 |
+| Explicit loading/empty/error states with retries across Assets, Datasets, and Jobs | Added in P6 |
+| UI/API contract tests for routes, response envelopes, DOM ids, and navigation | Added in P6 |
+| Real VLM calibration: `qwen3-vl:4b` verdicts, sample overlays, and a labeled fallback | Added in P7 |
+| Diversity-based calibration samples from stored SigLIP vectors | Added in P7 |
+| Dataset-card COCO / YOLO detection / YOLO segmentation export selector | Added in P7 |
+| Doctor warning for CPU-only torch on an NVIDIA machine + Windows cu124 lock config | Added in P7 |
+| Real 20-image VLM journey: 5/5 verdicts, 5.82 GB whole-GPU peak, 383 s calibration/label/export | Measured in P7 |
 
 The original root README was a 950-line concatenation of 23 branch READMEs. Those are preserved verbatim in [`docs/branches/`](docs/branches/README.md).
 
@@ -39,7 +59,7 @@ uv sync --extra ml
 uv sync --extra postgres
 ```
 
-`uv sync --extra ml` installs the validated ML stack (`torch 2.6.x`, `torchvision 0.21.x`, `transformers 5.14.x`, `accelerate`). PyPI wheels may be CPU-only on Windows; for CUDA, install the matching CUDA wheels explicitly:
+`uv sync --extra ml` installs the validated ML stack (`torch 2.6.x`, `torchvision 0.21.x`, `transformers 5.14.x`, `accelerate`). On Windows the lock now routes `torch`/`torchvision` through the `pytorch-cu124` index, so the sync installs CUDA wheels instead of the CPU-only PyPI wheels. Verify with `agentic-cv doctor`: if it sees an NVIDIA GPU and `torch.version.cuda` is empty, it warns and prints the fix. For a different CUDA version or platform, install the matching wheels explicitly:
 
 ```powershell
 uv pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 `
@@ -55,7 +75,7 @@ agentic-cv doctor
 agentic-cv doctor --no-network
 ```
 
-The doctor checks Python, the selected device, PyTorch/CUDA, torchvision, transformers, accelerate, Hugging Face cache/access for `facebook/sam3` and SigLIP, Ollama reachability and model presence, free disk, and the API port. Every failure includes a fix. It exits non-zero if any check fails.
+The doctor checks Python, the selected device, PyTorch/CUDA, torchvision, transformers, accelerate, Hugging Face cache/access for `facebook/sam3` and SigLIP, Ollama reachability and model presence, free disk, and the API port. Every failure includes a fix; an NVIDIA GPU with a CPU-only torch build is a warning with the Windows wheel command. It exits non-zero if any check fails.
 
 ### Run
 
@@ -65,7 +85,7 @@ agentic-cv serve --data-dir .agentic-cv --host 127.0.0.1 --port 8000
 
 Open <http://127.0.0.1:8000>. Useful endpoints: `/api-info`, `/docs`, `/health/live`, `/health/ready`, `/health`, `/v1/metrics`.
 
-To process dataset-export jobs in a separate process:
+`agentic-cv serve` starts label, search-index, export, and agent-advance workers in the app process. To run dataset-export jobs in a separate process instead:
 
 ```powershell
 agentic-cv worker --data-dir .agentic-cv --worker-id export-worker
@@ -85,29 +105,37 @@ Do not run `ollama serve` if Ollama is already running on `127.0.0.1:11434`.
 
 ## What works today (browser)
 
-1. **Assets → Gallery**: list assets, thumbnails, source counts, "Index for search".
-2. **Assets → Upload**: create an asset and upload an image or video. Uploaded content is auto-indexed for search.
-3. **Assets → Search library**: semantic search across indexed frames. Results show images. Select results and **Create sub-asset**; the sub-asset is materialized as a real gallery asset.
-4. **Tools → Quick test**: run prompted SAM 3 on an existing asset source/frame or an uploaded image. Bounding boxes are scaled to the preview image.
-5. **Jobs & Exports → Label jobs / Exports**: inspect durable preview events and queue/inspect dataset-export jobs by dataset version.
+The workbench has two primary sections, **Assets** and **Agent**, plus a small **Datasets / Jobs** library area. It uses one local workspace; there is no tenant input and no UUID shown.
 
-This is a single-user local workbench, not yet the agentic product described below.
+1. **Assets**: list assets by name and thumbnail. Open a card to inspect its sources, media type, and lineage.
+2. **Upload media**: create one asset from several images/videos. Files are hashed and uploaded in 5 MB chunks; a durable search-index job is queued automatically when upload finishes.
+3. **Search the library**: search all assets or only the selected asset with a natural-language description. Results show images and scores.
+4. **Save results as sub-asset**: materializes the matches as a real gallery asset with parent-asset query lineage shown in its detail panel.
+5. **Agent**: choose an asset, describe the task, inspect the extracted specification, and confirm. The agent selects a diverse sample using stored SigLIP vectors, calibrates a threshold with the real VLM, and shows the validator mode, thresholds tried, sample overlays, and each verdict. It then labels the whole asset in the background, builds a dataset version, packages a COCO archive, and exposes a download button. Sessions survive a page reload; failures, fallbacks, and timeouts are shown in the chat.
+6. **Datasets**: list dataset versions built from label revisions and export them as COCO, YOLO detection, or YOLO segmentation.
+7. **Review labels**: in a dataset card, open **Review labels**, click an image, place positive/negative points, accept the previewed mask, and the app writes a new annotation revision, rebuilds a fresh dataset version, and leaves it ready to export.
+8. **Jobs**: inspect background search-index, labeling, and export jobs, including failures.
+
+The Agent planner asks your local Ollama model (`qwen3-vl:4b` by default, configurable) for a strict JSON task specification. If Ollama is unavailable, it falls back to the deterministic local planner and says so in the chat instead of failing. The same model is the default calibration validator: if Ollama and the model are reachable, calibration sends each sample overlay to it and stores accepted/confidence/reasoning per sample. If it is unreachable, calibration uses the explicitly labeled `at least one prediction` fallback; `AGENTIC_CV_AGENT_VALIDATOR=any-prediction` forces that fallback. The P1 label path remains available over HTTP: `POST /v1/label-jobs` → poll `GET /v1/label-jobs/{id}` → `POST /v1/datasets` → `POST /v1/dataset-exports` → `GET /v1/dataset-exports/{id}/download`.
+
+This is a single-user local workbench, not a hosted service.
 
 ## Target product (the plan)
 
 Two primary sections:
 
 - **Assets**: manage resources; search inside an asset with SigLIP; create sub-assets from results.
-- **Agent**: chat with an agent that extracts a task spec (objects, visual attributes, detection vs segmentation), calibrates SAM 3 on a stratified sample with a VLM validator, labels the whole asset, builds a dataset, shows a preview gallery, and offers COCO/YOLO download.
+- **Agent**: chat with an agent that extracts a task spec (objects, visual attributes, detection vs segmentation), calibrates SAM 3 on a diverse sample with a VLM validator, labels the whole asset, builds a dataset, shows a preview gallery, and offers COCO/YOLO download.
 
-The execution plan is tracked in the audit document supplied by the owner (P0–P6). P0 is this branch. The next phases are:
+The execution plan is tracked in the audit document supplied by the owner (P0–P7). P0 is the runtime-foundation branch. The next phases are:
 
-- **P1** `feature/label-execution-engine`: background runner, asset→image resolver, dataset builder, export download, job progress.
-- **P2** `feature/assets-experience`: single-workspace default, multi-file/chunked uploads, auto-index jobs, asset detail page, in-asset search, sub-asset lineage.
-- **P3** `feature/agent-chat`: session persistence, LLM task-spec agent, VLM-calibrated pipeline, chat UI, dataset gallery.
-- **P4** `feature/manual-refinement-ui`: point-click refinement wired to revisions.
-- **P5** `feature/gpu-resource-manager`: model serialization, lazy load/unload, batching, measured performance.
-- **P6** `feature/ux-e2e-quality`: Playwright journeys, empty/loading/error states, contract tests.
+- **P1** `feature/label-execution-engine`: background runner, asset→image resolver, dataset builder, export download, job progress. Implemented in this branch; HTTP e2e and crash/cancel recovery are covered by tests.
+- **P2** `feature/assets-experience`: single-workspace default, multi-file/chunked uploads, auto-index jobs, asset detail page, in-asset search, sub-asset lineage. Implemented in this branch; covered by a Playwright upload → index → search → sub-asset journey.
+- **P3** `feature/agent-chat`: session persistence, LLM task-spec agent, calibrated pipeline, chat UI, dataset download. Implemented in this branch; covered by HTTP and browser end-to-end tests.
+- **P4** `feature/manual-refinement-ui`: point-click refinement wired to revisions. Implemented in this branch; a Playwright journey proves mask preview, acceptance, dataset rebuild, and a corrected COCO export.
+- **P5** `feature/gpu-resource-manager`: shared model lock, lazy load/unload under memory pressure, measured performance. Implemented in this branch; the real 20-image HTTP journey completed on the 6 GB laptop without OOM. See [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
+- **P6** `feature/ux-e2e-quality`: browser loading/empty/error states, retry actions, contract tests, and the hidden-panel CSS fix. Implemented in this branch; see [`docs/branches/ux-e2e-quality.md`](docs/branches/ux-e2e-quality.md).
+- **P7** `feature/real-validation-loop`: real VLM calibration with traceable verdicts and sample overlays, a labeled fallback, cancellable calibration, diversity sampling, dataset-format selection, and the torch/CUDA doctor warning. Implemented in this branch; see [`docs/branches/real-validation-loop.md`](docs/branches/real-validation-loop.md) and the measured run in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
 
 No phase counts as complete until its feature is reachable from the browser and covered by an HTTP-level test.
 
@@ -116,6 +144,18 @@ No phase counts as complete until its feature is reachable from the browser and 
 ```
 FastAPI app (application.py)
 ├── api.py                 assets, uploads, orchestration, label jobs, calibration, SAM3 predict
+├── agent.py               plan/confirm/calibrate/label/dataset orchestration
+├── agent_api.py           /v1/agent/sessions HTTP surface + calibration overlays
+├── agent_store.py         durable SQLite agent sessions + messages
+├── agent_worker.py        advances labeling → dataset build → export
+├── calibration.py         SAM 3 threshold attempts + cancellation/traces
+├── calibration_samples.py diversity-first sample selection from SigLIP vectors
+├── calibration_validation.py default VLM/fallback choice + overlay artifacts
+├── vlm_validator.py       structured VLM acceptance rubric + verdict evidence
+├── ollama_vlm.py          local Ollama vision client (content/thinking JSON)
+├── overlay.py             source + SAM 3 masks/boxes → reviewable PNG
+├── ollama_text.py         strict JSON task-spec client
+├── click_refinement.py    click-point sessions + SAM 3 mask selection
 ├── semantic_api.py        search, record images, asset indexing, sub-asset materialization
 ├── preview_api.py         replayable label preview events
 ├── sam3_service.py        standalone multipart /v1/predict
@@ -128,10 +168,16 @@ FastAPI app (application.py)
 ├── postgres_pgvector.py   opt-in pgvector index
 ├── sam3.py                lazy local SAM 3 provider
 ├── embeddings.py          lazy SigLIP embeddings
-├── label_workflow.py      durable label-job state machine (exists; not executed by the app yet)
+├── model_resources.py     shared GPU lock, memory-pressure/idle unload, status
+├── label_workflow.py      durable label-job state machine
+├── label_worker.py        queued label-job polling + expired-lease recovery
+├── index_worker.py        durable auto-index jobs + expired-lease recovery
+├── label_images.py        asset sources/video frames → stable LabelImage records
 ├── batch_labeling.py      SAM 3 batch labeling + annotation persistence
-├── dataset.py             COCO/YOLO export + deterministic splits
+├── dataset_builder.py     latest revisions → immutable dataset version + image files
+├── dataset.py             COCO/YOLO serialization
 ├── dataset_store.py       tenant dataset versions
+├── dataset_export.py      COCO/YOLO files, images, manifest, zip archive
 ├── dataset_export_workflow.py / dataset_export_worker.py
 ├── job_store.py           durable jobs, leases, heartbeat, cancel
 ├── outbox.py              durable event outbox
@@ -151,16 +197,34 @@ Heavy dependencies are lazy or injectable. Default `pytest` runs with fakes and 
 | POST | `/v1/uploads/{id}/complete` | finalize and register a source |
 | GET | `/v1/assets/{id}/thumbnail` | representative thumbnail |
 | GET | `/v1/assets/{id}/image` | full representative image/frame (`source_id` optional) |
-| POST | `/v1/assets/{id}/index` | index an asset for semantic search |
+| POST | `/v1/assets/{id}/index` | index an asset for semantic search (synchronous) |
+| POST | `/v1/assets/{id}/index-jobs` | queue a durable auto-index job |
+| GET | `/v1/index-jobs/{id}` | read index-job status |
 | POST | `/v1/search` | semantic search |
 | GET | `/v1/search/records/{id}/image` | search-result image |
 | POST | `/v1/sub-assets/from-search` | create a sub-asset (and gallery asset) |
+| GET | `/v1/sub-assets` | list sub-assets with parent names and lineage |
+| GET | `/v1/jobs` | list background jobs for the tenant |
+| POST/GET | `/v1/agent/sessions` | plan an agent task / list sessions |
+| GET | `/v1/agent/sessions/{id}` | read a durable agent session |
+| POST | `/v1/agent/sessions/{id}/confirm` | calibrate (or use a fixed threshold) and start whole-asset labeling |
+| POST | `/v1/agent/sessions/{id}/cancel` | cancel the active calibration/labeling/export run |
+| GET | `/v1/agent/sessions/{id}/calibration-overlays/{overlay_id}` | authenticated calibration sample overlay PNG |
 | POST | `/v1/assets/{id}/predict` | prompted SAM 3 on one source |
 | POST | `/v1/predict` | multipart SAM 3 smoke endpoint |
 | POST | `/v1/orchestrate` | deterministic message → `TaskSpec` (regex fallback; not the agent) |
-| POST/GET | `/v1/label-jobs` | submit/read durable label jobs (execution is P1) |
+| POST/GET | `/v1/label-jobs` | submit/read durable label jobs; executed by the label worker |
+| POST | `/v1/label-jobs/{id}/cancel` | request cancellation of a queued/running label job |
+| POST/GET | `/v1/datasets` | build/list dataset versions from succeeded label jobs |
+| GET | `/v1/datasets/{id}` | read dataset-version summary |
+| GET | `/v1/datasets/{id}/images` | list dataset images and their annotations |
+| GET | `/v1/datasets/{id}/images/{image_id}/file` | fetch the image bytes for review |
+| POST | `/v1/datasets/{id}/rebuild` | rebuild a version from its latest annotation revisions |
+| WS | `/v1/refinement/{version_id}/{image_id}` | click-point mask preview (tenant query parameter) |
+| POST | `/v1/refinements/{session_id}/accept` | save the previewed mask as an annotation revision |
 | POST | `/v1/calibration/run` | threshold calibration on uploaded images |
 | POST/GET | `/v1/dataset-exports` | submit/read dataset-export jobs |
+| GET | `/v1/dataset-exports/{id}/download` | download the packaged COCO/YOLO zip |
 | GET | `/v1/preview/...` | replay label preview events |
 
 ## Testing
@@ -169,7 +233,24 @@ Heavy dependencies are lazy or injectable. Default `pytest` runs with fakes and 
 .venv\Scripts\python -m pytest -q
 ```
 
-Current local result: **202 passed, 10 skipped, 1 warning** (Starlette/httpx deprecation). The 10 skips are the opt-in PostgreSQL tests.
+Current local result: **275 passed, 10 skipped, 1 warning** (Starlette/httpx deprecation). The 10 skips are the opt-in PostgreSQL tests. The P1 tests include an HTTP-only fake-SAM journey through upload, labeling, dataset creation, COCO/YOLO export, zip download, cancellation, and expired-lease recovery. The P3 tests add a chat → confirm → calibration → label → dataset → browser-download journey, plus calibration-timeout, cancellation, fixed-threshold fallback, planner fallback, Ollama thinking-field compatibility, and durable-session coverage. The P4 tests add an HTTP refinement → revision → rebuild → corrected COCO export check and a browser click → mask preview → accept → rebuilt export journey. The P5 tests add shared-lock serialization, memory-pressure/idle unload, CPU no-torch status, provider reload, and SAM 3 box clipping. The P6 tests add skeleton/loading/empty/error/retry browser journeys and UI/API contract checks. The P7 tests add VLM selection/fallback/normalization, authenticated overlay serving, calibration cancellation and timeout recovery, diversity sampling, `get_embedding` across vector stores, the doctor CPU-torch warning, and the dataset format selector.
+
+The browser tests drive a real uvicorn server with fake providers. They skip if the Playwright browser binary is not installed:
+
+```powershell
+.venv\Scripts\python -m playwright install chromium
+.venv\Scripts\python -m pytest tests/test_assets_ui_playwright.py tests/test_agent_ui_playwright.py tests/test_manual_refinement_ui_playwright.py -q
+```
+
+The P4 browser journey runs the Agent, opens **Review labels**, checks that the mask overlay draws, accepts the correction, rebuilds the dataset, downloads the corrected COCO archive, verifies the new bounding box with `pycocotools`, and asserts that no UUID appears in visible text.
+
+The P5 unit/HTTP tests cover shared-model serialization, memory-pressure unload, idle unload, CPU/no-torch behavior, provider reload after unload, and clipping of out-of-bounds SAM 3 boxes. The real measurement is manual: [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) records the commands and observed numbers. On the RTX 4050 Laptop (6 GB), a 20-image real-image HTTP journey took 39.33 s to index, 40.29 s to calibrate/label/build/export, peaked at 4202.8 MB allocated / 4390.0 MB reserved, and completed without OOM.
+
+The P6 browser tests hold library requests to assert the gallery skeletons and Agent loading option, release them to assert every empty state, and fail library requests to assert error panels and working retries. Contract tests check every route/method the UI calls, the empty response envelopes, the `detail` error field, and that each `app.js` element id exists in `index.html`.
+
+The P7 real run used the same 20 real cached video frames with SigLIP2, SAM 3, and `qwen3-vl:4b` together. Calibration selected five diverse samples, tried threshold 0.30 once, and recorded five accepted VLM verdicts and five overlay ids. The run produced 34 annotations, downloaded a 3,602,141-byte COCO archive, then refined/rebuild/exported successfully. PyTorch peaked at 4,202.8 MB allocated / 4,390.0 MB reserved; the whole-GPU `nvidia-smi` counter peaked at 5,822 MB of 6,141 MB while Ollama was resident. Calibration/label/export took 383.21 s, versus 40.29 s on the P5 no-VLM path. Exact output is in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md); these are local observations, not production benchmarks.
+
+The P3 real-model manual run was executed on the owner's RTX 4050 Laptop (6 GB VRAM) with CUDA `torch 2.6.0+cu124` and cached `facebook/sam3`. It uploaded 20 generated images through the real HTTP API, calibrated at threshold 0.30 with 5/5 sample agreement, labeled all 20 images, and downloaded a COCO archive with 20 images and 20 annotations. Calibration plus the first model load took 38.49 s, the label job took 13.75 s, total wall time was 53.97 s, and peak allocated VRAM was 1.96 GB. The real Ollama planner (`qwen3-vl:4b`) returned a valid `TaskSpec` in 9.37 s. These are local measurements, not production benchmarks.
 
 Real PostgreSQL validation is opt-in:
 
@@ -186,7 +267,22 @@ Default runtime uses SQLite; `AGENTIC_CV_POSTGRES_DSN` enables PostgreSQL stores
 |---|---|---|
 | `AGENTIC_CV_DEVICE` | `auto` (`cuda` when available, else `cpu`) | `cpu`, `cuda`, or `cuda:<index>` |
 | `AGENTIC_CV_PRECISION` | `float16` (`float32` on CPU) | `float16`, `bfloat16`, `float32` |
+| `AGENTIC_CV_MODEL_HEADROOM_MB` | `512` | Extra free VRAM required before loading a model |
+| `AGENTIC_CV_MODEL_IDLE_UNLOAD_SEC` | `300` | Idle seconds before a model is evicted |
+| `AGENTIC_CV_EMBEDDING_VRAM_MB` | `2304` | SigLIP2 footprint used by the unload policy |
+| `AGENTIC_CV_SAM3_VRAM_MB` | `2048` | SAM 3 footprint used by the unload policy |
 | `AGENTIC_CV_POSTGRES_DSN` | unset | opt-in PostgreSQL + pgvector |
+| `AGENTIC_CV_AGENT_PLANNER` | `ollama` | set `rules` to skip the text model entirely |
+| `AGENTIC_CV_TEXT_MODEL` | `qwen3-vl:4b` | Ollama model used for task-spec JSON |
+| `AGENTIC_CV_OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint |
+| `AGENTIC_CV_OLLAMA_TIMEOUT_SEC` | `30` | task-spec request timeout |
+| `AGENTIC_CV_CALIBRATION_TIMEOUT_SEC` | `120` | agent calibration budget; a timeout returns HTTP 504 |
+| `AGENTIC_CV_AGENT_VALIDATOR` | unset (VLM when reachable) | set `any-prediction` (or `rules`) to force the labeled fallback |
+| `AGENTIC_CV_VLM_MODEL` | `qwen3-vl:4b` (or `AGENTIC_CV_TEXT_MODEL`) | Ollama vision model used for calibration |
+| `AGENTIC_CV_VLM_TIMEOUT_SEC` | `100` | per-VLM-request timeout; raise for first-load/warm-up on a 6 GB GPU |
+| `AGENTIC_CV_VLM_MAX_CALLS` | `50` | hard cap on VLM calls per calibration run |
+| `AGENTIC_CV_VLM_MIN_CONFIDENCE` | `0.7` | minimum VLM confidence for an accepted verdict |
+| `AGENTIC_CV_VLM_PROBE_TIMEOUT_SEC` | `1.0` | Ollama `/api/tags` reachability probe timeout |
 | `AGENTIC_CV_OIDC_ISSUER/AUDIENCE/JWKS_URL` | unset | opt-in OIDC/JWT auth |
 | `AGENTIC_CV_S3_BUCKET/ENDPOINT_URL` + `AWS_REGION` | unset | opt-in S3/MinIO storage |
 | `AGENTIC_CV_RABBITMQ_HOST/PORT/EXCHANGE` | unset | opt-in RabbitMQ publishing |
@@ -196,24 +292,52 @@ Model access: `facebook/sam3` is gated. Request access on Hugging Face and set `
 ## Demo script (current capabilities)
 
 1. `agentic-cv doctor` and `agentic-cv serve`.
-2. Upload one image and one short video to a new asset.
-3. Wait for auto-indexing; open **Search library** and search for an object.
-4. Select results and create a sub-asset; confirm it appears in the gallery.
-5. Open **Quick test**, select the sub-asset and a source, run a prompt, check that boxes align with the image.
-6. Open **Jobs & Exports** and inspect a label job's preview events or an export job.
+2. Open **Assets → Upload media**, name the asset, and select several photos plus a short video.
+3. Wait for the upload to finish and the auto-index job to report `indexed for search`.
+4. Open the asset card; confirm its sources and detail panel.
+5. In **Search the library**, switch scope to **Selected asset**, search for an object, and inspect the returned images.
+6. Click **Save results as sub-asset**; open the new card and confirm the query and parent-asset lineage.
+7. Open **Agent**, choose the asset, and enter `Create a segmentation dataset of workers wearing yellow vests.`
+8. Inspect the extracted task/prompt/sample specification, then click **Confirm and calibrate**.
+9. In the calibration card, confirm the validator says **Vision (VLM)** with `qwen3-vl:4b`, and inspect the thresholds tried, sample overlays, and accepted/rejected verdicts. If it says **at least one prediction**, read the notice and check Ollama before treating the run as VLM-validated.
+10. Watch whole-asset labeling, dataset build, and packaging progress; download the COCO archive from the run panel.
+11. Open **Datasets**, choose **YOLO detection** or **YOLO segmentation** in the version's format selector, click **Export**, and verify the downloaded archive. Then click **Review labels**, select an image, click a positive point (and a negative point if needed), and accept the previewed mask.
+12. The app writes a revision, rebuilds a refined dataset version, and reports that it is ready; export the refined version and verify the corrected annotation.
+13. Open **Jobs** to inspect the label/export jobs.
+14. Reload the page and reopen **Agent** to confirm the finished run and its calibration verdicts/overlays are restored from the local session.
+
+The owner's section-7 demo calls for both COCO and YOLO downloads. The Agent run panel downloads COCO; the Datasets card now offers COCO, YOLO detection, and YOLO segmentation for the same version.
 
 ## Limitations / safety
 
-- Interactive prediction is one image/frame per request. Whole-asset autolabeling requires P1/P3.
-- Label jobs are persisted but not executed by the app lifespan or the current worker.
-- No dataset version is created automatically from label results yet, and there is no export download endpoint.
-- The agent chat, task-spec LLM, VLM calibration bridge, and dataset gallery are not reachable from the UI yet.
+- The browser covers upload, indexing, search, sub-assets, Agent labeling, dataset listing, downloads, and per-image review. Manual correction is a click-guided selection of SAM 3 text-prompt masks for the dataset category, not a point-conditioned segmentation model; a click that no candidate mask contains cannot create a new object out of nothing.
+- Accepting a correction updates one existing annotation (or adds one when the image has none) and rebuilds a new immutable dataset version. It does not edit the old version in place.
+- The Agent's default calibration validator is the local Ollama VLM. If Ollama or `qwen3-vl:4b` is unavailable at confirmation, calibration uses the labeled `at least one prediction` fallback and shows the reason. If a VLM request fails mid-run, the remaining samples use the same labeled fallback; the calibration is not silently presented as VLM-validated. Set `AGENTIC_CV_AGENT_VALIDATOR=any-prediction` to force the fallback.
+- VLM validation sends a rendered sample overlay, not the original full-resolution image. Very small objects can be harder to judge, and the validator's confidence/reasoning is evidence for a human, not a guarantee of annotation quality.
+- VLM calibration is materially slower than the fallback and shares the 6 GB GPU with SAM 3. The measured 20-image VLM journey spent 383.21 s in calibrate/label/export versus 40.29 s on the no-VLM path.
+- The VLM runs as an external Ollama process. The app's shared model manager controls SigLIP2 and SAM 3, not Ollama; on Windows the driver can back allocations with shared system memory, so the 6 GB figure is not a hard partition.
+- The Agent run panel downloads COCO. Dataset cards offer COCO, YOLO detection, and YOLO segmentation through `/v1/dataset-exports`; the review flow rebuilds a version that can be exported in any of those formats.
+- `agentic-cv serve` executes label, index, export, and agent-advance jobs. The separate `agentic-cv worker` command still runs only the export worker.
+- Label jobs cancelled mid-run can leave partial annotation revisions; dataset creation requires a succeeded job, so partial runs are not packaged.
+- The Agent and Assets browser tests use fake SAM 3/embedding providers and a deterministic planner. Real-model evidence is a separate HTTP journey, not a full browser journey: the P7 run used 20 real cached video frames, real SigLIP2/SAM 3/`qwen3-vl:4b`, real workers, click refinement, and export, and peaked at 5.82 GB whole-GPU / 4.20 GB torch-allocated on the 6 GB laptop. It does not establish label quality on your production photos.
+- P5 serializes model inference and unloads under pressure, but it does not reserve VRAM in the driver. Another GPU-heavy process can still cause an OOM, and inference remains one image at a time rather than batched.
+- P6 tests loading with held browser requests and errors with failed browser responses. They do not simulate a real slow disk, a crashing backend process, or every payload shape; the contract tests are intentionally shallow.
+- The P3 planner asks Ollama for strict JSON. If the model is down or returns invalid JSON, the chat visibly falls back to deterministic rules.
+- Sub-assets copy the matched search images into a new asset; they are snapshots, not live filters over the parent asset.
 - SAM 3 is subject to Meta's SAM License and gated weights; this repository is not legal advice or a hosted-product clearance. See `docs/branches/sam-3-licensing-and-hosted-product-review-roadmap-item-10-complete.md`.
 - Do not commit `.agentic-cv/`, model weights, tokens, or local exports.
 
 ## Branch documentation
 
-- Current P0 branch: [`docs/branches/fix-runtime-foundation.md`](docs/branches/fix-runtime-foundation.md)
+- Current P7 branch: [`docs/branches/real-validation-loop.md`](docs/branches/real-validation-loop.md)
+- P6 branch record: [`docs/branches/ux-e2e-quality.md`](docs/branches/ux-e2e-quality.md)
+- P5 branch record: [`docs/branches/gpu-resource-manager.md`](docs/branches/gpu-resource-manager.md)
+- Measurements: [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)
+- P4 branch record: [`docs/branches/manual-refinement-ui.md`](docs/branches/manual-refinement-ui.md)
+- P3 branch record: [`docs/branches/agent-chat.md`](docs/branches/agent-chat.md)
+- P2 branch record: [`docs/branches/assets-experience.md`](docs/branches/assets-experience.md)
+- P1 branch record: [`docs/branches/label-execution-engine.md`](docs/branches/label-execution-engine.md)
+- P0 branch record: [`docs/branches/fix-runtime-foundation.md`](docs/branches/fix-runtime-foundation.md)
 - Historical branch READMEs: [`docs/branches/README.md`](docs/branches/README.md)
 - Repository hygiene proposal: [`docs/REPO_HYGIENE.md`](docs/REPO_HYGIENE.md)
 

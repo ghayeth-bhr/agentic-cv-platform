@@ -50,3 +50,53 @@ def test_sub_asset_tenant_access_is_enforced(tmp_path):
     with pytest.raises(PermissionError):
         store.get_for_tenant(uuid4(), record.sub_asset_id)
     store.close()
+
+
+def test_sub_asset_links_materialized_asset_and_lists_lineage(tmp_path):
+    store = SubAssetStore(str(tmp_path / "sub-assets.sqlite3"))
+    tenant_id = uuid4()
+    asset_id = uuid4()
+    record = store.create_from_results(
+        tenant_id=tenant_id,
+        query="red object",
+        results=[result("frame-1", "parent-a"), result("frame-2", "parent-b")],
+    )
+
+    linked = store.link_asset(record.sub_asset_id, asset_id=asset_id)
+
+    assert linked.asset_id == asset_id
+    assert store.find_by_asset(tenant_id, asset_id).sub_asset_id == record.sub_asset_id
+    assert store.find_by_asset(uuid4(), asset_id) is None
+    listed = store.list_for_tenant(tenant_id)
+    assert [item.sub_asset_id for item in listed] == [record.sub_asset_id]
+    assert listed[0].parent_asset_ids == ("parent-a", "parent-b")
+    store.close()
+
+
+def test_sub_asset_store_migrates_old_table_without_asset_id(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "sub-assets.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        """
+        CREATE TABLE sub_assets (
+            sub_asset_id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            parent_asset_ids TEXT NOT NULL,
+            query TEXT NOT NULL,
+            result_ids TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    store = SubAssetStore(str(path))
+    record = store.create_from_results(
+        tenant_id=uuid4(), query="object", results=[result("frame", "asset")]
+    )
+    assert record.asset_id is None
+    assert store.find_by_asset(record.tenant_id, uuid4()) is None
+    store.close()

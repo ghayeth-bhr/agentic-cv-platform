@@ -74,6 +74,16 @@ class SqliteVectorIndex:
             return None
         return ImageRecord(record_id=row["record_id"], asset_id=row["asset_id"], image_path=Path(row["image_path"]))
 
+    def get_embedding(self, record_id: str) -> np.ndarray | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT dimension, embedding FROM vector_records WHERE record_id = ?",
+                (record_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return np.frombuffer(row["embedding"], dtype=np.float32).copy()
+
     def search(
         self,
         query_embedding: Sequence[float],

@@ -7,10 +7,13 @@ from typing import Iterable, Mapping
 
 
 DEFAULT_ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
-    "reader": frozenset({"search:read", "preview:read", "exports:read"}),
+    "reader": frozenset({
+        "search:read", "preview:read", "exports:read", "labels:read", "jobs:read",
+    }),
     "writer": frozenset({
         "assets:write", "uploads:write", "search:read", "subassets:write",
         "preview:read", "exports:read", "exports:write",
+        "labels:read", "labels:write", "jobs:read",
     }),
     "admin": frozenset({"*"}),
 }

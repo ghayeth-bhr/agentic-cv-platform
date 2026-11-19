@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from agentic_cv.sam3 import LocalSam3Provider, load_image
+from agentic_cv.sam3 import LocalSam3Provider, clip_box, load_image
 
 
 class FakeTensor:
@@ -59,7 +59,7 @@ class FakeProcessor:
     def post_process_instance_segmentation(self, outputs, **kwargs):
         return [{
             "masks": [FakeTensor(np.array([[True, False], [False, True]]))],
-            "boxes": [FakeTensor([1, 2, 3, 4])],
+            "boxes": [FakeTensor([1, 1, 3, 2])],
             "scores": [FakeTensor(0.9)],
         }]
 
@@ -81,8 +81,32 @@ def test_provider_is_lazy_and_maps_predictions():
 
     assert len(predictions) == 1
     assert predictions[0].score == pytest.approx(0.9)
-    assert predictions[0].box == (1.0, 2.0, 3.0, 4.0)
+    assert predictions[0].box == (1.0, 1.0, 3.0, 2.0)
     assert predictions[0].mask.shape == (2, 2)
+
+
+def test_clip_box_clamps_to_image_and_drops_empty_boxes():
+    assert clip_box((-5, -2, 8, 12), width=10, height=10) == (0.0, 0.0, 8.0, 10.0)
+    assert clip_box((11, 2, 20, 8), width=10, height=10) is None
+
+
+class OutOfBoundsProcessor(FakeProcessor):
+    def post_process_instance_segmentation(self, outputs, **kwargs):
+        return [{
+            "masks": [FakeTensor(np.array([[True, False], [False, True]]))],
+            "boxes": [FakeTensor([-4, 1, 8, 9])],
+            "scores": [FakeTensor(0.9)],
+        }]
+
+
+def test_provider_clips_out_of_bounds_boxes_before_returning_predictions():
+    provider = LocalSam3Provider(
+        loader=lambda config: (FakeModel(), OutOfBoundsProcessor(), FakeTorch())
+    )
+
+    predictions = provider.predict(Image.new("RGB", (3, 2)), "brown bear")
+
+    assert predictions[0].box == (0.0, 1.0, 3.0, 2.0)
 
 
 def test_provider_rejects_empty_prompt_and_invalid_threshold():

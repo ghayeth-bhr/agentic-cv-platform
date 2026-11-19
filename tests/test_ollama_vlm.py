@@ -56,6 +56,23 @@ def test_ollama_client_accepts_file_uri_and_rejects_remote_overlay(tmp_path: Pat
         OllamaVlmClient().judge(overlay_uri="https://example.test/overlay.jpg", prompt="bear")
 
 
+def test_ollama_client_accepts_json_from_the_thinking_field(monkeypatch, tmp_path: Path):
+    overlay = tmp_path / "overlay.jpg"
+    overlay.write_bytes(b"bytes")
+    thinking = json.dumps({"confidence": 0.8, "reasoning": "ok"})
+    monkeypatch.setattr(
+        "agentic_cv.ollama_vlm.urlopen",
+        lambda request, timeout: FakeResponse(
+            {"message": {"content": "", "thinking": thinking}}
+        ),
+    )
+
+    assert OllamaVlmClient().judge(overlay_uri=str(overlay), prompt="bear") == {
+        "confidence": 0.8,
+        "reasoning": "ok",
+    }
+
+
 def test_ollama_client_rejects_malformed_response(monkeypatch, tmp_path: Path):
     overlay = tmp_path / "overlay.jpg"
     overlay.write_bytes(b"bytes")

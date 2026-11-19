@@ -88,7 +88,7 @@ already verified the typed 503 `model_unavailable` response.
 - `uv sync --extra ml` selects PyPI wheels. Windows CUDA users must install the `+cu124` wheels explicitly (documented in the root README); the automatic fallback keeps the default install usable on CPU.
 - CPU inference is functional but slow; full model runs still target the CUDA environment.
 - Ollama is still required for the future agent/VLM phases; P0 only diagnoses it.
-- No agent chat, label execution, dataset builder, export download, or refinement UI exists yet.
+- At P0 time there was no agent chat, label execution, dataset builder, export download, or refinement UI. P1 later added the label execution/dataset/export backend path.
 - Repository hygiene: owner approved option A. `main` was fast-forwarded to `2855e2b` and 41 merged feature branches were pruned. The GitHub **default branch is still `feature/platform-foundation-contracts`** and must be changed to `main` manually (no `gh`/token available here). See `docs/REPO_HYGIENE.md`.
 
 ## Next boundary

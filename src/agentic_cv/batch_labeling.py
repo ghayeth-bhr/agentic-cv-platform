@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image
 
 from .dataset import Annotation, DatasetCategory, DatasetImage, DatasetVersion
-from .sam3 import Sam3Prediction, Sam3Provider
+from .sam3 import Sam3Prediction, Sam3Provider, clip_box
 
 
 BatchTask = Literal["detection", "segmentation"]
@@ -22,6 +22,7 @@ ProgressCallback = Callable[[str, int, int], None]
 class LabelImage:
     image_id: str
     path: Path
+    file_name: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -38,7 +39,7 @@ class BatchLabelResult:
     dataset: DatasetVersion
 
 
-def _mask_polygons(mask: np.ndarray) -> tuple[tuple[float, ...], ...]:
+def mask_polygons(mask: np.ndarray) -> tuple[tuple[float, ...], ...]:
     binary = (mask.astype(np.uint8) > 0).astype(np.uint8)
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     polygons = []
@@ -83,12 +84,13 @@ class Sam3BatchLabeler:
                 dataset_images.append(
                     DatasetImage(
                         image_id=image.image_id,
-                        file_name=image.path.name,
+                        file_name=image.file_name or image.path.name,
                         width=source.width,
                         height=source.height,
                     )
                 )
                 predictions = self.provider.predict(source, prompt, threshold=threshold)
+                width, height = source.width, source.height
             for index, prediction in enumerate(predictions):
                 raw_predictions.append(
                     RawPrediction(
@@ -96,8 +98,13 @@ class Sam3BatchLabeler:
                         box=prediction.box, mask=prediction.mask,
                     )
                 )
-                x1, y1, x2, y2 = prediction.box
-                segmentation = _mask_polygons(prediction.mask) if task == "segmentation" else ()
+                clipped = clip_box(
+                    prediction.box, width=width, height=height
+                )
+                if clipped is None:
+                    continue
+                x1, y1, x2, y2 = clipped
+                segmentation = mask_polygons(prediction.mask) if task == "segmentation" else ()
                 annotations.append(
                     Annotation(
                         annotation_id=f"{image.image_id}:{index}",
