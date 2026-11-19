@@ -39,6 +39,7 @@ from .agent_dialogue import (
     Slot,
     TaskDraft,
     apply_patch,
+    clean_class_phrase,
     draft_from_spec,
     join_names,
     mark_asked,
@@ -256,27 +257,54 @@ def _stems(text: str) -> set[str]:
     return {word[:4] for word in re.findall(r"[a-z0-9]+", text.lower()) if len(word) >= 3}
 
 
-def _patch_from_model(
-    payload: dict[str, Any], *, rules: DraftPatch, message: str, draft: TaskDraft
-) -> DraftPatch:
-    """Validate the model's JSON; keep only classes grounded in the conversation.
+def _class_key(item: ClassSpec) -> str:
+    """Order-free, singular-ish key: "orange safety vest" == "safety vest" + [orange]."""
 
-    A class must share a word stem with the user's message or the current class
-    list, so a small model cannot invent "person" from "make a dataset".
+    words = re.findall(r"[a-z0-9]+", " ".join((*item.attributes, item.name)).lower())
+    return " ".join(sorted(word[:-1] if word.endswith("s") and len(word) > 3 else word for word in words))
+
+
+def _patch_from_model(
+    payload: dict[str, Any],
+    *,
+    rules: DraftPatch,
+    message: str,
+    draft: TaskDraft,
+) -> DraftPatch:
+    """Validate the model's JSON; code decides what actually changed.
+
+    Measured on qwen3-vl:4b: the model extracts good class names but sets
+    ``classes_changed`` to false almost every time, invents a task type for
+    messages that never mention one, and repeats a class with and without its
+    attribute. So:
+
+    * ``classes_changed`` is ignored: the model's list is compared with the
+      current draft, and an identical list means "no change";
+    * a class must share a word stem with the user's message or the current
+      classes (no invented classes), and near-duplicates are merged;
+    * the model's task type is used only when the message hints at one or
+      the agent just asked for it;
+    * when the model changes nothing, the deterministic rules (which handle
+      "also", "remove", "only") decide.
     """
 
+    hinted = rules.task_type is not None or draft.pending_slot == "task_type"
     task_type = payload.get("task_type")
-    task_type = task_type if task_type in ("detection", "segmentation") else rules.task_type
+    if task_type not in ("detection", "segmentation") or not hinted:
+        task_type = None
+    task_type = rules.task_type or task_type
     export_format = payload.get("export_format")
     export_format = export_format if export_format in ("coco", "yolo") else rules.export_format
+
     classes = None
-    if payload.get("classes_changed") and isinstance(payload.get("classes"), list):
+    if isinstance(payload.get("classes"), list):
         grounding = _stems(message) | _stems(" ".join(item.name for item in draft.classes))
         parsed: list[ClassSpec] = []
+        keys: set[str] = set()
         for item in payload["classes"][:10]:
             if not isinstance(item, dict) or not isinstance(item.get("name"), str):
                 continue
-            name = " ".join(item["name"].split())
+            name = clean_class_phrase(" ".join(item["name"].split()))
             if not name or not (_stems(name) & grounding):
                 continue
             attributes = tuple(
@@ -284,14 +312,18 @@ def _patch_from_model(
                 for value in item.get("attributes", [])
                 if isinstance(value, str) and value.strip()
             )[:5]
-            if name.lower() not in {existing.name.lower() for existing in parsed}:
-                parsed.append(ClassSpec(name=name, attributes=attributes))
-        if parsed:
+            candidate = ClassSpec(name=name, attributes=attributes)
+            key = _class_key(candidate)
+            # "safety vest" + [orange] after "orange safety vest": same class.
+            if key in keys or any(set(key.split()) <= set(seen.split()) for seen in keys):
+                continue
+            keys.add(key)
+            parsed.append(candidate)
+        current = {_class_key(item) for item in draft.classes}
+        if parsed and {_class_key(item) for item in parsed} != current:
             classes = tuple(parsed)
-    if classes is None and rules.classes is not None and rules.classes_mode != "replace":
+    if classes is None and rules.classes is not None:
         return replace(rules, task_type=task_type, export_format=export_format)
-    if classes is None and pending_slot_is_classes(draft) and rules.classes is not None:
-        classes = rules.classes
     return DraftPatch(task_type=task_type, classes=classes, export_format=export_format)
 
 
@@ -614,23 +646,33 @@ class AgentService:
                 classes.append(item)
                 continue
             fallback = rules_prompt(item)
-            prompts: list[str] = []
+            # The user's own phrase leads: on qwen3-vl:4b the enhancer drifts
+            # ("yellow-orange safety vest with reflective strips") or drops
+            # meaning ("yellow vest workers"). Its phrases are kept only as
+            # short alternatives that still name the object, for calibration
+            # to compare.
+            prompts: list[str] = [fallback]
+            head = _stems(item.name.split()[-1]) if item.name.split() else set()
             if enhancer is not None:
                 try:
                     enhanced = enhancer.enhance(fallback)
-                    prompts = [
+                    prompts.extend(
                         phrase for phrase in enhanced.prompts
-                        if 0 < len(phrase.split()) <= 8
-                    ]
+                        if 0 < len(phrase.split()) <= 4 and (not head or _stems(phrase) & head)
+                    )
                 except Exception as exc:
                     # Skip the enhancer for a while instead of paying its
                     # timeout on every class and every turn.
                     self._enhancer_down_until = time.monotonic() + 30.0
                     enhancer = None
                     logger.warning("prompt enhancement failed; using the class phrase: %s", exc)
-            if fallback.lower() not in {phrase.lower() for phrase in prompts}:
-                prompts.append(fallback)
-            classes.append(replace(item, prompts=tuple(prompts[:4])))
+            unique: list[str] = []
+            for phrase in prompts:
+                if _class_key(ClassSpec(name=phrase)) not in {
+                    _class_key(ClassSpec(name=seen)) for seen in unique
+                }:
+                    unique.append(phrase)
+            classes.append(replace(item, prompts=tuple(unique[:4])))
         return replace(draft, classes=tuple(classes))
 
     def _plan_summary(

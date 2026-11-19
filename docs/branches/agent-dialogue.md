@@ -70,9 +70,24 @@ New: `tests/test_agent_dialogue.py` (27 tests):
 
 Existing tests updated for the new UI and API shape: the asset picker in two browser tests, the UI route/id contract, and one private sampler call.
 
+## Real-model validation (qwen3-vl:4b on Ollama 0.31.2, RTX 4050 6 GB)
+
+**Extraction.** Run against the real model, the first version showed four problems the fakes could not:
+- `classes_changed` was `false` almost every time, even when the classes were correct, so classes were dropped.
+- Task types were invented for messages that never mention one.
+- One class came back twice (with and without its attribute).
+- The prompt enhancer drifted ("yellow-orange safety vest with reflective strips") or lost meaning ("yellow vest workers").
+
+Fixes: the flag is ignored and code compares lists; the model's task type needs a hint in the message; near-duplicates are merged; "only X" is handled; possessives are stripped ("their tusks" → "tusks"); and the user's phrase leads the prompt list, with enhancer phrases kept only if they have at most 4 words and still name the object. After the fixes, 9 of 9 probe phrases parse as intended, at about 3.5 s per turn (about 10–14 s on a cold model). Each measured shape is pinned by a unit test.
+
+**End-to-end** (production wiring, real LLM + SAM 3 + VLM, 9 wildlife frames in 2 assets): the conversation went from question, to answer, to the task-type question, to "Segmentation, and export it as YOLO", reaching a correct plan. Calibration ran for both classes with the VLM: 459 s, peak whole-GPU 5,914 MB of 6,141 MB, no OOM. **It ended in `needs_attention` for a reason that belongs to Phase 2**, and this run was its first real evidence:
+- SAM 3 was correct on all 5 samples. It segmented the elephants and tusks on 2 frames (VLM confidence 0.98 and 0.95) and returned nothing on 3 frames that contain no elephant (dik-dik, buffalo, gerenuk).
+- Calibration rejects "no masks" without asking whether the target is present. Correct negatives therefore count as failures, and agreement stalled at 2/5 at every threshold.
+- The diversity sampler picked exactly those three outlier frames.
+
 ## Limitations
 
-- **The real Ollama extraction path was not exercised in this session:** Ollama was not running on `127.0.0.1:11434`. The fallback path was exercised against the dead endpoint. Run a manual check with `qwen3-vl:4b` before relying on the LLM planner. The rules extractor covers clear requests but not free-form phrasing.
+- The rules extractor covers clear requests but not free-form phrasing. Free-form phrasing relies on the LLM path (validated below).
 - Calibration is still the Phase 0 ladder, run per class, and still synchronous inside `/confirm`. With N classes the timeout budget is N × `AGENTIC_CV_CALIBRATION_TIMEOUT_SEC`. Phase 2 makes calibration a durable job, searches prompt alternatives, and reuses one forward pass per sample.
 - Labeling runs one SAM 3 forward per class per image. Phase 3 shares the vision features across classes.
 - The prompt agent sees only text. Grounding prompts in sample images with the VLM is a Phase 2 candidate.
