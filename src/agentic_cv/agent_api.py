@@ -7,6 +7,7 @@ from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, FastAPI, Header, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from .agent import AgentConflict, AgentService, AgentSessionView, CalibrationTimeoutError
@@ -233,6 +234,35 @@ def create_app(dependencies: AgentApiDependencies) -> FastAPI:
             _raise_http(exc)
             raise
         return _session_response(view)
+
+    @router.get(
+        "/v1/agent/sessions/{session_id}/calibration-overlays/{overlay_id}"
+    )
+    def get_calibration_overlay(
+        session_id: UUID,
+        overlay_id: str,
+        x_tenant_id: str = Header(...),
+        x_api_key: str | None = Header(None),
+        authorization: str | None = Header(None),
+    ) -> FileResponse:
+        tenant_id = _tenant(x_tenant_id)
+        _authorize(
+            dependencies.authorizer,
+            credential=_credential(authorization, x_api_key),
+            tenant_id=tenant_id,
+            role="labels:read",
+        )
+        try:
+            path = dependencies.service.overlay_path(
+                tenant_id=tenant_id,
+                session_id=session_id,
+                overlay_id=overlay_id,
+            )
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404, detail="calibration overlay not found"
+            ) from exc
+        return FileResponse(path, media_type="image/png")
 
     @router.post(
         "/v1/agent/sessions/{session_id}/confirm", response_model=AgentSessionResponse

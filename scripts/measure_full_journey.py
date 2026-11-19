@@ -19,7 +19,9 @@ import asyncio
 import hashlib
 import io
 import json
+import shutil
 import socket
+import subprocess
 import threading
 import time
 import zipfile
@@ -30,6 +32,110 @@ from tempfile import TemporaryDirectory
 from PIL import Image, ImageDraw
 
 TENANT_ID = "00000000-0000-0000-0000-000000000001"
+
+
+class NvidiaSmiSampler:
+    """Sample whole-GPU used memory, including Ollama's separate process."""
+
+    def __init__(self, interval_sec: float = 0.25) -> None:
+        self.executable = shutil.which("nvidia-smi")
+        self.interval_sec = interval_sec
+        self.latest_used_mb: float | None = None
+        self.total_mb: float | None = None
+        self.peak_used_mb: float | None = None
+        self.window_baseline_mb: float | None = None
+        self.window_peak_mb: float | None = None
+        self.calibration_baseline_mb: float | None = None
+        self.calibration_peak_mb: float | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self.executable is None:
+            return
+        self._stop.clear()
+        used = self._query_used()
+        if used is not None:
+            self.window_baseline_mb = used
+            self.window_peak_mb = used
+        self._thread = threading.Thread(
+            target=self._run, name="nvidia-smi-sampler", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=3)
+
+    def mark(self) -> None:
+        used = self._query_used()
+        self.calibration_baseline_mb = used
+        self.calibration_peak_mb = used
+
+    def report(self) -> dict[str, object]:
+        return {
+            "available": self.executable is not None,
+            "peak_used_mb": self.peak_used_mb,
+            "total_mb": self.total_mb,
+            "window_baseline_mb": self.window_baseline_mb,
+            "window_peak_mb": self.window_peak_mb,
+            "window_growth_mb": (
+                round(self.window_peak_mb - self.window_baseline_mb, 1)
+                if self.window_baseline_mb is not None
+                and self.window_peak_mb is not None
+                else None
+            ),
+            "calibration_baseline_mb": self.calibration_baseline_mb,
+            "calibration_peak_mb": self.calibration_peak_mb,
+            "calibration_growth_mb": (
+                round(self.calibration_peak_mb - self.calibration_baseline_mb, 1)
+                if self.calibration_baseline_mb is not None
+                and self.calibration_peak_mb is not None
+                else None
+            ),
+        }
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_sec):
+            self._query_used()
+
+    def _query_used(self) -> float | None:
+        if self.executable is None:
+            return None
+        try:
+            completed = subprocess.run(
+                [
+                    self.executable,
+                    "--query-gpu=memory.used,memory.total",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if completed.returncode != 0 or not completed.stdout.strip():
+            return None
+        first = completed.stdout.strip().splitlines()[0]
+        parts = [part.strip() for part in first.split(",")]
+        if len(parts) != 2:
+            return None
+        try:
+            used = float(parts[0])
+            total = float(parts[1])
+        except ValueError:
+            return None
+        self.latest_used_mb = used
+        self.total_mb = total
+        self.peak_used_mb = used if self.peak_used_mb is None else max(self.peak_used_mb, used)
+        if self.window_peak_mb is not None:
+            self.window_peak_mb = max(self.window_peak_mb, used)
+        if self.calibration_peak_mb is not None:
+            self.calibration_peak_mb = max(self.calibration_peak_mb, used)
+        return used
 
 
 def _free_port() -> int:
@@ -143,7 +249,7 @@ async def _wait_session(client, headers, session_id: str, *, timeout: float) -> 
         response.raise_for_status()
         body = response.json()
         last = body
-        if body["status"] in {"complete", "failed", "cancelled"}:
+        if body["status"] in {"complete", "failed", "cancelled", "needs_attention"}:
             return body
         await asyncio.sleep(0.25)
     raise TimeoutError(f"agent session did not finish: {last}")
@@ -210,7 +316,7 @@ async def _run(args) -> dict:
     from agentic_cv.agent import RulesTaskPlanner
     from agentic_cv.application import LocalAppConfig, create_local_app
 
-    with TemporaryDirectory() as temp:
+    with TemporaryDirectory(ignore_cleanup_errors=True) as temp:
         root = Path(temp)
         source = Path(args.source).expanduser().resolve() if args.source else None
         images = (
@@ -242,6 +348,8 @@ async def _run(args) -> dict:
         }
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
+        sampler = NvidiaSmiSampler()
+        sampler.start()
 
         def checkpoint(name: str, started: float) -> None:
             elapsed = round(time.perf_counter() - started, 2)
@@ -252,7 +360,10 @@ async def _run(args) -> dict:
             print(f"{name}: {elapsed}s", flush=True)
 
         with _serve(app) as base_url:
-            async with httpx.AsyncClient(base_url=base_url, timeout=120) as client:
+            async with httpx.AsyncClient(
+                base_url=base_url,
+                timeout=httpx.Timeout(args.calibration_timeout + 180, connect=30),
+            ) as client:
                 started = time.perf_counter()
                 asset_id = await _upload_images(
                     client, headers, images, "Measured asset"
@@ -281,6 +392,7 @@ async def _run(args) -> dict:
                 ).json()
                 if session["status"] != "awaiting_confirmation":
                     raise RuntimeError(f"unexpected agent status: {session}")
+                sampler.mark()
                 confirmed = await client.post(
                     f"/v1/agent/sessions/{session['session_id']}/confirm",
                     headers=headers,
@@ -289,6 +401,49 @@ async def _run(args) -> dict:
                 if confirmed.status_code >= 400:
                     raise RuntimeError(
                         f"confirmation failed: {confirmed.status_code} {confirmed.text}"
+                    )
+                confirmed_body = confirmed.json()
+                calibration = confirmed_body.get("calibration") or {}
+                verdicts = [
+                    verdict
+                    for attempt in calibration.get("attempts") or []
+                    for verdict in attempt.get("verdicts") or []
+                ]
+                report["calibration"] = {
+                    "status": calibration.get("status"),
+                    "threshold": calibration.get("threshold"),
+                    "validator_mode": calibration.get("validator_mode"),
+                    "validator_model": calibration.get("validator_model"),
+                    "notice": calibration.get("notice"),
+                    "thresholds_tried": [
+                        attempt.get("threshold")
+                        for attempt in calibration.get("attempts") or []
+                    ],
+                    "attempts": len(calibration.get("attempts") or []),
+                    "verdicts": len(verdicts),
+                    "accepted_verdicts": sum(
+                        1 for verdict in verdicts if verdict.get("accepted")
+                    ),
+                    "overlay_ids": [
+                        verdict.get("overlay_id")
+                        for verdict in verdicts
+                        if verdict.get("overlay_id")
+                    ],
+                }
+                if args.require_vlm and calibration.get("validator_mode") != "vlm":
+                    raise RuntimeError(
+                        "VLM validation was required but the run used "
+                        f"{calibration.get('validator_mode')!r}: "
+                        f"{calibration.get('notice')!r}"
+                    )
+                if args.require_vlm and (
+                    not verdicts
+                    or calibration.get("notice")
+                    or any(not verdict.get("overlay_id") for verdict in verdicts)
+                ):
+                    raise RuntimeError(
+                        "VLM validation was required but produced no visual "
+                        f"verdict evidence: {report['calibration']}"
                     )
                 completed = await _wait_session(
                     client,
@@ -406,7 +561,9 @@ async def _run(args) -> dict:
                         checkpoint("refined_export", started)
 
                 report["api_info_end"] = (await client.get("/api-info")).json()
+        sampler.stop()
         report["peak"] = _peak(torch)
+        report["nvidia_smi"] = sampler.report()
         print(json.dumps(report, indent=2), flush=True)
         if args.json_out is not None:
             args.json_out.write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -424,6 +581,7 @@ def main() -> int:
     parser.add_argument("--prompt", default="animals")
     parser.add_argument("--timeout", type=float, default=900)
     parser.add_argument("--calibration-timeout", type=float, default=300)
+    parser.add_argument("--require-vlm", action="store_true")
     parser.add_argument("--json-out", type=Path, default=None)
     args = parser.parse_args()
     asyncio.run(_run(args))

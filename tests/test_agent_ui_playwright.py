@@ -15,7 +15,13 @@ from pycocotools.coco import COCO
 
 from agentic_cv.agent import RulesTaskPlanner
 from agentic_cv.application import LocalAppConfig, create_local_app
+from agentic_cv.calibration_validation import ValidatorSelection
 from agentic_cv.sam3 import Sam3Prediction
+from agentic_cv.vlm_validator import (
+    OverlayArtifact,
+    VlmCalibrationValidator,
+    VlmValidator,
+)
 
 
 class FakeEmbeddingProvider:
@@ -36,6 +42,46 @@ class FakeSam3:
                 mask=np.ones((height, width), dtype=bool),
             )
         ]
+
+
+class FakeVlmClient:
+    def judge(self, *, overlay_uri, prompt):
+        return {
+            "target_present": True,
+            "fully_detected": True,
+            "false_positive": False,
+            "mask_tight": True,
+            "confidence": 0.93,
+            "reasoning": "The mask covers the worker cleanly.",
+        }
+
+
+def vlm_factory(tmp_path):
+    def factory(tenant_id, session_id):
+        directory = (
+            tmp_path
+            / "data"
+            / "calibration-overlays"
+            / str(tenant_id)
+            / str(session_id)
+        )
+        overlay_id = "c" * 24 + ".png"
+
+        def build(sample, predictions):
+            directory.mkdir(parents=True, exist_ok=True)
+            path = directory / overlay_id
+            Image.new("RGB", (96, 64), (210, 80, 40)).save(path, format="PNG")
+            return OverlayArtifact(uri=str(path), overlay_id=overlay_id)
+
+        return ValidatorSelection(
+            validator=VlmCalibrationValidator(
+                VlmValidator(FakeVlmClient()), build, model_revision="fake-vlm"
+            ),
+            mode="vlm",
+            model="fake-vlm",
+        )
+
+    return factory
 
 
 def _free_port() -> int:
@@ -96,6 +142,7 @@ def test_agent_chat_download_and_session_restore_in_browser(tmp_path):
             embedding_provider=FakeEmbeddingProvider(),
             sam3_provider=FakeSam3(),
             agent_planner=RulesTaskPlanner(),
+            calibration_validator_factory=vlm_factory(tmp_path),
             calibration_timeout_sec=30,
             start_workers=True,
             worker_poll_interval=0.05,
@@ -150,6 +197,20 @@ def test_agent_chat_download_and_session_restore_in_browser(tmp_path):
             expect(page.locator("#agent-progress")).to_contain_text(
                 "COCO archive ready to download"
             )
+            expect(page.locator("#agent-calibration")).to_contain_text(
+                "Vision validation · fake-vlm"
+            )
+            expect(page.locator("#agent-calibration")).to_contain_text("Accepted")
+            expect(page.locator("#agent-calibration")).to_contain_text(
+                "Threshold 0.30"
+            )
+            threshold = page.locator("#agent-calibration details").first
+            threshold.locator("summary").click()
+            overlay_image = threshold.locator("figure img").first
+            expect(overlay_image).to_be_visible(timeout=10_000)
+            page.wait_for_function(
+                "() => { const img = document.querySelector('#agent-calibration details[open] figure img'); return !!img && img.naturalWidth > 0; }"
+            )
 
             with page.expect_download(timeout=15_000) as download_info:
                 page.locator("#agent-download").click()
@@ -175,6 +236,27 @@ def test_agent_chat_download_and_session_restore_in_browser(tmp_path):
                 "Dataset ready", timeout=20_000
             )
             expect(page.locator("#agent-download")).to_be_visible()
+
+            # The dataset card offers COCO and YOLO exports and the browser can
+            # download the selected format.
+            page.locator(".nav-item[data-view='datasets']").click()
+            dataset_card = page.locator("#datasets-list .dataset-card").first
+            expect(dataset_card).to_be_visible(timeout=15_000)
+            format_select = dataset_card.locator("[data-export-format='true']")
+            expect(format_select).to_have_value("coco")
+            format_select.select_option("yolo-detection")
+            with page.expect_download(timeout=30_000) as yolo_info:
+                dataset_card.get_by_role("button", name="Export").click()
+            yolo_download = yolo_info.value
+            assert yolo_download.suggested_filename.endswith(
+                "-yolo-detection.zip"
+            )
+            yolo_archive = tmp_path / "yolo-download.zip"
+            yolo_download.save_as(yolo_archive)
+            with zipfile.ZipFile(yolo_archive) as bundle:
+                names = bundle.namelist()
+                assert "data.yaml" in names
+                assert any(name.startswith("labels/") for name in names)
 
             body_text = page.locator("body").inner_text()
             assert _uuid_pattern().search(body_text) is None, body_text

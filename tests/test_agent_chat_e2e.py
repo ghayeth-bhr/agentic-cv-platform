@@ -1,5 +1,6 @@
 import hashlib
 import io
+import threading
 import time
 import zipfile
 
@@ -10,7 +11,17 @@ from pycocotools.coco import COCO
 
 from agentic_cv.agent import OllamaTaskPlanner, RulesTaskPlanner
 from agentic_cv.application import LocalAppConfig, create_local_app
+from agentic_cv.calibration import CalibrationTrace
+from agentic_cv.calibration_validation import (
+    ValidatorSelection,
+    any_prediction_selection,
+)
 from agentic_cv.sam3 import Sam3Prediction
+from agentic_cv.vlm_validator import (
+    OverlayArtifact,
+    VlmCalibrationValidator,
+    VlmValidator,
+)
 
 
 TENANT_ID = "00000000-0000-0000-0000-000000000001"
@@ -44,13 +55,25 @@ class FailingPlannerClient:
         raise ConnectionError("ollama is unreachable")
 
 
-def make_app(tmp_path, provider, *, start_workers=True, timeout=120, planner=None):
+def make_app(
+    tmp_path,
+    provider,
+    *,
+    start_workers=True,
+    timeout=120,
+    planner=None,
+    validator_factory=None,
+):
     return create_local_app(
         LocalAppConfig(
             data_dir=tmp_path / "data",
             sam3_provider=provider,
             agent_planner=planner or RulesTaskPlanner(),
             calibration_timeout_sec=timeout,
+            calibration_validator_factory=(
+                validator_factory
+                or (lambda tenant_id, session_id: any_prediction_selection())
+            ),
             start_workers=start_workers,
             worker_poll_interval=0.05,
         )
@@ -256,3 +279,286 @@ def test_agent_degrades_to_rules_when_ollama_is_down(tmp_path):
         assert "local rule-based planner" in session["planner_note"]
         assert "local rule-based planner" in session["messages"][-1]["content"]
         assert session["spec"]["target_objects"] == ["workers"]
+
+
+class FakeVlmClient:
+    def __init__(self):
+        self.calls = []
+
+    def judge(self, *, overlay_uri, prompt):
+        self.calls.append((overlay_uri, prompt))
+        return {
+            "target_present": True,
+            "fully_detected": True,
+            "false_positive": False,
+            "mask_tight": True,
+            "confidence": 0.94,
+            "reasoning": "The mask covers the worker and is tight.",
+        }
+
+
+def vlm_factory(tmp_path):
+    client = FakeVlmClient()
+
+    def factory(tenant_id, session_id):
+        directory = (
+            tmp_path
+            / "data"
+            / "calibration-overlays"
+            / str(tenant_id)
+            / str(session_id)
+        )
+        overlay_id = "a" * 24 + ".png"
+
+        def build(sample, predictions):
+            directory.mkdir(parents=True, exist_ok=True)
+            path = directory / overlay_id
+            Image.new("RGB", (12, 10), (30, 100, 160)).save(path, format="PNG")
+            return OverlayArtifact(uri=str(path), overlay_id=overlay_id)
+
+        return ValidatorSelection(
+            validator=VlmCalibrationValidator(
+                VlmValidator(client), build, model_revision="fake-vlm"
+            ),
+            mode="vlm",
+            model="fake-vlm",
+        )
+
+    return factory, client
+
+
+def test_agent_uses_the_vlm_validator_and_serves_sample_overlays(tmp_path):
+    factory, vlm = vlm_factory(tmp_path)
+    with TestClient(
+        make_app(
+            tmp_path,
+            FakeSam3(),
+            start_workers=False,
+            validator_factory=factory,
+        ),
+        raise_server_exceptions=False,
+    ) as client:
+        asset_id = upload_image(client)
+        session = create_session(client, asset_id)
+
+        confirmed = client.post(
+            f"/v1/agent/sessions/{session['session_id']}/confirm",
+            headers=headers(),
+            json={},
+        )
+        assert confirmed.status_code == 200, confirmed.text
+        body = confirmed.json()
+        calibration = body["calibration"]
+        assert calibration["validator_mode"] == "vlm"
+        assert calibration["validator_model"] == "fake-vlm"
+        assert calibration["notice"] is None
+        assert calibration["attempts"][0]["verdicts"][0]["accepted"] is True
+        assert calibration["attempts"][0]["verdicts"][0]["confidence"] == 0.94
+        assert "tight" in calibration["attempts"][0]["verdicts"][0]["reasoning"]
+        overlay_id = calibration["attempts"][0]["verdicts"][0]["overlay_id"]
+        assert overlay_id
+        assert vlm.calls
+
+        overlay = client.get(
+            f"/v1/agent/sessions/{session['session_id']}/calibration-overlays/{overlay_id}",
+            headers=headers(),
+        )
+        assert overlay.status_code == 200, overlay.text
+        assert overlay.headers["content-type"] == "image/png"
+        assert overlay.content.startswith(b"\x89PNG\r\n\x1a\n")
+
+        missing = client.get(
+            f"/v1/agent/sessions/{session['session_id']}/calibration-overlays/{'b' * 24}.png",
+            headers=headers(),
+        )
+        assert missing.status_code == 404
+
+
+def test_agent_labels_the_fallback_validator_in_chat_and_calibration(tmp_path):
+    notice = (
+        "Vision validation is unavailable: Ollama is not reachable. Calibration used "
+        "the fallback \"at least one prediction\" check."
+    )
+
+    def factory(tenant_id, session_id):
+        return any_prediction_selection(notice=notice)
+
+    with TestClient(
+        make_app(
+            tmp_path,
+            FakeSam3(),
+            start_workers=False,
+            validator_factory=factory,
+        ),
+        raise_server_exceptions=False,
+    ) as client:
+        asset_id = upload_image(client)
+        session = create_session(client, asset_id)
+
+        confirmed = client.post(
+            f"/v1/agent/sessions/{session['session_id']}/confirm",
+            headers=headers(),
+            json={},
+        )
+        assert confirmed.status_code == 200, confirmed.text
+        body = confirmed.json()
+        assert body["calibration"]["validator_mode"] == "any_prediction"
+        assert body["calibration"]["notice"] == notice
+        assert any(notice in message["content"] for message in body["messages"])
+
+
+def test_agent_surfaces_a_runtime_validator_fallback_in_chat_and_calibration(tmp_path):
+    class RuntimeFallbackValidator:
+        def __init__(self):
+            self.notice = None
+
+        def validate_with_trace(self, sample, predictions, prompt, *, threshold=None):
+            self.notice = (
+                "Vision validation failed during calibration (TimeoutError: timed out). "
+                "Calibration continued with the fallback \"at least one prediction\" check."
+            )
+            return CalibrationTrace(
+                accepted=True,
+                reasoning=self.notice,
+            )
+
+    validator = RuntimeFallbackValidator()
+
+    def factory(tenant_id, session_id):
+        return ValidatorSelection(
+            validator=validator,
+            mode="vlm",
+            model="qwen3-vl:4b",
+            notice_provider=lambda: validator.notice,
+        )
+
+    with TestClient(
+        make_app(
+            tmp_path,
+            FakeSam3(),
+            start_workers=False,
+            validator_factory=factory,
+        ),
+        raise_server_exceptions=False,
+    ) as client:
+        asset_id = upload_image(client)
+        session = create_session(client, asset_id)
+
+        confirmed = client.post(
+            f"/v1/agent/sessions/{session['session_id']}/confirm",
+            headers=headers(),
+            json={},
+        )
+        assert confirmed.status_code == 200, confirmed.text
+        body = confirmed.json()
+        assert body["calibration"]["validator_mode"] == "vlm"
+        assert "fallback" in body["calibration"]["notice"]
+        assert any(
+            "Vision validation failed during calibration" in message["content"]
+            for message in body["messages"]
+        )
+
+
+def test_timed_out_calibration_does_not_block_the_next_run(tmp_path):
+    class SlowOnceSam3(FakeSam3):
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.calls = 0
+
+        def predict(self, image, prompt, *, threshold=None, mask_threshold=None):
+            with self.lock:
+                self.calls += 1
+                if self.calls == 1:
+                    time.sleep(0.25)
+                return super().predict(
+                    image, prompt, threshold=threshold, mask_threshold=mask_threshold
+                )
+
+    provider = SlowOnceSam3()
+    with TestClient(
+        make_app(tmp_path, provider, timeout=0.05, start_workers=False),
+        raise_server_exceptions=False,
+    ) as client:
+        first_asset = upload_image(client, name="first")
+        first = create_session(client, first_asset)
+        timed_out = client.post(
+            f"/v1/agent/sessions/{first['session_id']}/confirm",
+            headers=headers(),
+            json={},
+        )
+        assert timed_out.status_code == 504, timed_out.text
+
+        second_asset = upload_image(client, name="second")
+        second = create_session(client, second_asset)
+        started = time.monotonic()
+        confirmed = client.post(
+            f"/v1/agent/sessions/{second['session_id']}/confirm",
+            headers=headers(),
+            json={},
+        )
+        elapsed = time.monotonic() - started
+
+        assert confirmed.status_code == 200, confirmed.text
+        assert confirmed.json()["status"] == "labeling"
+        assert elapsed < 0.5
+        assert provider.lock.locked() is False
+        assert not any(
+            item.name == "agent-calibration" and item.is_alive()
+            for item in threading.enumerate()
+        )
+
+
+def test_cancel_during_calibration_stops_the_run(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingValidator:
+        def validate_with_trace(
+            self, sample, predictions, prompt, *, threshold=None
+        ):
+            entered.set()
+            release.wait(timeout=5)
+            return CalibrationTrace(accepted=True, confidence=0.9, reasoning="ok")
+
+    def factory(tenant_id, session_id):
+        return ValidatorSelection(
+            validator=BlockingValidator(), mode="custom", model=None
+        )
+
+    with TestClient(
+        make_app(
+            tmp_path,
+            FakeSam3(),
+            timeout=10,
+            start_workers=False,
+            validator_factory=factory,
+        ),
+        raise_server_exceptions=False,
+    ) as client:
+        asset_id = upload_image(client)
+        session = create_session(client, asset_id)
+        response_holder = {}
+
+        def confirm():
+            response_holder["response"] = client.post(
+                f"/v1/agent/sessions/{session['session_id']}/confirm",
+                headers=headers(),
+                json={},
+            )
+
+        thread = threading.Thread(target=confirm)
+        thread.start()
+        assert entered.wait(timeout=5)
+
+        cancelled = client.post(
+            f"/v1/agent/sessions/{session['session_id']}/cancel", headers=headers()
+        )
+        assert cancelled.status_code == 200, cancelled.text
+        assert cancelled.json()["status"] == "cancelled"
+
+        release.set()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        response = response_holder["response"]
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "cancelled"

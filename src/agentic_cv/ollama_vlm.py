@@ -93,17 +93,32 @@ class OllamaVlmClient:
             raise ValueError("Ollama response was not valid JSON") from exc
 
         try:
-            content = response_body["message"]["content"]
+            message = response_body["message"]
+            content = message["content"]
         except (KeyError, TypeError) as exc:
             raise ValueError("Ollama response is missing message.content") from exc
         if not isinstance(content, str):
             raise ValueError("Ollama message.content must be a JSON string")
-        try:
-            judgment = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise ValueError("Ollama message.content was not valid JSON") from exc
-        if not isinstance(judgment, dict):
-            raise ValueError("Ollama message.content must decode to an object")
+
+        candidates = [content]
+        thinking = message.get("thinking") if isinstance(message, dict) else None
+        if isinstance(thinking, str) and thinking.strip():
+            candidates.append(thinking)
+        judgment = None
+        saw_json = False
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            saw_json = True
+            if isinstance(parsed, dict):
+                judgment = parsed
+                break
+        if judgment is None:
+            if saw_json:
+                raise ValueError("Ollama message.content must decode to an object")
+            raise ValueError("Ollama message.content was not valid JSON")
         return judgment
 
 

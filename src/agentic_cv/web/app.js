@@ -40,6 +40,8 @@
     uploadFiles: [],
     agentSession: null,
     agentPollToken: 0,
+    agentOverlayUrls: [],
+    agentCalibrationKey: "",
     review: {
       open: false, versionId: null, dataset: null, panel: null, images: [],
       index: -1, image: null, objectUrl: null, socket: null, snapshot: null,
@@ -995,6 +997,118 @@
     list.appendChild(agentStep("Download package", exportDetail, exportState));
   }
 
+  function revokeAgentOverlays() {
+    state.agentOverlayUrls.forEach((url) => URL.revokeObjectURL(url));
+    state.agentOverlayUrls = [];
+  }
+
+  function calibrationModeLabel(calibration) {
+    if (!calibration) return "";
+    if (calibration.validator_mode === "vlm") {
+      return calibration.validator_model
+        ? `Vision validation · ${calibration.validator_model}`
+        : "Vision validation";
+    }
+    if (calibration.validator_mode === "manual") return "Fixed threshold · no calibration";
+    if (calibration.validator_mode === "custom") return "Custom validator";
+    return "Fallback validator · at least one prediction";
+  }
+
+  async function loadAgentOverlay(session, overlayId, img) {
+    if (!session || !overlayId || !img || img.dataset.loaded) return;
+    img.dataset.loaded = "loading";
+    try {
+      const path = `/v1/agent/sessions/${encodeURIComponent(session.session_id)}/calibration-overlays/${encodeURIComponent(overlayId)}`;
+      const response = await fetch(path, { headers: tenantHeaders(false) });
+      if (!response.ok) throw new Error(`Overlay unavailable (${response.status})`);
+      const objectUrl = URL.createObjectURL(await response.blob());
+      state.agentOverlayUrls.push(objectUrl);
+      img.src = objectUrl;
+      img.dataset.loaded = "true";
+      img.hidden = false;
+    } catch (err) {
+      img.dataset.loaded = "error";
+      if (img.parentElement) {
+        img.parentElement.appendChild(node("span", "agent-calibration-overlay-error", cleanMessage(err.message || err)));
+      }
+    }
+  }
+
+  function renderAgentCalibration(session) {
+    const box = $("agent-calibration");
+    if (!box) return;
+    const calibration = session && session.calibration;
+    const nextKey = JSON.stringify(calibration || null);
+    if (nextKey === state.agentCalibrationKey) return;
+    state.agentCalibrationKey = nextKey;
+    revokeAgentOverlays();
+    box.innerHTML = "";
+    if (!calibration) {
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+    const head = node("div", "agent-calibration-head");
+    head.append(
+      node("strong", null, calibrationModeLabel(calibration)),
+      node("span", "agent-calibration-count", `${(calibration.attempts || []).length} threshold${(calibration.attempts || []).length === 1 ? "" : "s"} tried`)
+    );
+    box.appendChild(head);
+    if (calibration.notice) {
+      box.appendChild(node("p", "agent-calibration-notice", cleanMessage(calibration.notice)));
+    }
+    if (calibration.status === "manual") {
+      box.appendChild(node("p", "agent-calibration-empty", `Running at the fixed threshold ${Number(calibration.threshold).toFixed(2)}.`));
+      return;
+    }
+    const attempts = calibration.attempts || [];
+    if (!attempts.length) {
+      box.appendChild(node("p", "agent-calibration-empty", calibration.reason || "No threshold attempts were recorded."));
+      return;
+    }
+    attempts.forEach((attempt) => {
+      const accepted = Number(attempt.accepted_count) || 0;
+      const total = Number(attempt.sample_count) || 0;
+      const pct = total ? Math.round((Number(attempt.agreement) || 0) * 100) : 0;
+      const details = node("details", "agent-calibration-attempt");
+      details.dataset.state = attempt.threshold != null && calibration.threshold != null && Number(attempt.threshold) === Number(calibration.threshold) ? "chosen" : "tried";
+      const summary = node("summary");
+      summary.append(
+        node("span", "agent-threshold", `Threshold ${Number(attempt.threshold).toFixed(2)}`),
+        node("span", "agent-agreement", `${accepted}/${total} accepted · ${pct}%`)
+      );
+      details.appendChild(summary);
+      const list = node("div", "agent-calibration-samples");
+      (attempt.verdicts || []).forEach((verdict) => {
+        const row = node("div", "agent-calibration-sample");
+        row.dataset.accepted = verdict.accepted ? "true" : "false";
+        const copy = node("div", "agent-calibration-sample-copy");
+        const verdictText = verdict.accepted ? "Accepted" : "Rejected";
+        const confidence = verdict.confidence == null ? "" : ` · confidence ${Number(verdict.confidence).toFixed(2)}`;
+        copy.append(
+          node("strong", null, `${verdictText} · ${cleanMessage(verdict.image_id)}${confidence}`),
+          node("span", null, cleanMessage(verdict.reasoning || "No reasoning recorded."))
+        );
+        row.appendChild(copy);
+        if (verdict.overlay_id) {
+          const figure = node("figure", "agent-calibration-overlay");
+          const img = document.createElement("img");
+          img.alt = `Calibration overlay for ${cleanMessage(verdict.image_id)}`;
+          img.hidden = true;
+          img.loading = "lazy";
+          figure.appendChild(img);
+          row.appendChild(figure);
+          details.addEventListener("toggle", () => {
+            if (details.open) loadAgentOverlay(session, verdict.overlay_id, img);
+          }, { once: false });
+        }
+        list.appendChild(row);
+      });
+      details.appendChild(list);
+      box.appendChild(details);
+    });
+  }
+
   function applyAgentSession(session) {
     state.agentSession = session;
     try { localStorage.setItem(AGENT_SESSION_KEY, String(session.session_id)); } catch { /* local storage is optional */ }
@@ -1006,6 +1120,7 @@
     renderAgentMessages(session);
     renderAgentSpec(session);
     renderAgentProgress(session);
+    renderAgentCalibration(session);
 
     if ($("agent-run-title")) $("agent-run-title").textContent = session.prompt || session.asset_name || "Task plan";
     const pill = $("agent-run-pill");
@@ -1061,9 +1176,14 @@
     const content = $("agent-run-content");
     if (empty) empty.hidden = false;
     if (content) content.hidden = true;
-    ["agent-spec", "agent-progress", "agent-run-error"].forEach((id) => {
+    revokeAgentOverlays();
+    state.agentCalibrationKey = "";
+    ["agent-spec", "agent-progress", "agent-calibration", "agent-run-error"].forEach((id) => {
       const el = $(id);
-      if (el) { el.innerHTML = ""; if (id === "agent-run-error") el.hidden = true; }
+      if (el) {
+        el.innerHTML = "";
+        if (id === "agent-run-error" || id === "agent-calibration") el.hidden = true;
+      }
     });
     ["agent-confirm", "agent-retry", "agent-cancel", "agent-download"].forEach((id) => {
       const el = $(id);
@@ -1187,6 +1307,15 @@
     if (button) {
       button.disabled = true;
       button.textContent = threshold == null ? "Calibrating…" : "Starting…";
+    }
+    const confirm = $("agent-confirm");
+    const retry = $("agent-retry");
+    const cancel = $("agent-cancel");
+    if (confirm && threshold == null) confirm.hidden = true;
+    if (retry && threshold != null) retry.hidden = true;
+    if (cancel) {
+      cancel.hidden = false;
+      cancel.disabled = false;
     }
     setStatus(
       "agent-status",
@@ -1664,10 +1793,23 @@
     reviewButton.type = "button";
     reviewButton.addEventListener("click", () => openDatasetReview(dataset, card));
     actions.appendChild(reviewButton);
-    const exportButton = node("button", "btn btn-secondary btn-small", "Export COCO");
+    const format = node("select", "dataset-format");
+    format.dataset.exportFormat = "true";
+    format.setAttribute("aria-label", "Export format");
+    [
+      ["coco", "COCO"],
+      ["yolo-detection", "YOLO detection"],
+      ["yolo-segmentation", "YOLO segmentation"],
+    ].forEach(([value, text]) => {
+      const option = node("option", null, text);
+      option.value = value;
+      format.appendChild(option);
+    });
+    actions.appendChild(format);
+    const exportButton = node("button", "btn btn-secondary btn-small", "Export");
     exportButton.type = "button";
     exportButton.disabled = !dataset.annotation_count;
-    exportButton.addEventListener("click", () => exportDataset(dataset, exportButton, card));
+    exportButton.addEventListener("click", () => exportDataset(dataset, exportButton, card, format.value));
     actions.appendChild(exportButton);
     head.append(title, actions);
     card.appendChild(head);
@@ -1689,11 +1831,20 @@
     return card;
   }
 
-  async function exportDataset(dataset, button, card) {
+  function exportFormatLabel(format) {
+    return {
+      coco: "COCO",
+      "yolo-detection": "YOLO detection",
+      "yolo-segmentation": "YOLO segmentation",
+    }[format] || "COCO";
+  }
+
+  async function exportDataset(dataset, button, card, format = "coco") {
+    const formatLabel = exportFormatLabel(format);
     setBusy(button, true, "Exporting…");
     const status = card.querySelector('[data-dataset-status="true"]');
     if (status) {
-      status.textContent = "Queuing COCO export…";
+      status.textContent = `Queuing ${formatLabel} export…`;
       status.dataset.kind = "busy";
     }
     try {
@@ -1702,8 +1853,8 @@
         headers: tenantHeaders(true),
         body: JSON.stringify({
           version_id: dataset.version_id,
-          format: "coco",
-          idempotency_key: `ui-coco-${dataset.version_id}-${Date.now()}`,
+          format,
+          idempotency_key: `ui-${format}-${dataset.version_id}-${Date.now()}`,
         }),
       });
       for (let attempt = 0; attempt < 120; attempt += 1) {
@@ -1715,12 +1866,12 @@
       }
       if (job.status === "succeeded") {
         if (status) {
-          status.textContent = "COCO export ready. Download starting…";
+          status.textContent = `${formatLabel} export ready. Download starting…`;
           status.dataset.kind = "ok";
         }
         await downloadWithTenant(
           `/v1/dataset-exports/${encodeURIComponent(job.job_id)}/download`,
-          `${(dataset.name || "dataset").replace(/[^a-z0-9._-]+/gi, "-")}.zip`,
+          `${(dataset.name || "dataset").replace(/[^a-z0-9._-]+/gi, "-")}-${format}.zip`,
         );
       } else {
         if (status) {

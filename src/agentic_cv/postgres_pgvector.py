@@ -102,6 +102,20 @@ class PgVectorIndex:
             return None
         return ImageRecord(record_id=row["record_id"], asset_id=str(row["asset_id"]), image_path=Path(row["image_path"]))
 
+    def get_embedding(self, record_id: str) -> np.ndarray | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT embedding::text AS embedding FROM vector_records WHERE record_id = %s",
+                (record_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        raw = row["embedding"]
+        if isinstance(raw, str):
+            values = [value for value in raw.strip().strip("[]").split(",") if value]
+            return np.asarray([float(value) for value in values], dtype=np.float32)
+        return np.asarray(raw, dtype=np.float32).copy()
+
     def search(
         self,
         query_embedding: Sequence[float],

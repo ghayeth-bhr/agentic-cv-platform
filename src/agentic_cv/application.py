@@ -7,7 +7,8 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 from threading import Event, Thread
-from typing import Mapping
+from typing import Callable, Mapping
+from uuid import UUID
 
 import logging
 import time
@@ -32,6 +33,10 @@ from .asset_registry import AssetRegistry, AssetRegistryBackend
 from .auth import Authorizer, OidcJwtAuthorizer, Principal, StaticApiKeyAuthorizer
 from .batch_labeling import Sam3BatchLabeler
 from .broker import RabbitMqConfig, RabbitMqPublisher
+from .calibration_validation import (
+    ValidatorSelection,
+    default_validator_factory,
+)
 from .click_refinement import (
     ClickRefinementProvider,
     ClickRefinementService,
@@ -103,6 +108,9 @@ class LocalAppConfig:
     refinement_provider: ClickRefinementProvider | None = None
     postgres: PostgresConfig | None = None
     agent_planner: TaskPlanner | None = None
+    calibration_validator_factory: (
+        Callable[[UUID, UUID], ValidatorSelection] | None
+    ) = None
     calibration_timeout_sec: float = 120.0
     start_workers: bool = True
     worker_poll_interval: float = 0.25
@@ -339,6 +347,12 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
             sam3_provider=sam3_provider,
             planner=config.agent_planner or planner_from_environment(),
             calibration_timeout_sec=config.calibration_timeout_sec,
+            validator_factory=(
+                config.calibration_validator_factory
+                or default_validator_factory(config.data_dir)
+            ),
+            vectors=vector_index,
+            overlay_root=config.data_dir / "calibration-overlays",
         )
     )
     agent_worker = AgentWorker(service=agent_service)
@@ -383,7 +397,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
                 if thread.is_alive():
                     logging.getLogger("agentic_cv.worker").warning(
                         "worker thread did not stop before shutdown",
-                        extra={"thread": thread.name},
+                        extra={"worker_thread": thread.name},
                     )
             resources.close()
 
