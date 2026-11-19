@@ -23,14 +23,15 @@ def render_prediction_overlay(
     width, height = canvas.size
     draw = ImageDraw.Draw(canvas)
     for index, prediction in enumerate(predictions):
-        mask = np.asarray(prediction.mask)
-        if mask.shape != (height, width):
-            raise ValueError("prediction mask dimensions must match the image")
         color = _COLORS[index % len(_COLORS)]
-        tint = Image.new("RGBA", canvas.size, color + (0,))
-        tint.putalpha(Image.fromarray(np.where(mask.astype(bool), 96, 0).astype(np.uint8)))
-        canvas = Image.alpha_composite(canvas, tint)
-        draw = ImageDraw.Draw(canvas)
+        if prediction.mask is not None:
+            mask = np.asarray(prediction.mask)
+            if mask.shape != (height, width):
+                raise ValueError("prediction mask dimensions must match the image")
+            tint = Image.new("RGBA", canvas.size, color + (0,))
+            tint.putalpha(Image.fromarray(np.where(mask.astype(bool), 96, 0).astype(np.uint8)))
+            canvas = Image.alpha_composite(canvas, tint)
+            draw = ImageDraw.Draw(canvas)
 
         x1, y1, x2, y2 = prediction.box
         if not all(np.isfinite(value) for value in (x1, y1, x2, y2)):

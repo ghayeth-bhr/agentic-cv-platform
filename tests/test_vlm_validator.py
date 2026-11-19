@@ -1,6 +1,15 @@
+import numpy as np
 import pytest
+from PIL import Image
 
-from agentic_cv.vlm_validator import VlmBudgetExceeded, VlmValidator, ValidationJudgment
+from agentic_cv.calibration import CalibrationSample
+from agentic_cv.sam3 import Sam3Prediction
+from agentic_cv.vlm_validator import (
+    VlmBudgetExceeded,
+    VlmCalibrationValidator,
+    VlmValidator,
+    ValidationJudgment,
+)
 
 
 class FakeVlm:
@@ -63,3 +72,46 @@ def test_validator_configuration_and_inputs_are_checked():
     validator = VlmValidator(FakeVlm(GOOD))
     with pytest.raises(ValueError, match="overlay_uri"):
         validator.validate(overlay_uri="", prompt="bear")
+
+
+def test_validator_release_is_idempotent_and_only_after_a_call():
+    class UnloadableVlm(FakeVlm):
+        def __init__(self):
+            super().__init__(GOOD)
+            self.unloads = 0
+
+        def unload(self) -> bool:
+            self.unloads += 1
+            return True
+
+    client = UnloadableVlm()
+    validator = VlmValidator(client)
+
+    assert validator.release() is False
+    assert client.unloads == 0
+
+    validator.validate(overlay_uri="overlay", prompt="bear")
+    assert validator.release() is True
+    assert validator.release() is False
+    assert client.unloads == 1
+
+
+def test_low_score_masks_are_rejected_without_a_vlm_call():
+    client = FakeVlm(GOOD)
+    validator = VlmCalibrationValidator(
+        VlmValidator(client),
+        lambda sample, predictions: "overlay.png",
+        minimum_prediction_score=0.2,
+    )
+    sample = CalibrationSample(
+        image_id="low", image=Image.new("RGB", (4, 4), (0, 0, 0))
+    )
+    prediction = Sam3Prediction(
+        score=0.05, box=(0, 0, 4, 4), mask=np.ones((4, 4), dtype=bool)
+    )
+
+    trace = validator.validate_with_trace(sample, [prediction], "target")
+
+    assert trace.accepted is False
+    assert "too permissive" in trace.reasoning
+    assert client.calls == 0

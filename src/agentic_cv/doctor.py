@@ -12,6 +12,7 @@ import importlib.util
 import json
 import shutil
 import socket
+import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -89,7 +90,44 @@ def check_torch(settings: ModelRuntimeSettings) -> CheckResult:
         except Exception:  # pragma: no cover - driver-specific
             detail = f"torch {version}; CUDA available"
         return CheckResult("PyTorch", "ok", detail)
+    cuda_build = getattr(getattr(torch, "version", None), "cuda", None)
+    if cuda_build is None:
+        gpu_name = _nvidia_gpu_name()
+        if gpu_name:
+            return CheckResult(
+                "PyTorch",
+                "warn",
+                f"torch {version} is a CPU-only build, but NVIDIA GPU '{gpu_name}' is present",
+                "On Windows, run `uv sync --extra ml --refresh`; pyproject.toml selects "
+                "the cu124 wheel index. If you need a different CUDA version, change the "
+                "index in pyproject.toml or install torch/torchvision from "
+                "https://download.pytorch.org/whl/cu124.",
+            )
     return CheckResult("PyTorch", "ok", f"torch {version}; CPU mode (no CUDA device selected)")
+
+
+def _nvidia_gpu_name() -> str | None:
+    executable = shutil.which("nvidia-smi")
+    if executable is None:
+        return None
+    try:
+        completed = subprocess.run(
+            [
+                executable,
+                "--query-gpu=name",
+                "--format=csv,noheader",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    line = completed.stdout.strip().splitlines()
+    return line[0].strip() if line and line[0].strip() else None
 
 
 def check_package(name: str, *, min_major: int | None = None) -> CheckResult:

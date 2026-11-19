@@ -38,6 +38,25 @@ def test_batch_labeling_preserves_raw_predictions_and_builds_detection_dataset(t
     assert result.dataset.annotations[0].segmentation == ()
 
 
+class OutOfBoundsProvider(FakeProvider):
+    def predict(self, image, prompt, *, threshold=None, mask_threshold=None):
+        return [Sam3Prediction(
+            score=0.9,
+            box=(-2, 3, 14, 15),
+            mask=np.ones((10, 10), dtype=bool),
+        )]
+
+
+def test_batch_labeling_clips_provider_boxes_to_image_bounds(tmp_path):
+    result = Sam3BatchLabeler(OutOfBoundsProvider()).label(
+        make_image(tmp_path), prompt="bear", threshold=0.5,
+        category=DatasetCategory(category_id=1, name="bear"), task="detection",
+    )
+
+    assert result.dataset.annotations[0].bbox == (0.0, 3.0, 10.0, 7.0)
+    assert result.raw_predictions[0].box == (-2, 3, 14, 15)
+
+
 def test_segmentation_batch_converts_masks_to_polygons(tmp_path):
     result = Sam3BatchLabeler(FakeProvider()).label(
         make_image(tmp_path), prompt="bear", threshold=0.6,

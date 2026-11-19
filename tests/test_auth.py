@@ -78,7 +78,10 @@ def test_rbac_policy_separates_reader_writer_and_admin_permissions():
 
     assert policy.allows({"reader"}, "search:read")
     assert not policy.allows({"reader"}, "assets:write")
+    assert policy.allows({"reader"}, "labels:read")
+    assert not policy.allows({"reader"}, "labels:write")
     assert policy.allows({"writer"}, "exports:write")
+    assert policy.allows({"writer"}, "labels:write")
     assert policy.allows({"admin"}, "anything:dangerous") is True
 
 

@@ -1,9 +1,12 @@
 import json
 import socket
+import sys
+import types
 from urllib.error import URLError
 
 from agentic_cv import doctor
 from agentic_cv.doctor import CheckResult, doctor_exit_code, format_report
+from agentic_cv.model_runtime import ModelRuntimeSettings
 
 
 def test_python_check_reports_current_interpreter():
@@ -27,6 +30,34 @@ def test_format_report_and_exit_code():
     assert "Summary: 1 ok, 0 warn, 1 fail" in report
     assert doctor_exit_code(checks) == 1
     assert doctor_exit_code(checks[:1]) == 0
+
+
+def test_torch_cpu_build_with_an_nvidia_gpu_warns_and_prints_the_windows_fix(
+    monkeypatch,
+):
+    fake_torch = types.SimpleNamespace(
+        __version__="2.6.0+cpu",
+        version=types.SimpleNamespace(cuda=None),
+        cuda=types.SimpleNamespace(is_available=lambda: False),
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setattr(
+        doctor.importlib.util,
+        "find_spec",
+        lambda name: object() if name == "torch" else None,
+    )
+    monkeypatch.setattr(
+        doctor, "_nvidia_gpu_name", lambda: "NVIDIA GeForce RTX 4050 Laptop GPU"
+    )
+
+    result = doctor.check_torch(ModelRuntimeSettings(device="cpu", precision="float32"))
+
+    assert result.status == "warn"
+    assert "CPU-only build" in result.detail
+    assert "RTX 4050" in result.detail
+    assert result.fix is not None
+    assert "uv sync --extra ml --refresh" in result.fix
+    assert "pyproject.toml" in result.fix
 
 
 def test_disk_check_creates_and_probes_data_dir(monkeypatch, tmp_path):

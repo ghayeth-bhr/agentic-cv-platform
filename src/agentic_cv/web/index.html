@@ -23,47 +23,33 @@
           </svg>
           <span class="brand-name">Agentic CV</span>
         </div>
+        <div class="workspace-label">Local workspace</div>
         <nav class="nav" aria-label="Sections">
           <div class="nav-group">
-            <div class="nav-group-label">Assets</div>
-            <button type="button" class="nav-item is-active" data-view="gallery" aria-current="page">
-              <span class="nav-label">Gallery</span>
-              <span class="nav-hint">Manage media</span>
+            <div class="nav-group-label">Workspace</div>
+            <button type="button" class="nav-item is-active" data-view="assets" aria-current="page">
+              <span class="nav-label">Assets</span>
+              <span class="nav-hint">Upload, inspect, search</span>
             </button>
-            <button type="button" class="nav-item" data-view="upload">
-              <span class="nav-label">Upload</span>
-              <span class="nav-hint">Ingest source</span>
-            </button>
-            <button type="button" class="nav-item" data-view="search">
-              <span class="nav-label">Search library</span>
-              <span class="nav-hint">Find frames</span>
-            </button>
-          </div>
-          <div class="nav-group">
-            <div class="nav-group-label">Tools</div>
-            <button type="button" class="nav-item" data-view="predict">
-              <span class="nav-label">Quick test</span>
-              <span class="nav-hint">Single-image SAM3</span>
+            <button type="button" class="nav-item" data-view="agent">
+              <span class="nav-label">Agent</span>
+              <span class="nav-hint">Chat-driven labeling</span>
             </button>
           </div>
           <div class="nav-group nav-group-secondary">
-            <div class="nav-group-label">Jobs &amp; Exports</div>
-            <button type="button" class="nav-item" data-view="preview">
-              <span class="nav-label">Label jobs</span>
-              <span class="nav-hint">Preview events</span>
+            <div class="nav-group-label">Library</div>
+            <button type="button" class="nav-item" data-view="datasets">
+              <span class="nav-label">Datasets</span>
+              <span class="nav-hint">Versions and exports</span>
             </button>
-            <button type="button" class="nav-item" data-view="exports">
-              <span class="nav-label">Exports</span>
-              <span class="nav-hint">After labeling</span>
+            <button type="button" class="nav-item" data-view="jobs">
+              <span class="nav-label">Jobs</span>
+              <span class="nav-hint">Background activity</span>
             </button>
           </div>
         </nav>
       </div>
       <div class="sidebar-bottom">
-        <label class="side-field">
-          <span>Tenant</span>
-          <input id="tenant-id" type="text" value="00000000-0000-0000-0000-000000000001" spellcheck="false" autocomplete="off">
-        </label>
         <div class="runtime" id="runtime-chip" aria-live="polite">
           <span class="runtime-dot" aria-hidden="true"></span>
           <span id="runtime-status">Checking runtime</span>
@@ -76,206 +62,179 @@
       <header class="view-header">
         <div>
           <p class="view-eyebrow" id="view-eyebrow">Workspace</p>
-          <h1 class="view-title" id="view-title">Gallery</h1>
-          <p class="view-desc" id="view-desc">Browse uploaded assets and their representative media.</p>
+          <h1 class="view-title" id="view-title">Assets</h1>
+          <p class="view-desc" id="view-desc">Upload photos and videos, inspect what is inside, and search across the library.</p>
         </div>
         <div class="view-actions" id="view-actions"></div>
       </header>
 
-      <section id="view-gallery" class="view is-active" aria-labelledby="view-title">
-        <div class="toolbar">
-          <div class="toolbar-meta" id="gallery-meta">Loading assets…</div>
-          <div class="toolbar-actions">
-            <button type="button" class="btn btn-secondary" id="gallery-refresh">Refresh</button>
-          </div>
-        </div>
-        <div id="gallery-status" class="status" role="status" aria-live="polite"></div>
-        <div id="asset-gallery" class="asset-grid" aria-live="polite"></div>
-      </section>
-
-      <section id="view-upload" class="view" aria-labelledby="upload-heading" hidden>
-        <div class="split">
-          <div class="card">
-            <h2 id="upload-heading" class="card-title">Upload media</h2>
-            <p class="card-desc">Create an asset and ingest an image or video. A representative thumbnail is generated after completion.</p>
-            <label class="field">
-              <span>Asset name</span>
-              <input id="asset-name" type="text" value="Untitled asset" autocomplete="off">
-            </label>
-            <label class="field">
-              <span>Media file</span>
-              <input id="asset-file" type="file" accept="image/*,video/*">
-            </label>
-            <div id="asset-file-info" class="file-info muted">No file selected.</div>
-            <div class="actions">
-              <button id="upload-button" type="button" class="btn btn-primary">Upload asset</button>
-            </div>
-            <div id="upload-status" class="status" role="status" aria-live="polite"></div>
-          </div>
-          <div class="card" id="upload-result-card">
-            <h2 class="card-title">Latest upload</h2>
-            <p class="card-desc">Completed uploads appear here and in the gallery.</p>
-            <div id="upload-result" class="upload-result muted">No upload completed yet.</div>
-          </div>
-        </div>
-      </section>
-
-      <section id="view-predict" class="view" aria-labelledby="predict-heading" hidden>
-        <div class="split split-wide">
-          <div class="card">
-            <h2 id="predict-heading" class="card-title">Quick test (prompted SAM3)</h2>
-            <p class="card-desc">This is a single-image smoke test, not the Agent chat. Pick an existing asset and source/frame, or upload one image. Automated agent runs (task spec, calibration, whole-asset labeling, dataset build) are not built yet; label jobs and exports remain available under Jobs &amp; Exports.</p>
-            <div class="field-row">
-              <label class="field field-grow">
-                <span>Prompt</span>
-                <input id="predict-prompt" type="text" value="object" autocomplete="off">
-              </label>
-              <label class="field field-narrow">
-                <span>Score threshold</span>
-                <input id="predict-threshold" type="number" min="0" max="1" step="0.05" placeholder="default">
-              </label>
-            </div>
-            <label class="field">
-              <span>Existing asset</span>
-              <div class="field-row">
-                <select id="predict-asset" class="field-grow"></select>
-                <button type="button" class="btn btn-ghost" id="predict-refresh-assets">Refresh</button>
+      <section id="view-assets" class="view is-active" aria-labelledby="view-title">
+        <div class="assets-layout">
+          <div class="assets-main">
+            <div class="toolbar">
+              <div class="toolbar-meta" id="assets-meta">Loading assets…</div>
+              <div class="toolbar-actions">
+                <button type="button" class="btn btn-primary" id="upload-toggle" aria-expanded="false" aria-controls="upload-panel">Upload media</button>
+                <button type="button" class="btn btn-secondary" id="assets-refresh">Refresh</button>
               </div>
-            </label>
-            <label class="field">
-              <span>Image / frame in asset</span>
-              <select id="predict-source"></select>
-            </label>
-            <label class="field">
-              <span>Or upload image file</span>
-              <input id="predict-file" type="file" accept="image/png,image/jpeg,image/webp">
-            </label>
-            <div class="actions">
-              <button id="predict-button" type="button" class="btn btn-primary">Run prediction</button>
             </div>
-            <div id="predict-status" class="status" role="status" aria-live="polite"></div>
-          </div>
-          <div class="card" id="predict-output" hidden>
-            <h2 class="card-title">Prediction output</h2>
-            <div class="visual-output">
-              <div class="canvas-wrap"><canvas id="predict-canvas"></canvas></div>
-              <div id="predict-summary" class="result-summary"></div>
-              <details class="raw-details">
-                <summary>Raw response</summary>
-                <pre id="predict-raw" class="code-block"></pre>
-              </details>
-            </div>
-          </div>
-        </div>
-      </section>
 
-      <section id="view-search" class="view" aria-labelledby="search-heading" hidden>
-        <div class="stack">
-          <div class="card">
-            <h2 id="search-heading" class="card-title">Semantic search</h2>
-            <p class="card-desc">Search indexed frames by description. Select assets to scope the query, or leave unselected to search broadly. Requires embedding dependencies (e.g. torch) and indexed content.</p>
-            <label class="field">
-              <span>Query</span>
-              <input id="search-query" type="text" placeholder="e.g. person carrying a box" autocomplete="off">
-            </label>
-            <div class="field-row">
-              <label class="field field-narrow">
-                <span>Limit</span>
-                <input id="search-limit" type="number" min="1" value="10">
-              </label>
-              <div class="field field-grow">
-                <span>Scope to assets</span>
-                <div class="picker-actions">
-                  <button type="button" class="btn btn-ghost" id="search-select-all">Select all</button>
-                  <button type="button" class="btn btn-ghost" id="search-select-none">Clear</button>
-                  <button type="button" class="btn btn-ghost" id="search-refresh-assets">Refresh assets</button>
+            <div class="card upload-panel" id="upload-panel" hidden>
+              <div class="upload-heading">
+                <div>
+                  <h2 class="card-title">Add media</h2>
+                  <p class="card-desc">Files are uploaded in chunks, then queued for search indexing. Pick several images or videos to keep them together in one asset.</p>
                 </div>
+                <button type="button" class="btn btn-ghost" id="upload-close">Close</button>
+              </div>
+              <label class="field">
+                <span>Asset name</span>
+                <input id="asset-name" type="text" placeholder="e.g. Site inspection — Week 12" autocomplete="off">
+              </label>
+              <label class="field">
+                <span>Media files</span>
+                <input id="asset-file" type="file" accept="image/*,video/*" multiple>
+              </label>
+              <div id="asset-file-info" class="file-list muted">No files selected.</div>
+              <div class="actions">
+                <button id="upload-button" type="button" class="btn btn-primary">Upload and index</button>
+              </div>
+              <div id="upload-status" class="status" role="status" aria-live="polite"></div>
+            </div>
+
+            <div class="library-tools">
+              <label class="field field-grow">
+                <span>Filter assets</span>
+                <input id="asset-filter" type="search" placeholder="Filter by asset name" autocomplete="off">
+              </label>
+            </div>
+
+            <div id="gallery-status" class="status" role="status" aria-live="polite"></div>
+            <div id="asset-gallery" class="asset-grid" aria-live="polite"></div>
+
+            <div class="card search-card">
+              <div class="search-heading">
+                <div>
+                  <h2 class="card-title">Search the library</h2>
+                  <p class="card-desc">Describe what you are looking for. Search inside the selected asset, or across every asset.</p>
+                </div>
+                <span class="scope-chip" id="search-scope-chip">All assets</span>
+              </div>
+              <div class="search-row">
+                <label class="field field-grow">
+                  <span>Query</span>
+                  <input id="search-query" type="search" placeholder="e.g. worker without helmet" autocomplete="off">
+                </label>
+                <label class="field field-narrow">
+                  <span>Scope</span>
+                  <select id="search-scope">
+                    <option value="all">All assets</option>
+                    <option value="selected">Selected asset</option>
+                  </select>
+                </label>
+                <button id="search-button" type="button" class="btn btn-primary">Search</button>
+              </div>
+              <div class="actions">
+                <button id="subasset-button" type="button" class="btn btn-secondary" disabled>Save results as sub-asset</button>
+              </div>
+              <div id="search-status" class="status" role="status" aria-live="polite"></div>
+              <div id="search-results" class="results-area" aria-live="polite"></div>
+            </div>
+          </div>
+
+          <aside class="asset-detail" id="asset-detail" aria-live="polite">
+            <div class="detail-placeholder" id="asset-detail-placeholder">
+              <div class="detail-placeholder-mark" aria-hidden="true">01</div>
+              <h2>Select an asset</h2>
+              <p>Open a card to inspect its sources, search inside it, or see where it came from.</p>
+            </div>
+            <div id="asset-detail-content" hidden></div>
+          </aside>
+        </div>
+      </section>
+
+      <section id="view-agent" class="view" aria-labelledby="agent-heading" hidden>
+        <div class="agent-layout">
+          <section class="agent-chat card" aria-labelledby="agent-heading">
+            <div class="agent-chat-head">
+              <div>
+                <p class="view-eyebrow">Conversation</p>
+                <h2 id="agent-heading" class="card-title">Describe the dataset you need</h2>
+                <p class="card-desc">Pick an asset and describe what to label. The agent plans the task, asks you to confirm it, calibrates on a sample, then labels the whole asset and packages a dataset.</p>
+              </div>
+              <button type="button" class="btn btn-ghost" id="agent-new">New task</button>
+            </div>
+
+            <div id="agent-messages" class="agent-messages" aria-live="polite">
+              <div class="agent-empty-chat" id="agent-empty-chat">
+                Start with a task such as “Create a segmentation dataset of workers wearing yellow vests.”
               </div>
             </div>
-            <div id="asset-picker" class="asset-picker" aria-live="polite"></div>
-            <div class="actions">
-              <button id="search-button" type="button" class="btn btn-primary">Search</button>
-              <button id="subasset-button" type="button" class="btn btn-secondary">Create sub-asset from results</button>
-            </div>
-            <div id="search-status" class="status" role="status" aria-live="polite"></div>
-            <div id="subasset-status" class="status" role="status" aria-live="polite"></div>
-          </div>
-          <div class="card">
-            <h2 class="card-title">Results</h2>
-            <div id="search-results" class="results-area"></div>
-          </div>
-        </div>
-      </section>
 
-      <section id="view-exports" class="view" aria-labelledby="exports-heading" hidden>
-        <div class="split">
-          <div class="card">
-            <h2 id="exports-heading" class="card-title">Queue export</h2>
-            <p class="card-desc">Submit a dataset export job for a version.</p>
-            <label class="field">
-              <span>Dataset version ID</span>
-              <input id="version-id" type="text" placeholder="UUID" spellcheck="false" autocomplete="off">
-            </label>
-            <div class="field-row">
+            <div class="agent-compose">
               <label class="field">
-                <span>Format</span>
-                <select id="export-format">
-                  <option value="coco">COCO</option>
-                  <option value="yolo-detection">YOLO detection</option>
-                  <option value="yolo-segmentation">YOLO segmentation</option>
-                </select>
+                <span>Asset</span>
+                <select id="agent-asset"></select>
               </label>
-              <label class="field field-grow">
-                <span>Idempotency key</span>
-                <input id="export-key" type="text" value="browser-export-1" autocomplete="off">
+              <label class="field">
+                <span>Task</span>
+                <textarea id="agent-message" rows="3" placeholder="e.g. Create a segmentation dataset of workers wearing yellow vests."></textarea>
               </label>
+              <div class="actions">
+                <button type="button" class="btn btn-primary" id="agent-plan">Plan task</button>
+              </div>
+              <div id="agent-status" class="status" role="status" aria-live="polite"></div>
             </div>
-            <div class="actions">
-              <button id="export-button" type="button" class="btn btn-primary">Queue export</button>
+          </section>
+
+          <aside class="agent-run card" aria-live="polite">
+            <div class="detail-placeholder" id="agent-run-empty">
+              <div class="detail-placeholder-mark" aria-hidden="true">02</div>
+              <h2>No active run</h2>
+              <p>Plan a task to see the confirmed specification, calibration, labeling progress, and the downloadable dataset.</p>
             </div>
-          </div>
-          <div class="card">
-            <h2 class="card-title">Job status</h2>
-            <p class="card-desc">Check or cancel an export job. Run the export worker to process queued jobs.</p>
-            <label class="field">
-              <span>Job ID</span>
-              <input id="job-id" type="text" placeholder="UUID" spellcheck="false" autocomplete="off">
-            </label>
-            <div class="actions">
-              <button id="job-status-button" type="button" class="btn btn-secondary">Check status</button>
-              <button id="job-cancel-button" type="button" class="btn btn-secondary">Cancel job</button>
+
+            <div id="agent-run-content" hidden>
+              <div class="agent-run-head">
+                <div>
+                  <p class="view-eyebrow">Run</p>
+                  <h2 id="agent-run-title" class="card-title">Task plan</h2>
+                </div>
+                <span id="agent-run-pill" class="status-pill">planning</span>
+              </div>
+
+              <div id="agent-spec" class="agent-spec"></div>
+              <ol id="agent-progress" class="agent-progress"></ol>
+              <div id="agent-calibration" class="agent-calibration" hidden></div>
+              <div id="agent-run-error" class="agent-error" hidden></div>
+
+              <div class="agent-run-actions">
+                <button type="button" class="btn btn-primary" id="agent-confirm">Confirm and calibrate</button>
+                <button type="button" class="btn btn-secondary" id="agent-retry" hidden>Run at 0.50</button>
+                <button type="button" class="btn btn-ghost" id="agent-cancel" hidden>Cancel run</button>
+                <a class="btn btn-primary" id="agent-download" href="#" hidden>Download dataset</a>
+              </div>
             </div>
-            <div id="export-status" class="status" role="status" aria-live="polite"></div>
-            <dl id="export-details" class="detail-list" hidden></dl>
-          </div>
+          </aside>
         </div>
       </section>
 
-      <section id="view-preview" class="view" aria-labelledby="preview-heading" hidden>
-        <div class="stack">
-          <div class="card">
-            <h2 id="preview-heading" class="card-title">Label preview events</h2>
-            <p class="card-desc">Replay durable preview events for a label job as a progress gallery.</p>
-            <div class="field-row">
-              <label class="field field-grow">
-                <span>Job ID</span>
-                <input id="gallery-job-id" type="text" placeholder="Label job UUID" spellcheck="false" autocomplete="off">
-              </label>
-              <label class="field field-narrow">
-                <span>After event ID</span>
-                <input id="gallery-after" type="number" min="0" step="1" placeholder="0">
-              </label>
-            </div>
-            <div class="actions">
-              <button id="gallery-load-button" type="button" class="btn btn-primary">Load preview</button>
-              <button id="gallery-use-export-job-button" type="button" class="btn btn-secondary">Use export job ID</button>
-              <button id="gallery-clear-button" type="button" class="btn btn-secondary">Clear</button>
-            </div>
-            <div id="gallery-status" class="status" role="status" aria-live="polite"></div>
-          </div>
-          <div id="gallery-summary" class="gallery-summary" hidden></div>
-          <div id="gallery-grid" class="gallery-grid" aria-live="polite"></div>
+      <section id="view-datasets" class="view" aria-labelledby="datasets-heading" hidden>
+        <div class="toolbar">
+          <div class="toolbar-meta" id="datasets-meta">Dataset versions</div>
+          <button type="button" class="btn btn-secondary" id="datasets-refresh">Refresh</button>
         </div>
+        <div id="datasets-status" class="status" role="status" aria-live="polite"></div>
+        <div id="datasets-list" class="stack" aria-live="polite"></div>
+      </section>
+
+      <section id="view-jobs" class="view" aria-labelledby="jobs-heading" hidden>
+        <div class="toolbar">
+          <div class="toolbar-meta" id="jobs-meta">Background jobs</div>
+          <button type="button" class="btn btn-secondary" id="jobs-refresh">Refresh</button>
+        </div>
+        <div id="jobs-status" class="status" role="status" aria-live="polite"></div>
+        <div id="jobs-list" class="job-list" aria-live="polite"></div>
       </section>
     </main>
   </div>

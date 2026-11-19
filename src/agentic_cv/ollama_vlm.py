@@ -44,6 +44,7 @@ class OllamaVlmClient:
     num_ctx: int = 4096
     temperature: float = 0.0
     keep_alive: str = "10m"
+    num_predict: int = 256
 
     def __post_init__(self) -> None:
         if not self.model.strip():
@@ -56,6 +57,8 @@ class OllamaVlmClient:
             raise ValueError("num_ctx must be at least 1")
         if self.temperature < 0:
             raise ValueError("temperature must not be negative")
+        if self.num_predict < 1:
+            raise ValueError("num_predict must be at least 1")
 
     def judge(self, *, overlay_uri: str, prompt: str) -> dict[str, Any]:
         image_bytes = _read_overlay(overlay_uri)
@@ -75,7 +78,7 @@ class OllamaVlmClient:
             "options": {
                 "num_ctx": self.num_ctx,
                 "temperature": self.temperature,
-                "num_predict": 256,
+                "num_predict": self.num_predict,
             },
         }
         request = Request(
@@ -93,18 +96,49 @@ class OllamaVlmClient:
             raise ValueError("Ollama response was not valid JSON") from exc
 
         try:
-            content = response_body["message"]["content"]
+            message = response_body["message"]
+            content = message["content"]
         except (KeyError, TypeError) as exc:
             raise ValueError("Ollama response is missing message.content") from exc
         if not isinstance(content, str):
             raise ValueError("Ollama message.content must be a JSON string")
-        try:
-            judgment = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise ValueError("Ollama message.content was not valid JSON") from exc
-        if not isinstance(judgment, dict):
-            raise ValueError("Ollama message.content must decode to an object")
+
+        candidates = [content]
+        thinking = message.get("thinking") if isinstance(message, dict) else None
+        if isinstance(thinking, str) and thinking.strip():
+            candidates.append(thinking)
+        judgment = None
+        saw_json = False
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            saw_json = True
+            if isinstance(parsed, dict):
+                judgment = parsed
+                break
+        if judgment is None:
+            if saw_json:
+                raise ValueError("Ollama message.content must decode to an object")
+            raise ValueError("Ollama message.content was not valid JSON")
         return judgment
+
+
+    def unload(self) -> bool:
+        payload = {"model": self.model, "prompt": "", "keep_alive": 0, "stream": False}
+        request = Request(
+            f"{self.base_url.rstrip('/')}/api/generate",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=min(self.timeout_sec, 30.0)) as response:
+                response.read()
+        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            raise RuntimeError(f"Ollama unload failed at {self.base_url}: {exc}") from exc
+        return True
 
 
 def _read_overlay(overlay_uri: str) -> bytes:

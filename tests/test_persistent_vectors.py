@@ -18,6 +18,8 @@ def test_vectors_survive_reopen_and_support_asset_filter(tmp_path):
 
     assert [result.record_id for result in results] == ["red"]
     assert results[0].score == pytest.approx(1.0)
+    assert reopened.get_embedding("red") == pytest.approx([1.0, 0.0])
+    assert reopened.get_embedding("missing") is None
     reopened.close()
 
 
