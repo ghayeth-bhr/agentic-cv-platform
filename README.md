@@ -139,46 +139,24 @@ The interactive API documentation is at `/docs` (Swagger) on a running server.
 The agent is deterministic where it matters. The local LLM only fills JSON schemas, and code decides what is missing, what to ask, and when a result is good enough. That keeps a 4B model reliable.
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    actor U as User
-    participant UI as Web UI
-    participant AG as Agent service
-    participant LLM as Ollama qwen3-vl (planner and prompt agent)
-    participant CAL as Calibration
-    participant SAM as SAM 3
-    participant VLM as Ollama qwen3-vl (judge)
-    participant LW as Label worker and monitor
-    participant DS as Dataset builder and export
-
-    U->>UI: "Segment elephants and their tusks, export YOLO"
-    UI->>AG: POST /v1/agent/sessions (asset_ids, message)
-    AG->>LLM: extract a draft (task type, classes, format) as JSON
-    LLM-->>AG: draft patch
-    Note over AG: code checks required slots<br/>and asks one question at a time
-    AG-->>U: plan, or a question with quick replies
-    AG->>LLM: SAM 3 noun phrases per class (prompt agent)
-    U->>UI: Confirm
-    UI->>AG: POST /confirm (returns at once, status calibrating)
-    AG->>CAL: calibrate each class in the background
-    loop each round, one model on the GPU at a time
-        CAL->>SAM: one pass per sample at the lowest threshold
-        Note over CAL: unload SAM 3 before the judge runs
-        CAL->>VLM: judge each distinct mask set (or ask "is it present?")
-        VLM-->>CAL: verdicts
-    end
-    CAL-->>AG: best threshold per class, or try the next prompt
-    AG->>LW: durable label job (all assets, all classes)
-    loop every image
-        LW->>SAM: one vision pass, every class prompt on it
-        LW->>LW: save annotations, update health
-        alt a health rule fires
-            LW-->>AG: job paused with an alert
-            AG-->>U: "I paused labeling to check with you..." (Continue or Stop)
-        end
-    end
-    AG->>DS: build the dataset version, then export
-    DS-->>U: archive ready, gallery to review
+flowchart TD
+    A(["User describes the task in chat"]) --> B["Planner<br/>LLM extracts task type, classes, format"]
+    B --> C{"Anything missing?"}
+    C -->|yes| D["Ask the user one question"]
+    D --> B
+    C -->|no| E["Prompt agent<br/>LLM writes SAM 3 phrases per class"]
+    E --> F(["User confirms the plan"])
+    F --> G["Calibration<br/>SAM 3 on sample images,<br/>VLM judges each threshold"]
+    G --> H{"Threshold found?"}
+    H -->|no| I["Try the next phrase"]
+    I --> G
+    H -->|yes| J["Labeling<br/>SAM 3 on every image"]
+    J --> K{"Health monitor:<br/>problem detected?"}
+    K -->|yes| L["Pause and ask the user:<br/>continue or stop"]
+    L -->|continue| J
+    K -->|no| M["Build the dataset version"]
+    M --> N["Export COCO or YOLO"]
+    N --> O(["Review in the gallery,<br/>approve, refine, re-export"])
 ```
 
 The pieces, in order:
