@@ -104,6 +104,7 @@ def test_empty_library_response_envelopes_are_stable(tmp_path):
         assert info_body["model_runtime"]["resources"]["models"].keys() == {
             "siglip2",
             "sam3",
+            "sam3-tracker",  # point-prompt refinement (Phase 4b)
         }
 
         assets = client.get("/v1/assets", headers=TENANT_HEADERS)
