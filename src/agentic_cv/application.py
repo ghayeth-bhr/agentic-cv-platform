@@ -25,6 +25,8 @@ from .agent import (
     prompt_enhancer_from_environment,
 )
 from .agent_api import AgentApiDependencies, create_app as create_agent_app
+from .review_api import ReviewApiDependencies, create_app as create_review_app
+from .review_store import ReviewStore
 from .prompt_enhancement import PromptEnhancer
 from .agent_store import AgentSessionBackend, AgentSessionStore
 from .agent_worker import AgentWorker
@@ -171,12 +173,13 @@ class LocalAppResources:
     sam3_provider: Sam3Provider
     agent_sessions: AgentSessionBackend
     model_resources: ModelResourceManager
+    reviews: ReviewStore
     outbox_dispatcher: OutboxDispatcher | None = None
 
     def close(self) -> None:
         for resource in (
             self.registry, self.outbox, self.versions, self.jobs, self.preview, self.sub_assets, self.annotations,
-            self.agent_sessions,
+            self.agent_sessions, self.reviews,
         ):
             resource.close()
         for component in (self.vector_index, self.embedding_provider, self.sam3_provider):
@@ -220,6 +223,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
     else:
         jobs = JobStore(str(metadata_dir / "jobs.sqlite3"))
     agent_sessions = AgentSessionStore(str(metadata_dir / "agent-sessions.sqlite3"))
+    reviews = ReviewStore(str(metadata_dir / "reviews.sqlite3"))
     if config.postgres is not None:
         from .postgres_preview import open_postgres_preview_store
 
@@ -275,7 +279,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
         registry=registry, outbox=outbox, versions=versions, jobs=jobs, preview=preview,
         sub_assets=sub_assets, annotations=annotations, vector_index=vector_index,
         embedding_provider=embedding_provider, sam3_provider=sam3_provider,
-        agent_sessions=agent_sessions, model_resources=model_resources,
+        agent_sessions=agent_sessions, model_resources=model_resources, reviews=reviews,
     )
     export_service = DatasetExportService(versions, config.data_dir / "exports")
     export_workflow = DatasetExportWorkflow(
@@ -491,6 +495,17 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
         ).router
     )
     app.include_router(create_preview_app(PreviewApiDependencies(store=preview, authorizer=authorizer)).router)
+    app.include_router(
+        create_review_app(
+            ReviewApiDependencies(
+                versions=versions,
+                annotations=annotations,
+                reviews=reviews,
+                builder=dataset_builder,
+                authorizer=authorizer,
+            )
+        ).router
+    )
     app.include_router(create_sam3_app(sam3_provider).router)
 
     @app.get("/api-info")
