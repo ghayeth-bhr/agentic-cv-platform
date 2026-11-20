@@ -25,11 +25,19 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      # Install the project plus its declared dev group (pyproject.toml:
+      # pytest, httpx, pycocotools, playwright) instead of a hand-picked list,
+      # so a new test dependency cannot silently break collection again.
+      # pip >= 25.1 understands dependency groups (PEP 735).
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e .
-          python -m pip install httpx pytest
+          python -m pip install -e . --group dev
+
+      # The browser journeys (Playwright) skip without a browser; install one
+      # so CI exercises the real UI too.
+      - name: Install Chromium for browser tests
+        run: python -m playwright install --with-deps chromium
 
       - name: Compile sources and tests
         run: python -m compileall -q src/agentic_cv tests
