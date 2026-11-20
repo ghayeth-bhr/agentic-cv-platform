@@ -298,6 +298,8 @@ class DatasetRebuildRequest(BaseModel):
 
 class RefinementAcceptRequest(BaseModel):
     annotation_id: str | None = None
+    # Class for the accepted object; defaults to the session's class.
+    category_id: int | None = None
     prediction_index: int = 0
     refinement_revision: int | None = None
     expected_revision: int | None = None
@@ -451,7 +453,35 @@ def _dataset_image_path(
     return path
 
 
-def _snapshot_payload(snapshot: RefinementSnapshot) -> dict:
+def _snapshot_payload(snapshot: RefinementSnapshot, *, polygons: bool = False) -> dict:
+    """Refinement state for the browser.
+
+    ``polygons=True`` sends each mask as simplified polygons (a few KB)
+    instead of a full boolean grid (several MB for a 720x1280 frame), so a
+    0.03 s point-prompt click is not dominated by JSON transfer.
+    """
+
+    if polygons:
+        return {
+            "type": "snapshot",
+            "session_id": str(snapshot.session_id),
+            "image_id": snapshot.image_id,
+            "revision": snapshot.revision,
+            "prompt": snapshot.prompt,
+            "category_id": snapshot.category_id,
+            "points": [
+                {"x": point.x, "y": point.y, "label": point.label}
+                for point in snapshot.points
+            ],
+            "predictions": [
+                {
+                    "score": prediction.score,
+                    "box": prediction.box,
+                    "polygons": [list(polygon) for polygon in mask_polygons(prediction.mask)],
+                }
+                for prediction in snapshot.predictions
+            ],
+        }
     return {
         "type": "snapshot",
         "session_id": str(snapshot.session_id),
@@ -1007,6 +1037,7 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                 websocket: WebSocket, version_id: str, image_id: str
             ) -> None:
                 await websocket.accept()
+                as_polygons = websocket.query_params.get("format") == "polygons"
                 tenant_raw = websocket.query_params.get("tenant_id")
                 if not tenant_raw:
                     await websocket.close(
@@ -1036,7 +1067,7 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                     detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
                     await websocket.close(code=1008, reason=str(detail))
                     return
-                await websocket.send_json(_snapshot_payload(snapshot))
+                await websocket.send_json(_snapshot_payload(snapshot, polygons=as_polygons))
                 try:
                     while True:
                         message = await websocket.receive_json()
@@ -1062,7 +1093,7 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                                     {"type": "error", "detail": str(exc)}
                                 )
                                 continue
-                            await websocket.send_json(_snapshot_payload(snapshot))
+                            await websocket.send_json(_snapshot_payload(snapshot, polygons=as_polygons))
                         elif message_type == "get":
                             await websocket.send_json(
                                 _snapshot_payload(
@@ -1512,7 +1543,10 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
             )
             if dataset_image is None:
                 raise HTTPException(status_code=404, detail="dataset image not found")
-            if snapshot.category_id not in {
+            category_id = (
+                request.category_id if request.category_id is not None else snapshot.category_id
+            )
+            if category_id not in {
                 category.category_id for category in version_record.dataset.categories
             }:
                 raise HTTPException(
@@ -1539,7 +1573,7 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                     raise HTTPException(
                         status_code=404, detail="annotation not found"
                     ) from exc
-                if latest.annotation.category_id != snapshot.category_id:
+                if request.category_id is None and latest.annotation.category_id != snapshot.category_id:
                     raise HTTPException(
                         status_code=422,
                         detail="annotation belongs to a different category",
@@ -1568,7 +1602,7 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
             annotation = Annotation(
                 annotation_id=str(annotation_id),
                 image_id=snapshot.image_id,
-                category_id=snapshot.category_id,
+                category_id=category_id,
                 bbox=(x1, y1, max(0.0, x2 - x1), max(0.0, y2 - y1)),
                 segmentation=mask_polygons(prediction.mask),
                 score=None,

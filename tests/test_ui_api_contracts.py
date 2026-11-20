@@ -145,7 +145,10 @@ def test_ui_selector_and_navigation_contract():
     html = (root / "src" / "agentic_cv" / "web" / "index.html").read_text(encoding="utf-8")
     javascript = (root / "src" / "agentic_cv" / "web" / "app.js").read_text(encoding="utf-8")
 
-    html_ids = set(re.findall(r'id="([^"]+)"', html))
+    all_ids = re.findall(r'id="([^"]+)"', html)
+    duplicates = sorted({item for item in all_ids if all_ids.count(item) > 1})
+    assert not duplicates, f"duplicate DOM ids: {duplicates}"
+    html_ids = set(all_ids)
     js_ids = set(re.findall(r'\$\("([^"]+)"\)', javascript))
     assert not (js_ids - html_ids), f"app.js references missing ids: {sorted(js_ids - html_ids)}"
 

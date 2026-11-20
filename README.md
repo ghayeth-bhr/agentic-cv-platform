@@ -44,6 +44,7 @@ This repository now contains a working local product path: **Assets** for upload
 | Select individual search results (checkboxes, min-score slider) and save only the selection as a named asset; tenant-scoped search | Added in [`docs/branches/search-selection.md`](docs/branches/search-selection.md) |
 | Calibration engine: one SAM 3 pass per sample, best threshold, correct negatives via VLM presence check, target-aware samples, prompt alternatives, SAM 3/VLM never co-resident (real run: 459 s failed → 142 s calibrated) | Added in Phase 2a ([`docs/branches/calibration-engine.md`](docs/branches/calibration-engine.md)) |
 | Background calibration (confirm returns at once, resumes after restarts) and a live calibration board: sample tiles per class, verdict chips, threshold slider re-drawing SAM 3 masks in the browser, label with your thresholds | Added in Phase 2b ([`docs/branches/calibration-live.md`](docs/branches/calibration-live.md)) |
+| Review in the dataset gallery: approve/reject (A/R, selected, all pending), status filter, delete or reclassify masks, click-to-segment with SAM 3's point tracker (~0.03-0.15 s per click), build an approved-only dataset | Added in Phase 4 ([`docs/branches/review-approval.md`](docs/branches/review-approval.md)) |
 
 The original root README was a 950-line concatenation of 23 branch READMEs. Those are preserved verbatim in [`docs/branches/`](docs/branches/README.md).
 
@@ -229,7 +230,10 @@ Heavy dependencies are lazy or injectable. Default `pytest` runs with fakes and 
 | GET | `/v1/datasets/{id}/images/{image_id}/file` | fetch the image bytes for review |
 | POST | `/v1/datasets/{id}/rebuild` | rebuild a version from its latest annotation revisions |
 | DELETE | `/v1/datasets/{id}/images/{image_id}/annotations/{annotation_id}` | retire an annotation (applied by the next rebuild) |
-| WS | `/v1/refinement/{version_id}/{image_id}` | click-point mask preview (tenant query parameter) |
+| WS | `/v1/refinement/{version_id}/{image_id}` | click-point mask preview with SAM 3's point tracker (`tenant_id`; `format=polygons` for compact masks) |
+| GET/POST | `/v1/datasets/{id}/review` | live annotations + review status / approve, reject, reset (list or all) |
+| PATCH | `/v1/datasets/{id}/images/{image_id}/annotations/{annotation_id}` | move an annotation to another class |
+| POST | `/v1/datasets/{id}/rebuild-approved` | new version with approved images only |
 | POST | `/v1/refinements/{session_id}/accept` | save the previewed mask as an annotation revision |
 | POST | `/v1/calibration/run` | threshold calibration on uploaded images |
 | POST/GET | `/v1/dataset-exports` | submit/read dataset-export jobs |
@@ -295,6 +299,7 @@ Default runtime uses SQLite; `AGENTIC_CV_POSTGRES_DSN` enables PostgreSQL stores
 | `AGENTIC_CV_VLM_MAX_CALLS` | `50` | hard cap on VLM calls per calibration run |
 | `AGENTIC_CV_VLM_MIN_CONFIDENCE` | `0.7` | minimum VLM confidence for an accepted verdict |
 | `AGENTIC_CV_VLM_MAX_SIDE` | `768` | longest side of images sent to the VLM; `0` sends full size |
+| `AGENTIC_CV_REFINEMENT` | points | set `ranked` to use the old text-mask ranking instead of SAM 3's point tracker |
 | `AGENTIC_CV_VLM_PROBE_TIMEOUT_SEC` | `1.0` | Ollama `/api/tags` reachability probe timeout |
 | `AGENTIC_CV_OIDC_ISSUER/AUDIENCE/JWKS_URL` | unset | opt-in OIDC/JWT auth |
 | `AGENTIC_CV_S3_BUCKET/ENDPOINT_URL` + `AWS_REGION` | unset | opt-in S3/MinIO storage |
