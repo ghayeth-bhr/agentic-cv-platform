@@ -45,6 +45,7 @@ This repository now contains a working local product path: **Assets** for upload
 | Calibration engine: one SAM 3 pass per sample, best threshold, correct negatives via VLM presence check, target-aware samples, prompt alternatives, SAM 3/VLM never co-resident (real run: 459 s failed → 142 s calibrated) | Added in Phase 2a ([`docs/branches/calibration-engine.md`](docs/branches/calibration-engine.md)) |
 | Background calibration (confirm returns at once, resumes after restarts) and a live calibration board: sample tiles per class, verdict chips, threshold slider re-drawing SAM 3 masks in the browser, label with your thresholds | Added in Phase 2b ([`docs/branches/calibration-live.md`](docs/branches/calibration-live.md)) |
 | Review in the dataset gallery: approve/reject (A/R, selected, all pending), status filter, delete or reclassify masks, click-to-segment with SAM 3's point tracker (~0.03-0.15 s per click), build an approved-only dataset | Added in Phase 4 ([`docs/branches/review-approval.md`](docs/branches/review-approval.md)) |
+| Monitoring agent: labeling health (speed, ETA, empty rate, per-class counts/scores), rules that pause the run and ask in chat (continue resumes without relabeling); multi-class labeling shares one SAM 3 vision pass per image (1.76x faster) | Added in Phase 3 ([`docs/branches/label-monitor.md`](docs/branches/label-monitor.md)) |
 
 The original root README was a 950-line concatenation of 23 branch READMEs. Those are preserved verbatim in [`docs/branches/`](docs/branches/README.md).
 

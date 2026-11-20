@@ -26,6 +26,7 @@ from .agent import (
 )
 from .agent_api import AgentApiDependencies, create_app as create_agent_app
 from .review_api import ReviewApiDependencies, create_app as create_review_app
+from .label_monitor import LabelHealthStore
 from .review_store import ReviewStore
 from .sam3_points import Sam3PointProvider, Sam3PointRefinementProvider
 from .prompt_enhancement import PromptEnhancer
@@ -225,6 +226,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
         jobs = JobStore(str(metadata_dir / "jobs.sqlite3"))
     agent_sessions = AgentSessionStore(str(metadata_dir / "agent-sessions.sqlite3"))
     reviews = ReviewStore(str(metadata_dir / "reviews.sqlite3"))
+    label_health = LabelHealthStore(config.data_dir / "label-health")
     if config.postgres is not None:
         from .postgres_preview import open_postgres_preview_store
 
@@ -292,6 +294,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
         LabelWorkflowDependencies(
             jobs=jobs, annotations=annotations, outbox=outbox,
             labeler=Sam3BatchLabeler(sam3_provider), preview=preview,
+            health=label_health,
         )
     )
     label_images = LabelImageResolver(registry=registry, data_dir=config.data_dir)
@@ -384,6 +387,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
             vectors=vector_index,
             text_embedder=embedding_provider.embed_text,
             release_models=lambda name: model_resources.close(name, reason="calibration"),
+            health=label_health,
             overlay_root=config.data_dir / "calibration-overlays",
         )
     )

@@ -265,3 +265,28 @@ def test_browser_calibration_board_slider_and_threshold_override(tmp_path):
             expect(page.locator("#agent-run-pill")).to_have_text("Dataset ready", timeout=30_000)
             expect(page.locator("#agent-messages")).to_contain_text("Using the fixed threshold 0.60")
             browser.close()
+
+
+def test_shutdown_mid_calibration_leaves_the_session_resumable(tmp_path):
+    started = threading.Event()
+
+    def slow_validator(sample, predictions):
+        started.set()
+        time.sleep(0.2)
+        return bool(predictions)
+
+    factory = lambda tenant_id, session_id: ValidatorSelection(validator=slow_validator, mode="custom")
+    with TestClient(make_app(tmp_path, validator_factory=factory, start_workers=False), raise_server_exceptions=False) as client:
+        session = plan(client)
+        client.post(f"/v1/agent/sessions/{session['session_id']}/confirm", headers=headers(), json={})
+        assert started.wait(timeout=10)
+    # The app shut down mid-calibration; the session is still resumable.
+    store = AgentSessionStore(str(tmp_path / "data" / "metadata" / "agent-sessions.sqlite3"))
+    from uuid import UUID
+
+    record = store.get_any(UUID(session["session_id"]))
+    store.close()
+    assert record.status == "calibrating"
+    with TestClient(make_app(tmp_path), raise_server_exceptions=False) as client:
+        done = wait_for_session(client, session["session_id"], statuses=("complete", "failed"))
+        assert done["status"] == "complete"

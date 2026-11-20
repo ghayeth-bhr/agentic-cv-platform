@@ -11,7 +11,7 @@ from uuid import UUID
 
 from .job_store import JobStoreBackend
 from .label_images import LabelImageResolver
-from .label_workflow import DurableLabelWorkflow, label_plan
+from .label_workflow import DurableLabelWorkflow, JobPaused, label_plan
 
 logger = logging.getLogger("agentic_cv.worker")
 
@@ -64,6 +64,13 @@ class LabelWorker:
                     classes=list(plan.classes),
                     worker_id=worker_id,
                 )
+            except JobPaused as exc:
+                # Not a failure: the monitor paused the run to ask the user.
+                logger.info(
+                    "label job paused by the health monitor",
+                    extra={"worker_id": worker_id, "job_id": str(job.job_id), "alert": exc.alert.get("code")},
+                )
+                continue
             except Exception:
                 duration_ms = round((time.perf_counter() - start) * 1000, 3)
                 status = "unknown"

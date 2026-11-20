@@ -229,7 +229,7 @@ class PostgresJobStore:
     def request_cancel(self, job_id: UUID) -> JobRecord:
         with self._lock:
             current = self.get(job_id)
-            if current.status == "queued":
+            if current.status in ("queued", "paused"):
                 self._connection.execute(
                     """
                     UPDATE jobs SET status = 'cancelled', cancel_requested = TRUE, updated_at = %s

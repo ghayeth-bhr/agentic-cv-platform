@@ -437,6 +437,19 @@ the threshold chips as verdicts arrived → calibrated `elephant` 0.45 (5/5) and
 (~150 s from confirm). 21 instances. The VLM recorded "no target" for the
 gerenuk and buffalo (elephant) and for frames without visible tusks.
 
+## Phase 3 labeling throughput + monitor (real models, 2026-11-20)
+
+`predict_many` (one SAM 3 vision pass per image, all class prompts on it),
+warm model, 9 real 720x1280 frames, prompts `elephant` + `tusk` at 0.45:
+**1.112 s -> 0.633 s per image**, identical detection counts on every frame,
+peak 2,359 MB allocated.
+
+End-to-end (`scripts/real_agent_journey.py`, production wiring): calibration
+142 s (unchanged, 5/5 and 5/5), label + build + export **24.2 s** (27.2 s in
+Phase 2a; the ~14 s SAM 3 reload after phased calibration dominates 9 images),
+26 instances (identical), monitor health at the end: 9/9 processed, 2 images
+without detections, mean scores 0.88 (elephants) / 0.68 (tusks), no alert.
+
 ## How to reproduce
 
 The two harnesses are not collected by pytest; they load real model weights and

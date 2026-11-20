@@ -753,3 +753,18 @@ textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3
 .gallery-annotation-meta { font-size: 0.72rem; }
 .gallery-annotation-class { margin-left: 0; }
 .gallery-annotation-delete { margin-left: 0; }
+
+/* Labeling health (Phase 3) */
+.agent-health { margin-top: 0.9rem; padding: 0.8rem; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-elev); display: flex; flex-direction: column; gap: 0.55rem; }
+.agent-health-head { display: flex; justify-content: space-between; align-items: center; }
+.agent-health-state { font-family: var(--mono); font-size: 0.74rem; color: var(--ink-muted); }
+.agent-health-state[data-state="running"], .agent-health-state[data-state="resuming"] { color: var(--accent); }
+.agent-health-state[data-state="paused"] { color: var(--warn); }
+.agent-health-state[data-state="done"] { color: var(--success); }
+.agent-health-alert { padding: 0.5rem 0.65rem; border: 1px solid var(--warn); border-radius: var(--radius-sm); background: rgba(210, 153, 34, 0.12); color: var(--ink); font-size: 0.82rem; }
+.agent-health-metrics { margin: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.15rem 0.6rem; font-size: 0.78rem; }
+.agent-health-metrics dt { color: var(--ink-muted); grid-row: 1; }
+.agent-health-metrics dd { margin: 0; font-family: var(--mono); grid-row: 2; }
+.agent-health-classes { display: flex; flex-direction: column; gap: 0.25rem; }
+.agent-health-class { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; align-items: center; gap: 0.5rem; font-size: 0.8rem; }
+.agent-health-score { font-family: var(--mono); font-size: 0.74rem; color: var(--ink-muted); }
