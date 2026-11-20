@@ -292,7 +292,7 @@
             <div id="gallery-counter" class="gallery-counter" aria-live="polite">image 0 of 0</div>
           </div>
 
-          <div id="gallery-status" class="status" role="status" aria-live="polite"></div>
+          <div id="dataset-gallery-status" class="status" role="status" aria-live="polite"></div>
           <div class="gallery-filters" role="group" aria-label="Dataset image filters">
             <label class="field field-narrow">
               <span>Class</span>
@@ -315,7 +315,29 @@
               <input id="gallery-filter-lowconfidence" type="checkbox">
               <span>Low confidence only (&lt;0.50)</span>
             </label>
+            <label class="field field-narrow">
+              <span>Review</span>
+              <select id="gallery-filter-status">
+                <option value="all">All images</option>
+                <option value="pending">Pending</option>
+                <option value="approved">Approved</option>
+                <option value="rejected">Rejected</option>
+              </select>
+            </label>
             <button id="gallery-reset-filters" type="button" class="btn btn-ghost btn-small">Reset filters</button>
+          </div>
+          <div id="gallery-review-bar" class="gallery-review-bar" role="group" aria-label="Review actions">
+            <span id="gallery-review-counts" class="gallery-review-counts">0 pending</span>
+            <button id="gallery-approve" type="button" class="btn btn-primary btn-small" title="Approve this image and go to the next (A)">Approve <kbd>A</kbd></button>
+            <button id="gallery-reject" type="button" class="btn btn-secondary btn-small" title="Reject this image and go to the next (R)">Reject <kbd>R</kbd></button>
+            <span class="gallery-review-sep" aria-hidden="true"></span>
+            <button id="gallery-select-visible" type="button" class="btn btn-ghost btn-small">Select shown</button>
+            <button id="gallery-select-clear" type="button" class="btn btn-ghost btn-small">Clear</button>
+            <button id="gallery-approve-selected" type="button" class="btn btn-ghost btn-small" disabled>Approve selected</button>
+            <button id="gallery-reject-selected" type="button" class="btn btn-ghost btn-small" disabled>Reject selected</button>
+            <button id="gallery-approve-pending" type="button" class="btn btn-ghost btn-small">Approve all pending</button>
+            <span class="gallery-review-sep" aria-hidden="true"></span>
+            <button id="gallery-build-approved" type="button" class="btn btn-primary btn-small">Build approved dataset</button>
           </div>
           <div id="gallery-class-counts" class="category-row gallery-class-counts" aria-live="polite"></div>
 
@@ -343,7 +365,23 @@
               <dl id="gallery-details" class="gallery-details"></dl>
               <h4 class="gallery-side-heading">Annotations</h4>
               <div id="gallery-annotations" class="gallery-annotations"></div>
-              <button id="gallery-refine" type="button" class="btn btn-secondary" disabled>Refine this image</button>
+              <div class="gallery-click">
+                <button id="gallery-click-mode" type="button" class="btn btn-secondary" disabled>Add or fix an object by clicking</button>
+                <div id="gallery-click-panel" class="gallery-click-panel" hidden>
+                  <p class="card-desc">Click the object on the image. Shift+click marks background. Select an annotation above first to replace it.</p>
+                  <label class="field">
+                    <span>Class</span>
+                    <select id="gallery-click-class"></select>
+                  </label>
+                  <div class="actions">
+                    <button id="gallery-click-save" type="button" class="btn btn-primary btn-small" disabled>Save object</button>
+                    <button id="gallery-click-reset" type="button" class="btn btn-ghost btn-small">Reset points</button>
+                    <button id="gallery-click-done" type="button" class="btn btn-ghost btn-small">Done</button>
+                  </div>
+                  <div id="gallery-click-status" class="status" role="status" aria-live="polite"></div>
+                </div>
+              </div>
+              <button id="gallery-refine" type="button" class="btn btn-ghost btn-small" disabled>Open the classic review panel</button>
             </aside>
           </div>
         </section>

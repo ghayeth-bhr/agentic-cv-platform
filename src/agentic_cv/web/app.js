@@ -2214,7 +2214,7 @@
   }
 
   function galleryStatus(message, kind) {
-    setStatus("gallery-status", message, kind);
+    setStatus("dataset-gallery-status", message, kind);
   }
 
   async function openDatasetGallery(versionId, knownDataset = null) {
@@ -2230,9 +2230,14 @@
       versionId: String(versionId),
       dataset: knownDataset,
       index: -1,
-      filters: { categoryId: "all", split: "all", unannotated: false, lowConfidence: false },
+      filters: { categoryId: "all", split: "all", unannotated: false, lowConfidence: false, status: "all" },
       toggles: { boxes: true, masks: true, labels: true },
+      selected: new Set(),
+      counts: null,
+      selectedAnnotation: null,
     });
+    closeGalleryClick();
+    if ($("gallery-filter-status")) $("gallery-filter-status").value = "all";
     if ($("gallery-title")) $("gallery-title").textContent = "Dataset gallery";
     if ($("gallery-subtitle")) $("gallery-subtitle").textContent = `Version ${String(versionId).slice(0, 8)}`;
     if ($("gallery-filter-class")) $("gallery-filter-class").value = "all";
@@ -2317,6 +2322,7 @@
         (item) => String(item.category_id) === String(filters.categoryId)
       )) return false;
       if (filters.split !== "all" && image.split !== filters.split) return false;
+      if (filters.status && filters.status !== "all" && (image.status || "pending") !== filters.status) return false;
       if (filters.unannotated && annotations.length) return false;
       if (filters.lowConfidence && !annotations.some(
         (item) => item.score != null && Number(item.score) < 0.5
@@ -2346,9 +2352,10 @@
     galleryStatus("Loading images…", "busy");
     try {
       const data = await request(
-        `/v1/datasets/${encodeURIComponent(versionId)}/images?limit=200&offset=${gallery.offset}`,
+        `/v1/datasets/${encodeURIComponent(versionId)}/review?limit=200&offset=${gallery.offset}`,
         { headers: tenantHeaders(false) }
       );
+      if (data && data.counts) gallery.counts = data.counts;
       const page = (data && data.images) || [];
       gallery.images = gallery.images.concat(page);
       gallery.total = Number(data && data.total) || gallery.images.length;
@@ -2367,6 +2374,10 @@
   async function selectGalleryImage(index) {
     const gallery = state.gallery;
     if (!gallery.open || index < 0 || index >= gallery.visible.length) return;
+    if (gallery.index !== index) {
+      closeGalleryClick();
+      gallery.selectedAnnotation = null;
+    }
     gallery.index = index;
     const image = gallery.visible[index];
     renderGallery();
@@ -2399,11 +2410,14 @@
     if (filmstrip) {
       filmstrip.replaceChildren();
       visible.forEach((item, index) => {
+        const wrap = node("div", "gallery-thumb-wrap");
+        wrap.dataset.status = item.status || "pending";
         const button = node("button", "gallery-thumb");
         button.type = "button";
         button.dataset.galleryIndex = String(index);
         button.dataset.annotated = String((item.annotations || []).length > 0);
-        button.setAttribute("aria-label", `Open ${cleanMessage(item.file_name)}`);
+        button.dataset.status = item.status || "pending";
+        button.setAttribute("aria-label", `Open ${cleanMessage(item.file_name)} (${item.status || "pending"})`);
         if (index === gallery.index) button.classList.add("is-active");
         const thumb = node("img");
         thumb.alt = "";
@@ -2411,7 +2425,18 @@
         if (item._url) thumb.src = item._url;
         button.appendChild(thumb);
         button.addEventListener("click", () => selectGalleryImage(index));
-        filmstrip.appendChild(button);
+        const pick = document.createElement("input");
+        pick.type = "checkbox";
+        pick.className = "gallery-thumb-pick";
+        pick.checked = gallery.selected.has(item.image_id);
+        pick.setAttribute("aria-label", `Select ${cleanMessage(item.file_name)}`);
+        pick.addEventListener("change", () => {
+          if (pick.checked) gallery.selected.add(item.image_id); else gallery.selected.delete(item.image_id);
+          renderGalleryReviewBar();
+        });
+        const badge = node("span", "gallery-thumb-status", { approved: "✓", rejected: "✗" }[item.status] || "");
+        wrap.append(button, pick, badge);
+        filmstrip.appendChild(wrap);
       });
     }
     const loadMore = $("gallery-load-more");
@@ -2431,7 +2456,7 @@
       details.replaceChildren();
       const rows = image ? [
         ["File", cleanMessage(image.file_name)],
-        ["Size", formatBytes(image.file_size)],
+        ["Review", image.status || "pending"],
         ["Split", image.split || "train"],
         ["Dimensions", `${image.width}×${image.height}`],
         ["Annotations", String((image.annotations || []).length)],
@@ -2460,11 +2485,43 @@
           node("span", "gallery-annotation-meta", `${Math.round(annotationArea(annotation, image))} px²`)
         );
         row.append(swatch, copy);
+        row.tabIndex = 0;
+        if (gallery.selectedAnnotation === annotation.annotation_id) row.classList.add("is-selected");
+        row.addEventListener("click", () => {
+          gallery.selectedAnnotation = gallery.selectedAnnotation === annotation.annotation_id ? null : annotation.annotation_id;
+          renderGallery();
+        });
+        const categories = (gallery.dataset && gallery.dataset.categories) || [];
+        if (categories.length > 1) {
+          const select = document.createElement("select");
+          select.className = "gallery-annotation-class";
+          select.setAttribute("aria-label", "Class");
+          categories.forEach((category) => {
+            const option = node("option", null, category.name);
+            option.value = String(category.category_id);
+            select.appendChild(option);
+          });
+          select.value = String(annotation.category_id);
+          select.addEventListener("click", (event) => event.stopPropagation());
+          select.addEventListener("change", () => changeAnnotationClass(image, annotation, Number(select.value)));
+          row.appendChild(select);
+        }
+        const remove = node("button", "gallery-annotation-delete", "✕");
+        remove.type = "button";
+        remove.title = "Delete this annotation";
+        remove.setAttribute("aria-label", "Delete annotation");
+        remove.addEventListener("click", (event) => {
+          event.stopPropagation();
+          deleteGalleryAnnotation(image, annotation);
+        });
+        row.appendChild(remove);
         annotations.appendChild(row);
       });
     }
     const refine = $("gallery-refine");
     if (refine) refine.disabled = !image;
+    if ($("gallery-click-mode")) $("gallery-click-mode").disabled = !image;
+    renderGalleryReviewBar();
     drawGalleryOverlay();
   }
 
@@ -2477,6 +2534,19 @@
     const height = img.naturalHeight;
     if (canvas.width !== width) canvas.width = width;
     if (canvas.height !== height) canvas.height = height;
+    // The image is letterboxed (object-fit: contain); lay the canvas exactly
+    // over the displayed pixels so drawings and clicks line up with the photo.
+    const boxWidth = img.clientWidth;
+    const boxHeight = img.clientHeight;
+    if (boxWidth && boxHeight) {
+      const scale = Math.min(boxWidth / width, boxHeight / height);
+      const shownWidth = width * scale;
+      const shownHeight = height * scale;
+      canvas.style.width = `${shownWidth}px`;
+      canvas.style.height = `${shownHeight}px`;
+      canvas.style.left = `${img.offsetLeft + (boxWidth - shownWidth) / 2}px`;
+      canvas.style.top = `${img.offsetTop + (boxHeight - shownHeight) / 2}px`;
+    }
     canvas.dataset.boxes = String(gallery.toggles.boxes);
     canvas.dataset.masks = String(gallery.toggles.masks);
     canvas.dataset.labels = String(gallery.toggles.labels);
@@ -2486,6 +2556,8 @@
     const annotations = (image && image.annotations) || [];
     annotations.forEach((annotation) => {
       const color = classColor(annotation.category_id);
+      const highlighted = gallery.selectedAnnotation === annotation.annotation_id;
+      ctx.globalAlpha = gallery.selectedAnnotation && !highlighted ? 0.35 : 1;
       if (gallery.toggles.masks) {
         (annotation.segmentation || []).forEach((coords) => {
           if (!coords || coords.length < 6) return;
@@ -2522,6 +2594,8 @@
         ctx.fillText(text, (Number(x) || 0) + 4, labelY);
       }
     });
+    ctx.globalAlpha = 1;
+    drawGalleryClickPreview(ctx, width);
   }
 
   async function refineGalleryImage() {
@@ -2583,7 +2657,8 @@
   }
   if ($("gallery-reset-filters")) {
     $("gallery-reset-filters").addEventListener("click", () => {
-      Object.assign(state.gallery.filters, { categoryId: "all", split: "all", unannotated: false, lowConfidence: false });
+      Object.assign(state.gallery.filters, { categoryId: "all", split: "all", unannotated: false, lowConfidence: false, status: "all" });
+      if ($("gallery-filter-status")) $("gallery-filter-status").value = "all";
       if ($("gallery-filter-class")) $("gallery-filter-class").value = "all";
       if ($("gallery-filter-split")) $("gallery-filter-split").value = "all";
       if ($("gallery-filter-unannotated")) $("gallery-filter-unannotated").checked = false;
@@ -2607,9 +2682,372 @@
     });
   }
   if ($("gallery-refine")) $("gallery-refine").addEventListener("click", refineGalleryImage);
+
+  // Review: status, bulk actions, annotation edits, click-to-segment.
+  function galleryCurrentImage() {
+    const gallery = state.gallery;
+    return gallery.visible[gallery.index] || null;
+  }
+
+  function renderGalleryReviewBar() {
+    const gallery = state.gallery;
+    const counts = gallery.counts;
+    if ($("gallery-review-counts")) {
+      $("gallery-review-counts").textContent = counts
+        ? `${counts.pending} pending · ${counts.approved} approved · ${counts.rejected} rejected`
+        : "";
+    }
+    const selected = gallery.selected ? gallery.selected.size : 0;
+    if ($("gallery-approve-selected")) {
+      $("gallery-approve-selected").disabled = !selected;
+      $("gallery-approve-selected").textContent = selected ? `Approve ${selected} selected` : "Approve selected";
+    }
+    if ($("gallery-reject-selected")) {
+      $("gallery-reject-selected").disabled = !selected;
+      $("gallery-reject-selected").textContent = selected ? `Reject ${selected} selected` : "Reject selected";
+    }
+    const image = galleryCurrentImage();
+    if ($("gallery-approve")) $("gallery-approve").disabled = !image;
+    if ($("gallery-reject")) $("gallery-reject").disabled = !image;
+    if ($("gallery-approve-pending")) $("gallery-approve-pending").disabled = !counts || !counts.pending;
+    if ($("gallery-build-approved")) $("gallery-build-approved").disabled = !counts || !counts.approved;
+  }
+
+  async function setGalleryReview(body) {
+    const gallery = state.gallery;
+    const result = await request(`/v1/datasets/${encodeURIComponent(gallery.versionId)}/review`, {
+      method: "POST",
+      headers: tenantHeaders(true),
+      body: JSON.stringify(body),
+    });
+    gallery.counts = result.counts;
+    return result;
+  }
+
+  async function reviewCurrentImage(status) {
+    const gallery = state.gallery;
+    const image = galleryCurrentImage();
+    if (!gallery.open || !image) return;
+    try {
+      await setGalleryReview({ status, image_ids: [image.image_id] });
+      image.status = status;
+      const position = gallery.index;
+      applyGalleryFilters();
+      // Stay at the same position when the image left the filtered list,
+      // otherwise move on: "approve and next".
+      const stillShown = gallery.visible[position] === image;
+      const next = stillShown ? position + 1 : position;
+      gallery.index = Math.min(next, Math.max(0, gallery.visible.length - 1));
+      if (!gallery.visible.length) gallery.index = -1;
+      galleryStatus(`${status === "approved" ? "Approved" : "Rejected"} ${cleanMessage(image.file_name)}.`, "ok");
+      if (gallery.index >= 0) await selectGalleryImage(gallery.index); else renderGallery();
+    } catch (err) {
+      galleryStatus(cleanMessage(err.message || err), "error");
+    }
+  }
+
+  async function reviewSelected(status) {
+    const gallery = state.gallery;
+    const ids = [...gallery.selected];
+    if (!ids.length) return;
+    try {
+      const result = await setGalleryReview({ status, image_ids: ids });
+      gallery.images.forEach((image) => { if (gallery.selected.has(image.image_id)) image.status = status; });
+      gallery.selected.clear();
+      applyGalleryFilters();
+      renderGallery();
+      galleryStatus(`${result.updated} image${result.updated === 1 ? "" : "s"} ${status}.`, "ok");
+    } catch (err) {
+      galleryStatus(cleanMessage(err.message || err), "error");
+    }
+  }
+
+  async function reloadGalleryAnnotations() {
+    // Re-read live annotations and statuses for every loaded image, keeping
+    // the current image and filters.
+    const gallery = state.gallery;
+    const current = galleryCurrentImage();
+    const currentId = current && current.image_id;
+    const data = await request(
+      `/v1/datasets/${encodeURIComponent(gallery.versionId)}/review?limit=${Math.max(200, gallery.images.length)}&offset=0`,
+      { headers: tenantHeaders(false) },
+    );
+    const fresh = new Map(((data && data.images) || []).map((image) => [image.image_id, image]));
+    gallery.images.forEach((image) => {
+      const update = fresh.get(image.image_id);
+      if (update) {
+        image.annotations = update.annotations;
+        image.status = update.status;
+      }
+    });
+    if (data && data.counts) gallery.counts = data.counts;
+    applyGalleryFilters();
+    const index = gallery.visible.findIndex((image) => image.image_id === currentId);
+    if (index >= 0) gallery.index = index;
+    renderGallery();
+  }
+
+  async function deleteGalleryAnnotation(image, annotation) {
+    const gallery = state.gallery;
+    try {
+      await request(
+        `/v1/datasets/${encodeURIComponent(gallery.versionId)}/images/${encodeURIComponent(image.image_id)}/annotations/${annotation.annotation_id.split("/").map(encodeURIComponent).join("/")}`,
+        { method: "DELETE", headers: tenantHeaders(false) },
+      );
+      if (gallery.selectedAnnotation === annotation.annotation_id) gallery.selectedAnnotation = null;
+      galleryStatus("Annotation deleted.", "ok");
+      await reloadGalleryAnnotations();
+    } catch (err) {
+      galleryStatus(cleanMessage(err.message || err), "error");
+    }
+  }
+
+  async function changeAnnotationClass(image, annotation, categoryId) {
+    const gallery = state.gallery;
+    try {
+      await request(
+        `/v1/datasets/${encodeURIComponent(gallery.versionId)}/images/${encodeURIComponent(image.image_id)}/annotations/${annotation.annotation_id.split("/").map(encodeURIComponent).join("/")}`,
+        {
+          method: "PATCH",
+          headers: tenantHeaders(true),
+          body: JSON.stringify({ category_id: categoryId, expected_revision: annotation.revision }),
+        },
+      );
+      galleryStatus(`Moved to ${cleanMessage(galleryClassName(gallery.dataset, categoryId))}.`, "ok");
+      await reloadGalleryAnnotations();
+    } catch (err) {
+      galleryStatus(cleanMessage(err.message || err), "error");
+    }
+  }
+
+  function clickStatus(message, kind) {
+    setStatus("gallery-click-status", message, kind);
+  }
+
+  function closeGalleryClick() {
+    const gallery = state.gallery;
+    const click = gallery.click;
+    if (click && click.socket) {
+      click.socket.onclose = null;
+      click.socket.close();
+    }
+    gallery.click = null;
+    if ($("gallery-click-panel")) $("gallery-click-panel").hidden = true;
+    if ($("gallery-click-mode")) $("gallery-click-mode").hidden = false;
+    const stage = $("gallery-stage");
+    if (stage) stage.classList.remove("is-clicking");
+    drawGalleryOverlay();
+  }
+
+  function openGalleryClick() {
+    const gallery = state.gallery;
+    const image = galleryCurrentImage();
+    if (!gallery.open || !image) return;
+    closeGalleryClick();
+    const select = $("gallery-click-class");
+    if (select) {
+      select.innerHTML = "";
+      ((gallery.dataset && gallery.dataset.categories) || []).forEach((category) => {
+        const option = node("option", null, category.name);
+        option.value = String(category.category_id);
+        select.appendChild(option);
+      });
+      const selected = (image.annotations || []).find((item) => item.annotation_id === gallery.selectedAnnotation);
+      if (selected) select.value = String(selected.category_id);
+    }
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const path = `/v1/refinement/${encodeURIComponent(gallery.versionId)}/${encodeURIComponent(image.image_id)}?tenant_id=${encodeURIComponent(DEFAULT_TENANT)}&format=polygons`;
+    const socket = new WebSocket(`${protocol}//${window.location.host}${path}`);
+    gallery.click = { socket, snapshot: null, imageId: image.image_id, pending: false };
+    if ($("gallery-click-panel")) $("gallery-click-panel").hidden = false;
+    if ($("gallery-click-mode")) $("gallery-click-mode").hidden = true;
+    if ($("gallery-click-save")) $("gallery-click-save").disabled = true;
+    const stage = $("gallery-stage");
+    if (stage) stage.classList.add("is-clicking");
+    clickStatus("Connecting…", "busy");
+    socket.addEventListener("message", (event) => {
+      const click = gallery.click;
+      if (!click || click.socket !== socket) return;
+      const message = JSON.parse(event.data);
+      if (message.type === "snapshot") {
+        click.snapshot = message;
+        click.pending = false;
+        const found = (message.predictions || []).length > 0;
+        if ($("gallery-click-save")) $("gallery-click-save").disabled = !found;
+        clickStatus(
+          !message.points.length
+            ? "Click the object to segment it."
+            : found ? "Mask ready. Add points to refine, or save it." : "No mask at that point; try another point.",
+          found || !message.points.length ? "ok" : "error",
+        );
+        drawGalleryOverlay();
+      } else if (message.type === "error") {
+        click.pending = false;
+        clickStatus(cleanMessage(message.detail || "Refinement failed"), "error");
+      }
+    });
+    socket.addEventListener("close", (event) => {
+      const click = gallery.click;
+      if (click && click.socket === socket && event.reason) clickStatus(cleanMessage(event.reason), "error");
+    });
+  }
+
+  function drawGalleryClickPreview(ctx, width) {
+    const click = state.gallery.click;
+    if (!click || !click.snapshot) return;
+    const snapshot = click.snapshot;
+    ctx.save();
+    (snapshot.predictions || []).slice(0, 1).forEach((prediction) => {
+      (prediction.polygons || []).forEach((coords) => {
+        if (!coords || coords.length < 6) return;
+        ctx.beginPath();
+        ctx.moveTo(coords[0], coords[1]);
+        for (let i = 2; i + 1 < coords.length; i += 2) ctx.lineTo(coords[i], coords[i + 1]);
+        ctx.closePath();
+        ctx.fillStyle = "rgba(255, 214, 10, 0.35)";
+        ctx.fill();
+        ctx.strokeStyle = "#ffd60a";
+        ctx.lineWidth = Math.max(2, width / 300);
+        ctx.stroke();
+      });
+    });
+    (snapshot.points || []).forEach((point) => {
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, Math.max(5, width / 120), 0, Math.PI * 2);
+      ctx.fillStyle = point.label === "positive" ? "#3fb950" : "#e5534b";
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "#ffffff";
+      ctx.stroke();
+    });
+    ctx.restore();
+  }
+
+  function sendGalleryClick(event) {
+    const click = state.gallery.click;
+    const canvas = $("gallery-overlay");
+    if (!click || !click.snapshot || !canvas || click.pending) return;
+    if (!click.socket || click.socket.readyState !== WebSocket.OPEN) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = (event.clientX - rect.left) * (canvas.width / rect.width);
+    const y = (event.clientY - rect.top) * (canvas.height / rect.height);
+    click.pending = true;
+    click.socket.send(JSON.stringify({
+      type: "click",
+      expected_revision: click.snapshot.revision,
+      x,
+      y,
+      label: event.shiftKey ? "negative" : "positive",
+    }));
+    clickStatus("Segmenting…", "busy");
+  }
+
+  async function saveGalleryClick() {
+    const gallery = state.gallery;
+    const click = gallery.click;
+    if (!click || !click.snapshot || !(click.snapshot.predictions || []).length) return;
+    const button = $("gallery-click-save");
+    setBusy(button, true, "Saving…");
+    try {
+      await request(`/v1/refinements/${encodeURIComponent(click.snapshot.session_id)}/accept`, {
+        method: "POST",
+        headers: tenantHeaders(true),
+        body: JSON.stringify({
+          prediction_index: 0,
+          refinement_revision: click.snapshot.revision,
+          annotation_id: gallery.selectedAnnotation || null,
+          category_id: Number(($("gallery-click-class") && $("gallery-click-class").value) || click.snapshot.category_id),
+        }),
+      });
+      const replaced = !!gallery.selectedAnnotation;
+      gallery.selectedAnnotation = null;
+      await reloadGalleryAnnotations();
+      galleryStatus(replaced ? "Annotation replaced." : "Object added.", "ok");
+      openGalleryClick();  // fresh session for the next object
+    } catch (err) {
+      clickStatus(cleanMessage(err.message || err), "error");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  if ($("gallery-filter-status")) {
+    $("gallery-filter-status").addEventListener("change", (event) => {
+      state.gallery.filters.status = event.target.value;
+      state.gallery.index = 0;
+      applyGalleryFilters();
+      renderGallery();
+    });
+  }
+  if ($("gallery-approve")) $("gallery-approve").addEventListener("click", () => reviewCurrentImage("approved"));
+  if ($("gallery-reject")) $("gallery-reject").addEventListener("click", () => reviewCurrentImage("rejected"));
+  if ($("gallery-select-visible")) $("gallery-select-visible").addEventListener("click", () => {
+    state.gallery.visible.forEach((image) => state.gallery.selected.add(image.image_id));
+    renderGallery();
+  });
+  if ($("gallery-select-clear")) $("gallery-select-clear").addEventListener("click", () => {
+    state.gallery.selected.clear();
+    renderGallery();
+  });
+  if ($("gallery-approve-selected")) $("gallery-approve-selected").addEventListener("click", () => reviewSelected("approved"));
+  if ($("gallery-reject-selected")) $("gallery-reject-selected").addEventListener("click", () => reviewSelected("rejected"));
+  if ($("gallery-approve-pending")) $("gallery-approve-pending").addEventListener("click", async () => {
+    try {
+      const result = await setGalleryReview({ status: "approved", all: true, only_status: "pending" });
+      state.gallery.images.forEach((image) => { if ((image.status || "pending") === "pending") image.status = "approved"; });
+      applyGalleryFilters();
+      renderGallery();
+      galleryStatus(`${result.updated} pending image${result.updated === 1 ? "" : "s"} approved.`, "ok");
+    } catch (err) {
+      galleryStatus(cleanMessage(err.message || err), "error");
+    }
+  });
+  if ($("gallery-build-approved")) $("gallery-build-approved").addEventListener("click", async () => {
+    const gallery = state.gallery;
+    const button = $("gallery-build-approved");
+    setBusy(button, true, "Building…");
+    try {
+      const built = await request(`/v1/datasets/${encodeURIComponent(gallery.versionId)}/rebuild-approved`, {
+        method: "POST",
+        headers: tenantHeaders(true),
+        body: JSON.stringify({ idempotency_key: `approved-${gallery.versionId}-${Date.now()}` }),
+      });
+      galleryStatus(
+        `Built “${cleanMessage(built.name)}”: ${built.image_count} approved image${built.image_count === 1 ? "" : "s"}, ${built.annotation_count} annotation${built.annotation_count === 1 ? "" : "s"}. Opening it…`,
+        "ok",
+      );
+      state.datasets = null;
+      window.location.hash = `#/datasets/${built.version_id}`;
+    } catch (err) {
+      galleryStatus(cleanMessage(err.message || err), "error");
+    } finally {
+      setBusy(button, false);
+    }
+  });
+  if ($("gallery-click-mode")) $("gallery-click-mode").addEventListener("click", openGalleryClick);
+  if ($("gallery-click-done")) $("gallery-click-done").addEventListener("click", closeGalleryClick);
+  if ($("gallery-click-reset")) $("gallery-click-reset").addEventListener("click", openGalleryClick);
+  if ($("gallery-click-save")) $("gallery-click-save").addEventListener("click", saveGalleryClick);
+  if ($("gallery-overlay")) $("gallery-overlay").addEventListener("click", sendGalleryClick);
+  window.addEventListener("resize", () => { if (state.gallery.open) drawGalleryOverlay(); });
   document.addEventListener("keydown", (event) => {
     if (!state.gallery.open || $("view-datasets").hidden) return;
-    if (["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement && document.activeElement.tagName)) return;
+    const active = document.activeElement;
+    const typing = active && (
+      ["SELECT", "TEXTAREA"].includes(active.tagName)
+      || (active.tagName === "INPUT" && !["checkbox", "radio", "range"].includes(active.type))
+    );
+    if (typing || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.key === "a" || event.key === "A") {
+      event.preventDefault();
+      reviewCurrentImage("approved");
+      return;
+    }
+    if (event.key === "r" || event.key === "R") {
+      event.preventDefault();
+      reviewCurrentImage("rejected");
+      return;
+    }
     if (event.key === "ArrowLeft") {
       event.preventDefault();
       selectGalleryImage(state.gallery.index - 1);

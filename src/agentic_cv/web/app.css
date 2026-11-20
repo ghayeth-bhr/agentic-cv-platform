@@ -624,7 +624,7 @@ textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3
 .gallery-main { padding: 0.8rem; min-width: 0; }
 .gallery-stage { position: relative; line-height: 0; background: #05070a; border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; }
 .gallery-stage img { display: block; width: 100%; height: auto; max-height: 56vh; object-fit: contain; }
-.gallery-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.gallery-stage canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
 .gallery-controls { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 0.6rem; align-items: center; margin-top: 0.6rem; }
 .gallery-caption { text-align: center; font-size: 0.82rem; color: var(--ink-muted); overflow-wrap: anywhere; }
 .gallery-toggles { display: flex; flex-wrap: wrap; gap: 0.9rem; padding: 0.55rem 0; border-bottom: 1px solid var(--line-soft); }
@@ -725,3 +725,31 @@ textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3
 .agent-board-verdict { color: var(--ink); }
 .agent-board-tile[data-verdict="ok"] .agent-board-verdict { color: var(--success); }
 .agent-board-tile[data-verdict="bad"] .agent-board-verdict { color: var(--danger); }
+
+/* Dataset review (Phase 4) */
+.gallery-review-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.5rem; margin: 0.6rem 0; padding: 0.5rem 0.6rem; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-elev); }
+.gallery-review-counts { font-family: var(--mono); font-size: 0.78rem; color: var(--ink-muted); margin-right: 0.4rem; }
+.gallery-review-sep { width: 1px; align-self: stretch; background: var(--line); margin: 0 0.2rem; }
+.gallery-review-bar kbd { font-family: var(--mono); font-size: 0.68rem; padding: 0 0.25rem; border: 1px solid currentColor; border-radius: 3px; opacity: 0.7; }
+.gallery-thumb-wrap { position: relative; flex: 0 0 auto; }
+.gallery-thumb-pick { position: absolute; top: 4px; left: 4px; z-index: 1; margin: 0; accent-color: var(--accent); }
+.gallery-thumb-status { position: absolute; right: 4px; bottom: 4px; font-size: 0.8rem; font-weight: 700; pointer-events: none; }
+.gallery-thumb-wrap[data-status="approved"] .gallery-thumb { box-shadow: 0 0 0 2px var(--success) inset; }
+.gallery-thumb-wrap[data-status="approved"] .gallery-thumb-status { color: var(--success); }
+.gallery-thumb-wrap[data-status="rejected"] .gallery-thumb { box-shadow: 0 0 0 2px var(--danger) inset; opacity: 0.6; }
+.gallery-thumb-wrap[data-status="rejected"] .gallery-thumb-status { color: var(--danger); }
+.gallery-annotation { cursor: pointer; align-items: center; }
+.gallery-annotation.is-selected { outline: 1px solid var(--accent); background: var(--accent-faint); }
+.gallery-annotation-class { margin-left: auto; font: inherit; font-size: 0.76rem; background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.gallery-annotation-delete { margin-left: 0.35rem; border: 0; background: none; color: var(--ink-muted); cursor: pointer; font-size: 0.9rem; }
+.gallery-annotation-delete:hover, .gallery-annotation-delete:focus-visible { color: var(--danger); outline: none; }
+.gallery-click { margin: 0.8rem 0 0.5rem; }
+.gallery-click-panel { display: flex; flex-direction: column; gap: 0.5rem; padding: 0.6rem; border: 1px solid #ffd60a55; border-radius: var(--radius); background: rgba(255, 214, 10, 0.05); }
+.gallery-click-panel .card-desc { margin: 0; font-size: 0.78rem; }
+.gallery-stage.is-clicking canvas { cursor: crosshair; pointer-events: auto; }
+/* Review rows: swatch | text | class | delete on one line */
+.gallery-annotation { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 0.5rem; }
+.gallery-annotation > div { display: flex; flex-direction: column; min-width: 0; }
+.gallery-annotation-meta { font-size: 0.72rem; }
+.gallery-annotation-class { margin-left: 0; }
+.gallery-annotation-delete { margin-left: 0; }
