@@ -58,7 +58,7 @@ def _credential(authorization: str | None, api_key: str | None) -> str | None:
 
 
 def create_app(dependencies: PreviewApiDependencies) -> FastAPI:
-    app = FastAPI(title="Agentic CV preview API", version="1")
+    app = FastAPI(title="BotFlow preview API", version="1")
 
     @app.get("/v1/jobs/{job_id}/preview")
     def preview_stream(

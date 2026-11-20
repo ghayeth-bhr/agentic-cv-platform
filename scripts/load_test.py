@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Lightweight local load test for the Agentic CV platform API.
+"""Lightweight local load test for the BotFlow API.
 
 Targets a running server (default: http://127.0.0.1:8000) and reports basic
 latency/error statistics for a small mixed request workload. Intended for local

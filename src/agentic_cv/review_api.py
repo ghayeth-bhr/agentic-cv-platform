@@ -109,7 +109,7 @@ class ReviewApiDependencies:
 
 
 def create_app(dependencies: ReviewApiDependencies) -> FastAPI:
-    app = FastAPI(title="Agentic CV dataset review API", version="1")
+    app = FastAPI(title="BotFlow dataset review API", version="1")
     router = APIRouter()
 
     def authorized(x_tenant_id: str, authorization: str | None, x_api_key: str | None, role: str) -> UUID:

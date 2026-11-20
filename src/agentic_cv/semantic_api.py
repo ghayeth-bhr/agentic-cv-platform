@@ -253,7 +253,7 @@ def _sub_asset_response(
 
 
 def create_app(dependencies: SemanticApiDependencies) -> FastAPI:
-    app = FastAPI(title="Agentic CV semantic search API", version="1")
+    app = FastAPI(title="BotFlow semantic search API", version="1")
     install_model_unavailable_handler(app)
 
     @app.post("/v1/search", response_model=SearchResponse)
