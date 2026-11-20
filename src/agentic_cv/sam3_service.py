@@ -46,7 +46,7 @@ def create_app(
     config: Sam3ServiceConfig | None = None,
 ) -> FastAPI:
     service_config = config or Sam3ServiceConfig()
-    app = FastAPI(title="Agentic CV SAM3 service", version="1")
+    app = FastAPI(title="BotFlow SAM3 service", version="1")
     install_model_unavailable_handler(app)
 
     @app.get("/health/live")

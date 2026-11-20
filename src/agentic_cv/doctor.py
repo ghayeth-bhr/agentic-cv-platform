@@ -375,7 +375,7 @@ def run_doctor(
 
 
 def format_report(checks: list[CheckResult]) -> str:
-    lines = ["Agentic CV doctor", "================="]
+    lines = ["BotFlow doctor", "=============="]
     for check in checks:
         lines.append(f"[{check.status}] {check.name}: {check.detail}")
         if check.fix:

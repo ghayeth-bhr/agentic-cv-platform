@@ -12,7 +12,7 @@ def test_local_application_assembles_health_and_core_routes(tmp_path):
         assert client.get("/health/live").json() == {"status": "ok"}
         assert client.get("/health/ready").json() == {"status": "ready"}
         assert info.status_code == 200
-        assert "Agentic CV" in info.text
+        assert "BotFlow" in info.text
         assert api_info.json()["docs"] == "/docs"
 
         response = client.post(
