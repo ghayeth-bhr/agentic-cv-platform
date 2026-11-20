@@ -29,6 +29,8 @@
     },
   };
 
+  // Assets ticked in the gallery = assets the Agent will use (one shared set).
+  const agentSelection = new Set();
   const state = {
     assets: [],
     assetsLoading: false,
@@ -410,6 +412,19 @@
     }
     assets.forEach((asset) => {
       const index = state.assets.indexOf(asset);
+      const id = String(asset.asset_id);
+      const wrap = node("div", "asset-card-wrap");
+      const pick = document.createElement("input");
+      pick.type = "checkbox";
+      pick.className = "asset-pick";
+      pick.checked = agentSelection.has(id);
+      pick.setAttribute("aria-label", `Select ${assetName(asset)}`);
+      pick.addEventListener("change", () => {
+        if (pick.checked) agentSelection.add(id); else agentSelection.delete(id);
+        wrap.classList.toggle("is-picked", pick.checked);
+        renderAssetSelection();
+      });
+      wrap.classList.toggle("is-picked", pick.checked);
       const card = node("button", "asset-card");
       card.type = "button";
       card.dataset.assetIndex = String(index);
@@ -445,8 +460,25 @@
       body.append(name, meta);
       card.append(thumb, body);
       card.addEventListener("click", () => selectAsset(index));
-      grid.appendChild(card);
+      wrap.append(card, pick);
+      grid.appendChild(wrap);
     });
+    renderAssetSelection();
+  }
+
+  function pickedAssets() {
+    const known = new Map(state.assets.map((asset) => [String(asset.asset_id), asset]));
+    return [...agentSelection].filter((id) => known.has(id)).map((id) => known.get(id));
+  }
+
+  function renderAssetSelection() {
+    const picked = pickedAssets();
+    const bar = $("assets-selection-bar");
+    if (bar) bar.hidden = !picked.length;
+    if ($("assets-selection-count")) {
+      $("assets-selection-count").textContent = `${picked.length} selected`;
+    }
+    syncSearchScopeOptions();
   }
 
   function selectAsset(index) {
@@ -572,9 +604,20 @@
         : "Selected asset (none)";
     }
     if (!state.selectedAsset && select.value === "selected") select.value = "all";
-    if (chip) chip.textContent = select.value === "selected" && state.selectedAsset
-      ? assetName(state.selectedAsset)
-      : "All assets";
+    const picked = typeof pickedAssets === "function" ? pickedAssets() : [];
+    const chosenOption = select.querySelector('option[value="chosen"]');
+    if (chosenOption) {
+      chosenOption.disabled = !picked.length;
+      chosenOption.textContent = picked.length ? `Ticked assets (${picked.length})` : "Ticked assets (none)";
+    }
+    if (!picked.length && select.value === "chosen") select.value = "all";
+    if (chip) {
+      chip.textContent = select.value === "selected" && state.selectedAsset
+        ? assetName(state.selectedAsset)
+        : select.value === "chosen"
+          ? `${picked.length} asset${picked.length === 1 ? "" : "s"}`
+          : "All assets";
+    }
   }
 
   // Upload
@@ -749,6 +792,9 @@
     const scope = $("search-scope") ? $("search-scope").value : "all";
     if (scope === "selected" && state.selectedAsset) {
       payload.asset_ids = [state.selectedAsset.asset_id];
+    } else if (scope === "chosen") {
+      const picked = pickedAssets();
+      if (picked.length) payload.asset_ids = picked.map((asset) => asset.asset_id);
     }
     return payload;
   }
@@ -877,6 +923,33 @@
   });
 
   if ($("search-scope")) $("search-scope").addEventListener("change", syncSearchScopeOptions);
+  if ($("assets-selection-clear")) $("assets-selection-clear").addEventListener("click", () => {
+    agentSelection.clear();
+    renderAssets();
+  });
+  if ($("assets-search-selected")) $("assets-search-selected").addEventListener("click", () => {
+    if ($("search-scope")) $("search-scope").value = "chosen";
+    syncSearchScopeOptions();
+    if ($("search-query")) $("search-query").focus();
+  });
+  if ($("assets-use-in-agent")) $("assets-use-in-agent").addEventListener("click", () => {
+    const chosen = pickedAssets().map((asset) => String(asset.asset_id));
+    if (!chosen.length) return;
+    const session = state.agentSession;
+    if (session && AGENT_ACTIVE.has(session.status)) {
+      setStatus("gallery-status", "The Agent is busy with a run; open it to follow or cancel that run first.", "error");
+      showView("agent");
+      return;
+    }
+    // A new task on exactly these assets.
+    resetAgent();
+    agentSelection.clear();
+    chosen.forEach((id) => agentSelection.add(id));
+    showView("agent");
+    renderAgentAssets(null);
+    setStatus("agent-status", `${chosen.length} asset${chosen.length === 1 ? "" : "s"} ready. Describe the dataset you need.`, "ok");
+    if ($("agent-message")) $("agent-message").focus();
+  });
 
   if ($("search-button")) $("search-button").addEventListener("click", async () => {
     const button = $("search-button");
@@ -958,7 +1031,6 @@
   const AGENT_ACTIVE = new Set(["calibrating", "labeling", "exporting"]);
   const AGENT_OPEN = new Set(["gathering", "awaiting_confirmation", "needs_attention", "paused"]);
   const AGENT_DONE = new Set(["complete", "failed", "cancelled"]);
-  const agentSelection = new Set();
   const AGENT_STATUS_LABEL = {
     gathering: "Needs details",
     awaiting_confirmation: "Awaiting confirmation",
@@ -2515,14 +2587,14 @@
     if ($("gallery-next")) $("gallery-next").disabled = gallery.index < 0 || gallery.index >= visible.length - 1;
     if ($("gallery-caption")) {
       $("gallery-caption").textContent = image
-        ? `${cleanMessage(image.file_name)} · ${image.split || "train"}`
+        ? `${cleanMessage(image.source_name || image.file_name)} · ${image.split || "train"}`
         : "No images match these filters.";
     }
     const details = $("gallery-details");
     if (details) {
       details.replaceChildren();
       const rows = image ? [
-        ["File", cleanMessage(image.file_name)],
+        ["File", cleanMessage(image.source_name || image.file_name)],
         ["Review", image.status || "pending"],
         ["Split", image.split || "train"],
         ["Dimensions", `${image.width}×${image.height}`],

@@ -19,7 +19,9 @@ from .annotation_sets import in_set, live_in_set
 from .annotation_store import AnnotationRevisionBackend, RevisionConflictError
 from .api import _authorize, _credential, _tenant
 from .auth import Authorizer
+from .asset_registry import AssetRegistryBackend
 from .dataset_builder import DatasetBuilder
+from .label_images import image_display_names
 from .dataset_store import DatasetVersionBackend, DatasetVersionRecord
 from .review_store import REVIEW_STATUSES, ReviewBackend, ReviewStatus, review_set_key
 
@@ -39,6 +41,7 @@ class ReviewAnnotation(BaseModel):
 class ReviewImage(BaseModel):
     image_id: str
     file_name: str
+    source_name: str | None = None
     width: int
     height: int
     split: str
@@ -102,6 +105,7 @@ class ReviewApiDependencies:
     reviews: ReviewBackend
     builder: DatasetBuilder
     authorizer: Authorizer | None = None
+    registry: AssetRegistryBackend | None = None
 
 
 def create_app(dependencies: ReviewApiDependencies) -> FastAPI:
@@ -156,6 +160,13 @@ def create_app(dependencies: ReviewApiDependencies) -> FastAPI:
             if status == "all" or statuses.get(image.image_id, "pending") == status
         ]
         page = images[offset : offset + limit]
+        names = (
+            image_display_names(
+                dependencies.registry, tenant_id=tenant_id, image_ids=[image.image_id for image in page]
+            )
+            if dependencies.registry is not None
+            else {}
+        )
         category_ids = {category.category_id for category in record.dataset.categories}
         revisions = live_in_set(
             dependencies.annotations.list_latest(
@@ -184,6 +195,7 @@ def create_app(dependencies: ReviewApiDependencies) -> FastAPI:
                 ReviewImage(
                     image_id=image.image_id,
                     file_name=image.file_name,
+                    source_name=names.get(image.image_id),
                     width=image.width,
                     height=image.height,
                     split=record.dataset.split_of(image),

@@ -46,6 +46,7 @@ This repository now contains a working local product path: **Assets** for upload
 | Background calibration (confirm returns at once, resumes after restarts) and a live calibration board: sample tiles per class, verdict chips, threshold slider re-drawing SAM 3 masks in the browser, label with your thresholds | Added in Phase 2b ([`docs/branches/calibration-live.md`](docs/branches/calibration-live.md)) |
 | Review in the dataset gallery: approve/reject (A/R, selected, all pending), status filter, delete or reclassify masks, click-to-segment with SAM 3's point tracker (~0.03-0.15 s per click), build an approved-only dataset | Added in Phase 4 ([`docs/branches/review-approval.md`](docs/branches/review-approval.md)) |
 | Monitoring agent: labeling health (speed, ETA, empty rate, per-class counts/scores), rules that pause the run and ask in chat (continue resumes without relabeling); multi-class labeling shares one SAM 3 vision pass per image (1.76x faster) | Added in Phase 3 ([`docs/branches/label-monitor.md`](docs/branches/label-monitor.md)) |
+| Tick several assets in the gallery to search across them or use them in the Agent; vector search from an in-memory matrix (~160 ms -> ~2 ms at 20k vectors); cached thumbnails; original file names in the dataset gallery | Added in Phase 5 ([`docs/branches/assets-scale.md`](docs/branches/assets-scale.md)) |
 
 The original root README was a 950-line concatenation of 23 branch READMEs. Those are preserved verbatim in [`docs/branches/`](docs/branches/README.md).
 

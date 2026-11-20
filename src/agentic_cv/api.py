@@ -35,7 +35,7 @@ from .dataset_export_workflow import DatasetExportWorkflow
 from .dataset_store import DatasetVersionBackend, DatasetVersionRecord
 from .errors import ModelUnavailableError, install_model_unavailable_handler
 from .job_store import JobRecord, JobStoreBackend
-from .label_images import LabelImageResolver
+from .label_images import LabelImageResolver, image_display_names
 from .label_workflow import DurableLabelWorkflow, label_plan
 from .orchestrator import TaskOrchestrationRequest, TaskOrchestrator
 from .outbox import Outbox
@@ -179,6 +179,9 @@ class ApiDependencies:
     jobs: JobStoreBackend | None = None
     label_images: LabelImageResolver | None = None
     annotations: AnnotationRevisionBackend | None = None
+    # Directory for generated thumbnails (sources are immutable, so a
+    # thumbnail is keyed by source id). None regenerates on every request.
+    thumbnail_cache: Path | None = None
 
 
 def _authorize(
@@ -276,6 +279,7 @@ class DatasetAnnotationResponse(BaseModel):
 class DatasetImageResponse(BaseModel):
     image_id: str
     file_name: str
+    source_name: str | None = None
     width: int
     height: int
     annotations: list[DatasetAnnotationResponse]
@@ -581,6 +585,28 @@ def _thumbnail_bytes(source) -> bytes | None:
     return None
 
 
+def _cached_thumbnail(cache_dir: Path | None, source) -> bytes | None:
+    """Thumbnail bytes, generated once per source (videos are decoded once)."""
+
+    if cache_dir is None:
+        return _thumbnail_bytes(source)
+    path = cache_dir / f"{source.source_id}.jpg"
+    try:
+        return path.read_bytes()
+    except OSError:
+        pass
+    data = _thumbnail_bytes(source)
+    if data is not None:
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_bytes(data)
+            tmp.replace(path)
+        except OSError:
+            pass
+    return data
+
+
 def _load_source_image(source) -> Image.Image | None:
     path = _path_from_file_uri(source.object_uri)
     if path is None or not path.exists():
@@ -739,10 +765,14 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
         representative = _representative_source(summary.sources)
         if representative is None:
             raise HTTPException(status_code=404, detail="asset has no source")
-        data = _thumbnail_bytes(representative)
+        data = _cached_thumbnail(dependencies.thumbnail_cache, representative)
         if data is None:
             raise HTTPException(status_code=404, detail="thumbnail unavailable")
-        return Response(content=data, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=300"})
+        return Response(
+            content=data,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "private, max-age=86400", "ETag": f'"{representative.source_id}"'},
+        )
 
     @app.post("/v1/assets/{asset_id}/uploads", response_model=UploadResponse, status_code=201)
     def start_upload(
@@ -1359,6 +1389,9 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
             splits = {
                 image.image_id: record.dataset.split_of(image) for image in page
             }
+            names = image_display_names(
+                dependencies.registry, tenant_id=tenant_id, image_ids=[image.image_id for image in page]
+            )
 
             def image_size(image: object) -> int:
                 if dependencies.datasets is None or dependencies.datasets.images_root is None:
@@ -1381,6 +1414,7 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                         width=image.width,
                         height=image.height,
                         split=splits[image.image_id],
+                        source_name=names.get(image.image_id),
                         file_size=image_size(image),
                         annotations=[
                             DatasetAnnotationResponse(
