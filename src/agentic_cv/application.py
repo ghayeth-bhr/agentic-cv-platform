@@ -478,6 +478,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
         create_core_app(ApiDependencies(
             registry=registry, uploads=uploads, outbox=outbox,
             authorizer=authorizer,
+            thumbnail_cache=config.data_dir / "derived" / "thumbnails",
             exports=ExportApiDependencies(workflow=export_workflow),
             labels=LabelApiDependencies(workflow=label_workflow),
             datasets=DatasetApiDependencies(
@@ -522,6 +523,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
                 reviews=reviews,
                 builder=dataset_builder,
                 authorizer=authorizer,
+                registry=registry,
             )
         ).router
     )

@@ -110,3 +110,32 @@ class LabelImageResolver:
                     seen.add(image.image_id)
                     images.append(image)
         return images
+
+
+def image_display_names(
+    registry: AssetRegistryBackend, *, tenant_id: UUID, image_ids: list[str] | tuple[str, ...]
+) -> dict[str, str]:
+    """Readable names for label image ids: the uploaded file name, plus the frame.
+
+    Ids are ``<asset>:<source>:image`` or ``<asset>:<source>:frame:<n>``.
+    Unknown ids are left out (callers fall back to the stored file name).
+    """
+
+    sources: dict[str, str] = {}
+    try:
+        for asset in registry.list_assets(tenant_id=tenant_id):
+            for source in asset.sources:
+                sources[str(source.source_id)] = source.filename
+    except Exception:
+        return {}
+    names: dict[str, str] = {}
+    for image_id in image_ids:
+        parts = image_id.split(":")
+        if len(parts) < 3 or parts[1] not in sources:
+            continue
+        filename = sources[parts[1]]
+        if parts[2] == "frame" and len(parts) >= 4:
+            names[image_id] = f"{filename} · frame {parts[3]}"
+        else:
+            names[image_id] = filename
+    return names

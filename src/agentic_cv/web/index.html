@@ -107,6 +107,12 @@
                 <span>Filter assets</span>
                 <input id="asset-filter" type="search" placeholder="Filter by asset name" autocomplete="off">
               </label>
+              <div id="assets-selection-bar" class="assets-selection-bar" hidden>
+                <strong id="assets-selection-count">0 selected</strong>
+                <button id="assets-use-in-agent" type="button" class="btn btn-primary btn-small">Use in Agent</button>
+                <button id="assets-search-selected" type="button" class="btn btn-ghost btn-small">Search these</button>
+                <button id="assets-selection-clear" type="button" class="btn btn-ghost btn-small">Clear</button>
+              </div>
             </div>
 
             <div id="gallery-status" class="status" role="status" aria-live="polite"></div>
@@ -130,6 +136,7 @@
                   <select id="search-scope">
                     <option value="all">All assets</option>
                     <option value="selected">Selected asset</option>
+                    <option value="chosen">Ticked assets</option>
                   </select>
                 </label>
                 <label class="field field-tiny">
