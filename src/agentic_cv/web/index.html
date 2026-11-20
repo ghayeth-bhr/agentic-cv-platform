@@ -4,6 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Agentic CV Platform</title>
+  <script>
+    // Apply a saved theme before first paint (no light flash in dark mode).
+    try {
+      var savedTheme = localStorage.getItem("agentic-cv-theme");
+      if (savedTheme === "dark" || savedTheme === "light") document.documentElement.dataset.theme = savedTheme;
+    } catch (e) { /* storage unavailable: follow the system setting */ }
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -63,6 +70,10 @@
         </nav>
       </div>
       <div class="sidebar-bottom">
+        <button type="button" class="theme-switch" id="theme-toggle" role="switch" aria-checked="false">
+          <span class="theme-switch-label">Dark theme</span>
+          <span class="theme-switch-track" aria-hidden="true"><span class="theme-switch-thumb"></span></span>
+        </button>
         <div class="runtime" id="runtime-chip" aria-live="polite">
           <span class="runtime-dot" aria-hidden="true"></span>
           <span id="runtime-status">Checking runtime</span>

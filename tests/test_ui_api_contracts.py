@@ -172,6 +172,7 @@ def test_ui_selector_and_navigation_contract():
         "agent-live-progress-bar", "agent-live-count", "agent-open-gallery",
         "agent-assets", "agent-quick-replies", "agent-message", "agent-plan",
         "agent-board", "agent-board-classes", "agent-board-apply", "agent-board-actions",
+        "theme-toggle",
     ):
         assert f'id="{element_id}"' in html, f"missing DOM id: {element_id}"
     assert "tenant-id" not in html

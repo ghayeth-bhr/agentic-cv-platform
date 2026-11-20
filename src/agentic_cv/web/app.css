@@ -47,8 +47,10 @@
   --radius-sm: var(--radius-control);
   --shadow: 0 12px 32px rgba(26, 34, 48, 0.12);
 }
+/* Dark theme: from the system setting unless the user chose light, or
+   from the sidebar switch (data-theme on <html>, remembered per browser). */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     color-scheme: dark;
     --canvas: #12161D;
     --surface: #1A1F28;
@@ -75,6 +77,33 @@
     --accent-faint: #1D2438;
     --shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
   }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --canvas: #12161D;
+  --surface: #1A1F28;
+  --surface-2: #20262F;
+  --ink: #E7EBF2;
+  --ink-muted: #A3ACBA;
+  --ink-faint: #737D8C;
+  --line: #2C333F;
+  --line-strong: #3A4352;
+  --action: #6F8CFF;
+  --action-hover: #8AA1FF;
+  --action-soft: #232D4D;
+  --action-ink: #0B1020;
+  --mask-soft: #3A3115;
+  --mask-ink: #FFD978;
+  --stage: #0C0F14;
+  --success: #48C083;
+  --success-soft: #16301F;
+  --danger: #F06A64;
+  --danger-soft: #3A1C1B;
+  --warn: #E5B14A;
+  --bg-hover: #252C36;
+  --line-soft: #262C36;
+  --accent-faint: #1D2438;
+  --shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -1114,4 +1143,27 @@ textarea { font: inherit; font-size: 0.94rem; }
   .nav-steps li { flex: 1 1 0; }
   .nav-item { justify-content: center; padding: 0.5rem; }
   .nav-steps .nav-label { font-size: 0.9rem; }
+}
+
+/* Dark theme switch */
+.theme-switch {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; width: 100%;
+  padding: 0.45rem 0.5rem; border: 0; border-radius: var(--radius-control); background: transparent;
+  color: var(--ink); font: inherit; font-size: 0.88rem; font-weight: 600; cursor: pointer;
+}
+.theme-switch:hover { background: var(--surface-2); }
+.theme-switch-track {
+  position: relative; flex: none; width: 2.5rem; height: 1.4rem; border-radius: var(--radius-pill);
+  background: var(--line-strong); transition: background-color 0.15s ease;
+}
+.theme-switch-thumb {
+  position: absolute; top: 0.2rem; left: 0.2rem; width: 1rem; height: 1rem; border-radius: 50%;
+  background: #FFFFFF; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25); transition: transform 0.15s ease;
+}
+.theme-switch[aria-checked="true"] .theme-switch-track { background: var(--action); }
+.theme-switch[aria-checked="true"] .theme-switch-thumb { transform: translateX(1.1rem); }
+@media (max-width: 900px) {
+  .sidebar-bottom { display: flex; padding: 0.4rem 1rem 0.6rem; border-top: 0; }
+  .sidebar-bottom .runtime, .sidebar-bottom .side-link { display: none; }
+  .theme-switch { width: auto; margin-left: auto; }
 }
