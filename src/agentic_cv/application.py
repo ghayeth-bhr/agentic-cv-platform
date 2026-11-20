@@ -27,6 +27,7 @@ from .agent import (
 from .agent_api import AgentApiDependencies, create_app as create_agent_app
 from .review_api import ReviewApiDependencies, create_app as create_review_app
 from .review_store import ReviewStore
+from .sam3_points import Sam3PointProvider, Sam3PointRefinementProvider
 from .prompt_enhancement import PromptEnhancer
 from .agent_store import AgentSessionBackend, AgentSessionStore
 from .agent_worker import AgentWorker
@@ -305,9 +306,23 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
         images_root=config.data_dir / "dataset-images",
     )
     dataset_images_root = config.data_dir / "dataset-images"
-    refinement_provider = config.refinement_provider or Sam3ClickRefinementProvider(
-        sam3_provider
-    )
+    ranked_refinement = Sam3ClickRefinementProvider(sam3_provider)
+    if config.refinement_provider is not None:
+        refinement_provider = config.refinement_provider
+    elif config.sam3_provider is None and os.getenv("AGENTIC_CV_REFINEMENT", "").strip().lower() != "ranked":
+        # Real models: segment from the clicks with SAM 3's tracker; fall
+        # back to ranking text-prompt masks if the tracker cannot load.
+        refinement_provider = Sam3PointRefinementProvider(
+            Sam3PointProvider(
+                model_settings.sam3_config(),
+                resources=model_resources,
+                resource_name="sam3-tracker",
+                estimated_vram_mb=_env_int("AGENTIC_CV_SAM3_TRACKER_VRAM_MB", 1100, minimum=1),
+            ),
+            fallback=ranked_refinement,
+        )
+    else:
+        refinement_provider = ranked_refinement
     refinement_service = ClickRefinementService(refinement_provider)
 
     def load_refinement_target(
