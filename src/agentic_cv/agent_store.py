@@ -16,6 +16,7 @@ AgentSessionStatus = Literal[
     "awaiting_confirmation",
     "calibrating",
     "needs_attention",
+    "paused",
     "labeling",
     "exporting",
     "complete",

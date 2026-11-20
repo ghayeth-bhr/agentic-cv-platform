@@ -53,6 +53,7 @@ from .agent_dialogue import (
 from .batch_labeling import LabelClass, mask_polygons
 from .calibration_samples import select_samples_for_target
 from .dataset import DatasetCategory
+from .label_monitor import LabelHealthStore
 from .prompt_enhancement import OllamaPromptEnhancer, PromptEnhancer
 from .calibration_validation import ValidatorSelection, any_prediction_selection
 from .contracts import TaskSpec
@@ -419,6 +420,8 @@ class AgentServiceDependencies:
     # Unloads a managed model by name ("siglip2", "sam3") so calibration can
     # keep at most one large model on the GPU at a time.
     release_models: Callable[[str], Any] | None = None
+    # Labeling health written by the label workflow's monitor.
+    health: LabelHealthStore | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -428,6 +431,7 @@ class AgentSessionView:
     export_status: str | None
     dataset: dict[str, Any] | None
     download_path: str | None
+    health: dict[str, Any] | None = None
 
     @property
     def draft(self) -> TaskDraft:
@@ -440,7 +444,9 @@ class AgentSessionView:
 
 
 _MAX_PROMPTS_TRIED = 3
-_OPEN_FOR_MESSAGES = ("gathering", "awaiting_confirmation", "needs_attention")
+_OPEN_FOR_MESSAGES = ("gathering", "awaiting_confirmation", "needs_attention", "paused")
+_RESUME_WORDS = re.compile(r"\b(continue|resume|keep going|go on|go ahead|carry on|proceed|yes|ok(?:ay)?)\b", re.I)
+_STOP_WORDS = re.compile(r"\b(stop|cancel|abort|halt|no)\b", re.I)
 _NIL_ASSET = UUID(int=0)
 
 
@@ -483,6 +489,7 @@ class AgentService:
         # session missing from here (e.g. after a restart) is resumed by
         # ``advance``.
         self._inflight: set[UUID] = set()
+        self._shutting_down = False
         self._calibration_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="agent-calibration-run"
         )
@@ -555,6 +562,8 @@ class AgentService:
             raise AgentConflict(
                 f"session is {record.status}; start a new task to change the plan"
             )
+        if record.status == "paused":
+            return self._answer_pause(tenant_id, record, message.strip())
         if asset_ids is not None:
             selected = _dedupe_assets(tuple(asset_ids))
             names = self._asset_names(tenant_id=tenant_id, asset_ids=selected)
@@ -1121,6 +1130,10 @@ class AgentService:
                 raise
             return self.view(saved)
         except CalibrationCancelled as exc:
+            if self._shutting_down:
+                # Server stopping: leave the session "calibrating" so the next
+                # start resumes it, and touch nothing else.
+                return self.view(record)
             if selection is not None:
                 record, _ = self._release_validator(selection, record)
             current = self.dependencies.store.get(
@@ -1157,7 +1170,7 @@ class AgentService:
         record = self.dependencies.store.get(tenant_id=tenant_id, session_id=session_id)
         if record.status in ("complete", "failed", "cancelled"):
             raise AgentConflict(f"session is already {record.status}")
-        if record.status == "labeling" and record.label_job_id is not None:
+        if record.status in ("labeling", "paused") and record.label_job_id is not None:
             try:
                 self.dependencies.jobs.request_cancel(record.label_job_id)
             except ValueError as exc:
@@ -1184,6 +1197,53 @@ class AgentService:
     def open_sessions(self) -> list[AgentSessionRecord]:
         return self.dependencies.store.list_open()
 
+    def _answer_pause(
+        self, tenant_id: UUID, record: AgentSessionRecord, message: str
+    ) -> AgentSessionView:
+        """The monitor paused labeling and asked; act on the user's answer."""
+
+        record = self._append(record, "user", message)
+        if _STOP_WORDS.search(message) and not _RESUME_WORDS.search(message):
+            self.dependencies.store.save(record)
+            return self.cancel(tenant_id=tenant_id, session_id=record.session_id)
+        if not _RESUME_WORDS.search(message):
+            record = self._append(
+                record,
+                "assistant",
+                "Labeling is paused. Reply “Continue labeling” to go on with the same settings, "
+                "or “Stop” to cancel this run (nothing is packaged).",
+            )
+            return self.view(self.dependencies.store.save(record))
+        return self.resume_labeling(tenant_id=tenant_id, session_id=record.session_id, record=record)
+
+    def resume_labeling(
+        self,
+        *,
+        tenant_id: UUID,
+        session_id: UUID,
+        record: AgentSessionRecord | None = None,
+    ) -> AgentSessionView:
+        record = record or self.dependencies.store.get(tenant_id=tenant_id, session_id=session_id)
+        if record.status != "paused" or record.label_job_id is None:
+            raise AgentConflict(f"session is {record.status}; nothing to resume")
+        health = self.dependencies.health
+        alert = ((health.read(record.label_job_id) or {}).get("alert") if health else None) or {}
+        if health is not None and alert.get("code"):
+            health.acknowledge(record.label_job_id, alert["code"])
+        self.dependencies.jobs.transition(record.label_job_id, "queued")
+        record = replace(
+            record,
+            status="labeling",
+            error=None,
+            spec={**(record.spec or {}), "quick_replies": []},
+        )
+        record = self._append(
+            record,
+            "assistant",
+            "Continuing the labeling run where it stopped. I won't pause again for that issue.",
+        )
+        return self.view(self.dependencies.store.save(record))
+
     def resume_calibration(self, record: AgentSessionRecord) -> bool:
         """Restart a calibration that no thread in this process owns."""
 
@@ -1200,10 +1260,25 @@ class AgentService:
         )
         return True
 
-    def shutdown(self) -> None:
-        for event in list(self._calibration_cancels.values()):
+    def shutdown(self, *, timeout: float = 15.0) -> None:
+        """Stop calibration before the stores close.
+
+        A running calibration is cancelled (it stops at the next step) and
+        given ``timeout`` seconds to finish; its session stays ``calibrating``
+        and is resumed on the next start. Queued runs are dropped the same way.
+        """
+
+        self._shutting_down = True
+        with self._calibration_lock:
+            events = list(self._calibration_cancels.values())
+        for event in events:
             event.set()
         self._calibration_executor.shutdown(wait=False, cancel_futures=True)
+        worker = threading.Thread(
+            target=self._calibration_executor.shutdown, kwargs={"wait": True}, daemon=True
+        )
+        worker.start()
+        worker.join(timeout)
 
     def advance(self, session_id: UUID) -> AgentSessionView:
         record = self.dependencies.store.get_any(session_id)
@@ -1212,6 +1287,22 @@ class AgentService:
             return self.view(record)
         if record.status == "labeling" and record.label_job_id is not None:
             job = self.dependencies.jobs.get(record.label_job_id)
+            if job.status == "paused":
+                health = self.dependencies.health
+                alert = ((health.read(job.job_id) or {}).get("alert") if health else None) or {}
+                detail = alert.get("message") or job.error or "Something looks wrong with this run."
+                record = replace(
+                    record,
+                    status="paused",
+                    spec={**(record.spec or {}), "quick_replies": ["Continue labeling", "Stop"]},
+                )
+                record = self._append(
+                    record,
+                    "assistant",
+                    f"I paused labeling to check with you. {detail} "
+                    "Should I continue with the same settings, or stop so you can adjust the task?",
+                )
+                return self.view(self.dependencies.store.save(record))
             if job.status == "failed":
                 record = replace(record, status="failed", error=job.error or "labeling failed")
                 record = self._append(
@@ -1330,6 +1421,9 @@ class AgentService:
                 }
             except KeyError:
                 dataset = None
+        health = None
+        if record.label_job_id is not None and self.dependencies.health is not None:
+            health = self.dependencies.health.read(record.label_job_id)
         download_path = (
             f"/v1/dataset-exports/{record.export_job_id}/download"
             if record.export_job_id is not None and export_status == "succeeded"
@@ -1341,6 +1435,7 @@ class AgentService:
             export_status=export_status,
             dataset=dataset,
             download_path=download_path,
+            health=health,
         )
 
     def _asset_names(self, *, tenant_id: UUID, asset_ids: tuple[UUID, ...]) -> list[str]:

@@ -956,7 +956,7 @@
   // Agent
   const AGENT_SESSION_KEY = "agentic-cv-agent-session";
   const AGENT_ACTIVE = new Set(["calibrating", "labeling", "exporting"]);
-  const AGENT_OPEN = new Set(["gathering", "awaiting_confirmation", "needs_attention"]);
+  const AGENT_OPEN = new Set(["gathering", "awaiting_confirmation", "needs_attention", "paused"]);
   const AGENT_DONE = new Set(["complete", "failed", "cancelled"]);
   const agentSelection = new Set();
   const AGENT_STATUS_LABEL = {
@@ -964,6 +964,7 @@
     awaiting_confirmation: "Awaiting confirmation",
     calibrating: "Calibrating",
     needs_attention: "Needs attention",
+    paused: "Paused — your call",
     labeling: "Labeling",
     exporting: "Packaging dataset",
     complete: "Dataset ready",
@@ -977,7 +978,7 @@
 
   function agentPillStatus(status) {
     if (status === "complete") return "succeeded";
-    if (status === "failed" || status === "cancelled" || status === "needs_attention") return "failed";
+    if (status === "failed" || status === "cancelled" || status === "needs_attention" || status === "paused") return "failed";
     if (AGENT_ACTIVE.has(status)) return "running";
     return status;
   }
@@ -1588,6 +1589,7 @@
     renderAgentProgress(session);
     renderAgentCalibration(session);
     syncAgentBoard(session);
+    renderAgentHealth(session);
     syncAgentLiveView(session);
 
     const classNames = (session.classes || []).map((item) => item.name).join(", ");
@@ -1632,6 +1634,7 @@
     if (session.error) setStatus("agent-status", cleanMessage(session.error), "error");
     else if (session.status === "complete") setStatus("agent-status", `Dataset ready. Download the ${agentFormatLabel(session)} archive from the run panel.`, "ok");
     else if (session.status === "gathering") setStatus("agent-status", "Answer the agent's question to continue.", "ok");
+    else if (session.status === "paused") setStatus("agent-status", "Labeling is paused. Answer the agent to continue or stop.", "error");
     else if (AGENT_ACTIVE.has(session.status)) setStatus("agent-status", `${label}…`, "busy");
     else if (session.status === "needs_attention") setStatus("agent-status", "Calibration needs attention. Retry at 0.50 or start a new task.", "error");
     else if (session.status === "awaiting_confirmation") setStatus("agent-status", "Task planned. Confirm the specification to start.", "ok");
@@ -1778,6 +1781,7 @@
       }
       if (input) input.value = "";
       applyAgentSession(fresh);
+      if (AGENT_ACTIVE.has(fresh.status)) startAgentPolling();
     } catch (err) {
       setStatus("agent-status", cleanMessage(err.message || err), "error");
     } finally {
@@ -2055,6 +2059,69 @@
     });
     confirmAgentTask(null, values);
   });
+
+  function formatDuration(seconds) {
+    if (seconds == null || !Number.isFinite(Number(seconds))) return "—";
+    const total = Math.round(Number(seconds));
+    if (total < 60) return `${total} s`;
+    const minutes = Math.floor(total / 60);
+    return `${minutes} min ${String(total % 60).padStart(2, "0")} s`;
+  }
+
+  function renderAgentHealth(session) {
+    const section = $("agent-health");
+    if (!section) return;
+    const health = session && session.health;
+    if (!health || !health.total) {
+      section.hidden = true;
+      return;
+    }
+    section.hidden = false;
+    const done = health.status === "done";
+    const stateText = { running: "Watching", paused: "Paused", resuming: "Resuming", done: "Finished" }[health.status] || health.status;
+    if ($("agent-health-state")) {
+      $("agent-health-state").textContent = stateText;
+      $("agent-health-state").dataset.state = health.status;
+    }
+    const alert = $("agent-health-alert");
+    if (alert) {
+      alert.hidden = !health.alert;
+      alert.textContent = health.alert ? cleanMessage(health.alert.message) : "";
+    }
+    const bar = $("agent-health-bar");
+    if (bar) bar.style.width = `${Math.min(100, (100 * health.processed) / health.total).toFixed(1)}%`;
+    const metrics = $("agent-health-metrics");
+    if (metrics) {
+      metrics.innerHTML = "";
+      [
+        ["Images", `${health.processed} / ${health.total}`],
+        ["Speed", health.images_per_sec ? `${Number(health.images_per_sec).toFixed(2)} img/s` : "—"],
+        ["Time left", done ? "—" : formatDuration(health.eta_sec)],
+        ["No detections", `${health.empty_images} (${Math.round((health.empty_rate || 0) * 100)}%)`],
+      ].forEach(([term, value]) => {
+        metrics.append(node("dt", null, term), node("dd", null, value));
+      });
+    }
+    const classes = $("agent-health-classes");
+    if (classes) {
+      classes.innerHTML = "";
+      (health.classes || []).forEach((item, index) => {
+        const row = node("div", "agent-health-class");
+        const swatch = node("span", "agent-board-swatch");
+        swatch.style.background = `rgb(${BOARD_COLORS[index % BOARD_COLORS.length].join(",")})`;
+        const score = item.mean_score == null ? "—" : Number(item.mean_score).toFixed(2);
+        row.append(
+          swatch,
+          node("strong", null, item.name),
+          node("span", null, `${item.detections} found in ${item.images_with} image${item.images_with === 1 ? "" : "s"}`),
+          node("span", "agent-health-score", `mean score ${score}`),
+        );
+        classes.appendChild(row);
+      });
+    }
+    const acknowledged = (health.acknowledged || []).length;
+    section.dataset.acknowledged = String(acknowledged);
+  }
 
   async function confirmAgentTask(threshold, classThresholds) {
     const session = state.agentSession;

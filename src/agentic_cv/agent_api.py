@@ -102,6 +102,7 @@ class AgentSessionResponse(BaseModel):
     export_job_id: UUID | None
     export_status: str | None
     download_path: str | None
+    health: dict | None = None
     error: str | None
     messages: list[AgentMessageResponse]
     created_at: str
@@ -173,6 +174,7 @@ def _session_response(view: AgentSessionView) -> AgentSessionResponse:
         export_job_id=record.export_job_id,
         export_status=view.export_status,
         download_path=view.download_path,
+        health=view.health,
         error=record.error,
         messages=[
             AgentMessageResponse(

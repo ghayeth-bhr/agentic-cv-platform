@@ -115,7 +115,8 @@ with TestClient(app) as client:
     assert s["status"] == "awaiting_confirmation", s["messages"][-1]
 
     t = time.perf_counter()
-    confirmed = client.post(f"/v1/agent/sessions/{sid}/confirm", headers=TENANT)
+    # wait=True: run calibration inline (the default returns at once since Phase 2b).
+    confirmed = client.post(f"/v1/agent/sessions/{sid}/confirm", headers=TENANT, json={"wait": True})
     body = confirmed.json()
     calibration = body.get("calibration") or {}
     log("confirm+calibration", t, http=confirmed.status_code, status=body.get("status"),

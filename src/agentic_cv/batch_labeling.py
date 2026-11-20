@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
@@ -95,6 +96,11 @@ class LabelClass:
     category: DatasetCategory
 
 
+def _load_rgb(path: Path) -> Image.Image:
+    with Image.open(path) as source:
+        return source.convert("RGB")
+
+
 class Sam3BatchLabeler:
     def __init__(self, provider: Sam3Provider) -> None:
         self.provider = provider
@@ -112,6 +118,7 @@ class Sam3BatchLabeler:
         on_image: ImageCallback | None = None,
         annotation_namespace: str | None = None,
         keep_raw: bool = True,
+        skip_image_ids: set[str] | None = None,
     ) -> BatchLabelResult:
         """Label every image for every class.
 
@@ -143,10 +150,20 @@ class Sam3BatchLabeler:
         dataset_images: list[DatasetImage] = []
         annotations: list[Annotation] = []
         raw_predictions: list[RawPrediction] = []
-        for image in images:
-            image_annotations: list[Annotation] = []
-            with Image.open(image.path) as source:
-                source = source.convert("RGB")
+        todo = [image for image in images if not skip_image_ids or image.image_id not in skip_image_ids]
+        already = len(images) - len(todo)
+        predict_many = getattr(self.provider, "predict_many", None)
+        # Decode the next image on a CPU thread while the GPU works on this one.
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="label-prefetch") as prefetch:
+            upcoming = prefetch.submit(_load_rgb, todo[0].path) if todo else None
+            for position, image in enumerate(todo):
+                source = upcoming.result()
+                upcoming = (
+                    prefetch.submit(_load_rgb, todo[position + 1].path)
+                    if position + 1 < len(todo)
+                    else None
+                )
+                image_annotations: list[Annotation] = []
                 width, height = source.width, source.height
                 dataset_images.append(
                     DatasetImage(
@@ -156,47 +173,51 @@ class Sam3BatchLabeler:
                         height=height,
                     )
                 )
-                per_class = [
-                    (item, self.provider.predict(source, item.prompt, threshold=item.threshold))
-                    for item in classes
-                ]
-            for item, predictions in per_class:
-                for index, prediction in enumerate(predictions):
-                    if keep_raw:
-                        raw_predictions.append(
-                            RawPrediction(
-                                image_id=image.image_id, score=prediction.score,
-                                box=prediction.box, mask=prediction.mask,
+                if callable(predict_many) and len(classes) > 1:
+                    outputs = predict_many(source, [(item.prompt, item.threshold) for item in classes])
+                    per_class = list(zip(classes, outputs))
+                else:
+                    per_class = [
+                        (item, self.provider.predict(source, item.prompt, threshold=item.threshold))
+                        for item in classes
+                    ]
+                for item, predictions in per_class:
+                    for index, prediction in enumerate(predictions):
+                        if keep_raw:
+                            raw_predictions.append(
+                                RawPrediction(
+                                    image_id=image.image_id, score=prediction.score,
+                                    box=prediction.box, mask=prediction.mask,
+                                )
                             )
+                        clipped = clip_box(prediction.box, width=width, height=height)
+                        if clipped is None:
+                            continue
+                        x1, y1, x2, y2 = clipped
+                        segmentation = mask_polygons(prediction.mask) if task == "segmentation" else ()
+                        local_id = (
+                            f"{image.image_id}:{item.category.category_id}:{index}"
+                            if multi
+                            else f"{image.image_id}:{index}"
                         )
-                    clipped = clip_box(prediction.box, width=width, height=height)
-                    if clipped is None:
-                        continue
-                    x1, y1, x2, y2 = clipped
-                    segmentation = mask_polygons(prediction.mask) if task == "segmentation" else ()
-                    local_id = (
-                        f"{image.image_id}:{item.category.category_id}:{index}"
-                        if multi
-                        else f"{image.image_id}:{index}"
-                    )
-                    annotation = Annotation(
-                        annotation_id=(
-                            f"{annotation_namespace}/{local_id}"
-                            if annotation_namespace
-                            else local_id
-                        ),
-                        image_id=image.image_id,
-                        category_id=item.category.category_id,
-                        bbox=(x1, y1, x2 - x1, y2 - y1),
-                        segmentation=segmentation,
-                        score=prediction.score,
-                    )
-                    annotations.append(annotation)
-                    image_annotations.append(annotation)
-            if on_image is not None:
-                on_image(image.image_id, dataset_images[-1], tuple(image_annotations))
-            if on_progress is not None:
-                on_progress(image.image_id, len(dataset_images), len(images))
+                        annotation = Annotation(
+                            annotation_id=(
+                                f"{annotation_namespace}/{local_id}"
+                                if annotation_namespace
+                                else local_id
+                            ),
+                            image_id=image.image_id,
+                            category_id=item.category.category_id,
+                            bbox=(x1, y1, x2 - x1, y2 - y1),
+                            segmentation=segmentation,
+                            score=prediction.score,
+                        )
+                        annotations.append(annotation)
+                        image_annotations.append(annotation)
+                if on_image is not None:
+                    on_image(image.image_id, dataset_images[-1], tuple(image_annotations))
+                if on_progress is not None:
+                    on_progress(image.image_id, already + len(dataset_images), len(images))
 
         dataset = DatasetVersion(
             images=tuple(dataset_images),
