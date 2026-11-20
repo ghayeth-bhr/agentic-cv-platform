@@ -204,7 +204,7 @@ def _raise_http(exc: Exception) -> None:
 
 
 def create_app(dependencies: AgentApiDependencies) -> FastAPI:
-    app = FastAPI(title="Agentic CV agent API", version="1")
+    app = FastAPI(title="BotFlow agent API", version="1")
     router = APIRouter()
 
     @router.post("/v1/agent/sessions", response_model=AgentSessionResponse)

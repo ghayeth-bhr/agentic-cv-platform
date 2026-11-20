@@ -1,10 +1,12 @@
-# Agentic CV Platform
+# BotFlow
 
 Turn raw photos and video into a labeled, ready-to-train computer-vision dataset by describing what you need in a chat.
 
 You upload media, pick the frames that matter with semantic search, and tell the agent something like *"Segment the elephants and their tusks, export YOLO"*. It asks for anything missing, tunes **SAM 3** on a few sample images with a vision-language model as the judge, labels every image while it watches the run's health, and hands you a gallery to review, fix with point-and-click segmentation, approve, and export as **COCO** or **YOLO**.
 
 Everything runs locally on one machine with an NVIDIA GPU: models, data, and the web app. Object detection and instance segmentation are in scope; classification is not.
+
+The command-line tool and Python package keep their technical names, `agentic-cv` and `agentic_cv`, so existing installs and scripts keep working.
 
 | | |
 |---|---|

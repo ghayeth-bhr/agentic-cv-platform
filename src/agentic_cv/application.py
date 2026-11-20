@@ -1,4 +1,4 @@
-"""Local MVP composition root for the Agentic CV platform."""
+"""Local MVP composition root for BotFlow."""
 
 from __future__ import annotations
 
@@ -438,7 +438,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
                     )
             resources.close()
 
-    app = FastAPI(title="Agentic CV Platform", version="1", lifespan=lifespan)
+    app = FastAPI(title="BotFlow", version="1", lifespan=lifespan)
     install_model_unavailable_handler(app)
     http_logger = logging.getLogger("agentic_cv.http")
 
@@ -532,7 +532,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
     @app.get("/api-info")
     def application_info() -> dict[str, object]:
         return {
-            "name": "Agentic CV Platform",
+            "name": "BotFlow",
             "status": "ok",
             "docs": "/docs",
             "health": {"live": "/health/live", "ready": "/health/ready", "alias": "/health"},

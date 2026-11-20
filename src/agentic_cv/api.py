@@ -685,7 +685,7 @@ def _prediction_response(
 
 
 def create_app(dependencies: ApiDependencies) -> FastAPI:
-    app = FastAPI(title="Agentic CV platform API", version="1")
+    app = FastAPI(title="BotFlow API", version="1")
     install_model_unavailable_handler(app)
 
     @app.post("/v1/assets", response_model=AssetResponse, status_code=201)
