@@ -8,6 +8,7 @@ import queue
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -477,6 +478,13 @@ class AgentService:
         self._calibration_lock = threading.Lock()
         self._calibration_cancels: dict[UUID, threading.Event] = {}
         self._enhancer_down_until = 0.0
+        # Sessions whose calibration runs in this process. A ``calibrating``
+        # session missing from here (e.g. after a restart) is resumed by
+        # ``advance``.
+        self._inflight: set[UUID] = set()
+        self._calibration_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="agent-calibration-run"
+        )
         if dependencies.calibration_timeout_sec <= 0:
             raise ValueError("calibration_timeout_sec must be greater than 0")
         if not dependencies.thresholds:
@@ -724,7 +732,18 @@ class AgentService:
         threshold: float | None = None,
         thresholds: tuple[float, ...] | None = None,
         minimum_agreement: float | None = None,
+        class_thresholds: dict[str, float] | None = None,
+        wait: bool = False,
     ) -> AgentSessionView:
+        """Start calibration and whole-asset labeling.
+
+        By default this returns at once with status ``calibrating``; the run
+        continues on the service's calibration executor (one at a time: the
+        GPU is shared) and publishes progress on the session. ``wait=True``
+        runs it inline and raises errors (scripts, HTTP tests). ``threshold``
+        or ``class_thresholds`` skip calibration and label at fixed values.
+        """
+
         record = self.dependencies.store.get(tenant_id=tenant_id, session_id=session_id)
         if record.status not in ("awaiting_confirmation", "needs_attention"):
             raise AgentConflict(
@@ -748,14 +767,80 @@ class AgentService:
         selected_thresholds = thresholds or self.dependencies.thresholds
         if any(not 0 <= value <= 1 for value in selected_thresholds):
             raise ValueError("thresholds must be between 0 and 1")
+        if class_thresholds is not None:
+            names = {item.name for item in draft.classes}
+            if set(class_thresholds) != names:
+                raise ValueError("class_thresholds must give a threshold for every class: " + ", ".join(sorted(names)))
+            if any(not 0 <= float(value) <= 1 for value in class_thresholds.values()):
+                raise ValueError("class thresholds must be between 0 and 1")
 
+        request = {
+            "threshold": threshold,
+            "thresholds": list(selected_thresholds),
+            "minimum_agreement": agreement,
+            "class_thresholds": (
+                {name: float(value) for name, value in class_thresholds.items()}
+                if class_thresholds is not None
+                else None
+            ),
+        }
+        record = replace(
+            record,
+            status="calibrating",
+            error=None,
+            spec={**(record.spec or {}), "calibration_request": request},
+        )
+        record = self.dependencies.store.save(record)
+        with self._calibration_lock:
+            self._inflight.add(session_id)
+        if wait:
+            return self._run_calibration(tenant_id, session_id, request, raise_errors=True)
+        self._calibration_executor.submit(
+            self._run_calibration, tenant_id, session_id, request, raise_errors=False
+        )
+        return self.view(record)
+
+    def _run_calibration(
+        self,
+        tenant_id: UUID,
+        session_id: UUID,
+        request: dict[str, Any],
+        *,
+        raise_errors: bool,
+    ) -> AgentSessionView:
+        try:
+            return self._calibrate_and_submit(tenant_id, session_id, request, raise_errors=raise_errors)
+        except Exception:
+            if raise_errors:
+                raise
+            logger.exception("background calibration failed", extra={"session_id": str(session_id)})
+            return self.view(self.dependencies.store.get(tenant_id=tenant_id, session_id=session_id))
+        finally:
+            with self._calibration_lock:
+                self._inflight.discard(session_id)
+
+    def _calibrate_and_submit(
+        self,
+        tenant_id: UUID,
+        session_id: UUID,
+        request: dict[str, Any],
+        *,
+        raise_errors: bool,
+    ) -> AgentSessionView:
+        record = self.dependencies.store.get(tenant_id=tenant_id, session_id=session_id)
+        if record.status != "calibrating":
+            return self.view(record)
+        draft = session_draft(record)
+        threshold = request.get("threshold")
+        selected_thresholds = tuple(request.get("thresholds") or self.dependencies.thresholds)
+        agreement = float(request.get("minimum_agreement") or self.dependencies.minimum_agreement)
+        class_thresholds = request.get("class_thresholds")
+        fixed = threshold is not None or class_thresholds is not None
         classes = draft.classes
         categories = [
             DatasetCategory(category_id=index, name=item.name[:80])
             for index, item in enumerate(classes, start=1)
         ]
-        record = replace(record, status="calibrating", error=None)
-        record = self.dependencies.store.save(record)
         selection: ValidatorSelection | None = None
         try:
             selection = self._select_validator(
@@ -773,7 +858,7 @@ class AgentService:
                 raise ValueError("asset has no image or video frames to label")
             total_images = len(all_images)
             sample_ids: set[str] = set()
-            if threshold is None:
+            if not fixed:
                 cancel_event = threading.Event()
                 with self._calibration_lock:
                     self._calibration_cancels[session_id] = cancel_event
@@ -934,11 +1019,25 @@ class AgentService:
                 chosen = [float(result.threshold) for _, result, _ in outcomes]  # type: ignore[arg-type]
                 chosen_prompts = [prompt for prompt, _, _ in outcomes]
             else:
-                chosen = [threshold for _ in classes]
-                chosen_prompts = [item.prompt for item in classes]
+                if class_thresholds is not None:
+                    chosen = [float(class_thresholds[item.name]) for item in classes]
+                else:
+                    chosen = [float(threshold) for _ in classes]
+                # Keep the prompts that calibration chose when the user only
+                # overrides thresholds after a calibration run.
+                previous = {
+                    item.get("name"): item.get("prompt")
+                    for item in ((record.calibration or {}).get("classes") or [])
+                }
+                chosen_prompts = [previous.get(item.name) or item.prompt for item in classes]
                 calibration = _manual_calibration_payload(
-                    prompt=", ".join(item.prompt for item in classes), threshold=threshold
+                    prompt=", ".join(chosen_prompts), threshold=chosen[0]
                 )
+                calibration["class_thresholds"] = {
+                    item.name: value for item, value in zip(classes, chosen)
+                }
+                if record.calibration and record.calibration.get("classes"):
+                    calibration["previous"] = record.calibration
                 record, _ = self._release_validator(selection, record)
 
             # A cancel request can arrive while calibration is running. Do not
@@ -974,7 +1073,7 @@ class AgentService:
                 error=None,
             )
             plural = "" if total_images == 1 else "s"
-            if threshold is None:
+            if not fixed:
                 sample_count = len(sample_ids)
                 if len(classes) == 1:
                     calibrated = f"Calibrated at {chosen[0]:.2f}"
@@ -987,9 +1086,15 @@ class AgentService:
                     f"{'' if sample_count == 1 else 's'}. Labeling {total_images} image"
                     f"{plural} in the background."
                 )
+            elif class_thresholds is not None and len(classes) > 1:
+                message = (
+                    "Using your thresholds: "
+                    + ", ".join(f"{item.name} {value:.2f}" for item, value in zip(classes, chosen))
+                    + f". Labeling {total_images} image{plural} in the background."
+                )
             else:
                 message = (
-                    f"Using the fixed threshold {threshold:.2f}. Labeling "
+                    f"Using the fixed threshold {chosen[0]:.2f}. Labeling "
                     f"{total_images} image{plural} in the background."
                 )
             record = self._append(record, "assistant", message)
@@ -1000,8 +1105,10 @@ class AgentService:
                 record, _ = self._release_validator(selection, record)
             record = replace(record, status="failed", error=str(exc))
             record = self._append(record, "assistant", str(exc))
-            self.dependencies.store.save(record)
-            raise
+            saved = self.dependencies.store.save(record)
+            if raise_errors:
+                raise
+            return self.view(saved)
         except CalibrationCancelled as exc:
             if selection is not None:
                 record, _ = self._release_validator(selection, record)
@@ -1012,22 +1119,28 @@ class AgentService:
                 return self.view(current)
             record = replace(record, status="failed", error=str(exc))
             record = self._append(record, "assistant", str(exc))
-            self.dependencies.store.save(record)
-            raise
+            saved = self.dependencies.store.save(record)
+            if raise_errors:
+                raise
+            return self.view(saved)
         except ModelUnavailableError as exc:
             if selection is not None:
                 record, _ = self._release_validator(selection, record)
             record = replace(record, status="failed", error=str(exc))
             record = self._append(record, "assistant", str(exc))
-            self.dependencies.store.save(record)
-            raise
+            saved = self.dependencies.store.save(record)
+            if raise_errors:
+                raise
+            return self.view(saved)
         except Exception as exc:
             if selection is not None:
                 record, _ = self._release_validator(selection, record)
             record = replace(record, status="failed", error=str(exc))
             record = self._append(record, "assistant", f"The labeling run could not start: {exc}")
-            self.dependencies.store.save(record)
-            raise
+            saved = self.dependencies.store.save(record)
+            if raise_errors:
+                raise
+            return self.view(saved)
 
     def cancel(self, *, tenant_id: UUID, session_id: UUID) -> AgentSessionView:
         record = self.dependencies.store.get(tenant_id=tenant_id, session_id=session_id)
@@ -1060,8 +1173,32 @@ class AgentService:
     def open_sessions(self) -> list[AgentSessionRecord]:
         return self.dependencies.store.list_open()
 
+    def resume_calibration(self, record: AgentSessionRecord) -> bool:
+        """Restart a calibration that no thread in this process owns."""
+
+        if record.status != "calibrating":
+            return False
+        with self._calibration_lock:
+            if record.session_id in self._inflight:
+                return False
+            self._inflight.add(record.session_id)
+        request = (record.spec or {}).get("calibration_request") or {}
+        logger.info("resuming interrupted calibration", extra={"session_id": str(record.session_id)})
+        self._calibration_executor.submit(
+            self._run_calibration, record.tenant_id, record.session_id, request, raise_errors=False
+        )
+        return True
+
+    def shutdown(self) -> None:
+        for event in list(self._calibration_cancels.values()):
+            event.set()
+        self._calibration_executor.shutdown(wait=False, cancel_futures=True)
+
     def advance(self, session_id: UUID) -> AgentSessionView:
         record = self.dependencies.store.get_any(session_id)
+        if record.status == "calibrating":
+            self.resume_calibration(record)
+            return self.view(record)
         if record.status == "labeling" and record.label_job_id is not None:
             job = self.dependencies.jobs.get(record.label_job_id)
             if job.status == "failed":

@@ -180,7 +180,7 @@ class AgentSessionStore:
             rows = self._connection.execute(
                 """
                 SELECT * FROM agent_sessions
-                WHERE status IN ('labeling', 'exporting')
+                WHERE status IN ('calibrating', 'labeling', 'exporting')
                 ORDER BY sequence
                 """
             ).fetchall()

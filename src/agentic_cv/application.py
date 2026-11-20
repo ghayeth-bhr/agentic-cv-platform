@@ -405,6 +405,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
             yield
         finally:
             worker_stop.set()
+            agent_service.shutdown()
             for thread in workers:
                 thread.join(timeout=5)
                 if thread.is_alive():
