@@ -14,8 +14,25 @@ The command-line tool and Python package keep their technical names, `agentic-cv
 | **Stack** | Python 3.11+, FastAPI, SQLite (PostgreSQL optional), PyTorch + Transformers, plain HTML/CSS/JS UI |
 | **Footprint** | Tested on an RTX 4050 Laptop GPU (6 GB) with 16 GB RAM |
 
+## Demo
+
+![BotFlow demo: search street footage for "taxi", let the agent plan and calibrate SAM 3, fix a mask with one click, export YOLO](docs/media/botflow-demo.gif)
+
+From raw street video to a reviewed taxi segmentation dataset:
+
+| Step | What you see |
+|---|---|
+| 1. Upload | Three street videos go into one asset called "Street". Every frame is indexed for semantic search. |
+| 2. Search | The query "taxi" returns 24 matching frames. The weak ones are unticked and the rest are saved as a new sub-asset, "Taxis" (21 images). |
+| 3. Ask the agent | The message *"Segment the taxis, export YOLO"* becomes a plan: instance segmentation with the SAM 3 prompt "yellow taxi". |
+| 4. Calibrate | SAM 3 runs on sample frames. The vision-language model checks each mask and settles on a threshold. |
+| 5. Label | The agent labels every image in the asset, with a live preview. |
+| 6. Review | The gallery shows each mask. A wrong one is deleted, and one click on the taxi segments it again. The rest are approved in one go. |
+| 7. Export | The dataset downloads as a YOLO segmentation zip, ready to train. |
+
 ## Contents
 
+- [Demo](#demo)
 - [Quick start: run it on your PC](#quick-start-run-it-on-your-pc)
 - [What the app does](#what-the-app-does)
 - [Architecture](#architecture)
