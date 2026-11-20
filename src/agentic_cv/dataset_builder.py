@@ -131,8 +131,12 @@ class DatasetBuilder:
         version_id: UUID,
         name: str = "",
         idempotency_key: str,
+        image_ids: set[str] | None = None,
     ) -> DatasetBuildResult:
-        """Create a new immutable version from one version's latest revisions."""
+        """Create a new immutable version from one version's latest revisions.
+
+        ``image_ids`` keeps only those images (e.g. the approved ones).
+        """
         if not idempotency_key.strip():
             raise ValueError("idempotency_key must not be empty")
         previous = self.versions.get(tenant_id=tenant_id, version_id=version_id)
@@ -146,7 +150,14 @@ class DatasetBuilder:
             revision.annotation
             for revision in live_in_set(revisions, set_id, category_ids=category_ids)
         )
-        dataset = replace(previous.dataset, annotations=annotations).with_splits()
+        images = previous.dataset.images
+        if image_ids is not None:
+            images = tuple(image for image in images if image.image_id in image_ids)
+            if not images:
+                raise ValueError("no images left to build: approve at least one image")
+            kept = {image.image_id for image in images}
+            annotations = tuple(item for item in annotations if item.image_id in kept)
+        dataset = replace(previous.dataset, images=images, annotations=annotations).with_splits()
         record = self.versions.create(
             tenant_id=tenant_id,
             name=name.strip() or f"{previous.name} — refined",
