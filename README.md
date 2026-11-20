@@ -16,6 +16,7 @@ The command-line tool and Python package keep their technical names, `agentic-cv
 
 ## Contents
 
+- [Quick start: run it on your PC](#quick-start-run-it-on-your-pc)
 - [What the app does](#what-the-app-does)
 - [Architecture](#architecture)
   - [App service architecture](#app-service-architecture)
@@ -28,6 +29,90 @@ The command-line tool and Python package keep their technical names, `agentic-cv
 - [Configuration](#configuration)
 - [Development](#development)
 - [Project documents](#project-documents)
+
+## Quick start: run it on your PC
+
+About 20 minutes the first time, mostly downloads. Commands are for **Windows PowerShell**; where Linux or macOS differs, the alternative is given.
+
+**You need:** an NVIDIA GPU with 6 GB or more (a CPU works, but slowly), about 30 GB of free disk, and [Git](https://git-scm.com/downloads).
+
+### 1. Install the tools (once)
+
+| Tool | Why | How |
+|---|---|---|
+| **uv** | installs Python and every dependency | Windows: `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 \| iex"`<br/>Linux/macOS: `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| **Ollama** | runs the chat and vision model locally | download from [ollama.com/download](https://ollama.com/download) and install |
+| **Hugging Face account** | SAM 3 is a gated model | 1. On [huggingface.co/facebook/sam3](https://huggingface.co/facebook/sam3), request access and wait for approval.<br/>2. Create a **Read** token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens). |
+
+Open a **new** terminal after installing, so `uv` and `ollama` are found.
+
+### 2. Get the code and install
+
+```powershell
+git clone https://github.com/ghayeth-bhr/agentic-cv-platform.git
+cd agentic-cv-platform
+uv sync --extra ml
+```
+
+`uv sync --extra ml` creates a `.venv` folder inside the project with Python, the app, and PyTorch with GPU support. On Windows it picks the CUDA build automatically.
+
+### 3. Get the models
+
+```powershell
+ollama pull qwen3-vl:4b     # about 3.3 GB, the chat and vision model
+uv run hf auth login        # paste your Hugging Face token; it is saved for next time
+```
+
+SAM 3 and SigLIP 2 download by themselves the first time you search or label (a few GB, once).
+
+### 4. Check your setup
+
+```powershell
+uv run agentic-cv doctor
+```
+
+It checks the GPU, the PyTorch build, Hugging Face access, Ollama, disk space, and port 8000. Fix anything marked as a failure before going on; each line says what to do.
+
+### 5. Start the app
+
+```powershell
+uv run agentic-cv serve
+```
+
+Open **http://127.0.0.1:8000**. The defaults keep everything private and local:
+- The app is reachable only from your own computer.
+- Your data goes in `.agentic-cv\` inside the project folder.
+- It uses port 8000. To change it, add `--port 8001`; to use another folder, add `--data-dir D:\botflow-data`.
+
+`uv run` needs no virtual-environment activation. `.venv\Scripts\agentic-cv.exe serve` is the same command.
+
+### 6. Try it
+
+1. **Assets**: create an asset, upload a few photos or a short video, and wait for "indexed for search". A 15–40 second clip in 1080p is a good first test.
+2. **Agent**: tick the asset and describe the job, for example *"Segment people, cars and bicycles, export COCO"*. Answer any question, then **Confirm**. Calibration and labeling run with a live preview.
+3. **Datasets**: open the gallery to review, approve, and fix masks by clicking, then **Export**.
+
+### Everyday use
+
+| To | Do |
+|---|---|
+| Start | Make sure Ollama is running (its tray icon on Windows). In the project folder, run `uv run agentic-cv serve`. |
+| Stop | Press **Ctrl+C** in that terminal. Your data stays, and an unfinished calibration resumes on the next start. |
+| Update | Run `git pull`, then `uv sync --extra ml`, restart the app, and press **Ctrl+F5** in the browser. |
+
+### If something goes wrong
+
+| Symptom | Fix |
+|---|---|
+| `program not found` or `No such command` | Run the command from inside the `agentic-cv-platform` folder. |
+| `address already in use` | Another program uses port 8000. Stop it, or start with `--port 8001`. |
+| Doctor says PyTorch has no CUDA | Run `uv sync --extra ml` again, and update the NVIDIA driver. |
+| The agent says it is using rules, or calibration uses the simpler check | Ollama is not running. Start the Ollama app (or run `ollama serve`), and check that `ollama list` shows `qwen3-vl:4b`. |
+| `401` / `403` when SAM 3 downloads | Access to `facebook/sam3` is not approved yet, or you are not logged in. Run `uv run hf auth login` again. |
+| CUDA "out of memory" | Close other GPU apps (games, other AI tools). The app loads one model at a time, but it needs about 3.5 GB free. |
+| The page looks old after an update | Press **Ctrl+F5** to reload without the cache. |
+
+To run it on a server for a team, see [Deploying](#deploying).
 
 ## What the app does
 
@@ -240,6 +325,8 @@ Three local models share one GPU through `model_resources.ModelResourceManager`.
 | Hugging Face | access to the gated `facebook/sam3` and a token (`HF_TOKEN`) | Request access on the model page first |
 
 ### Single GPU host (recommended)
+
+The same steps as the [Quick start](#quick-start-run-it-on-your-pc), set up for a server: a dedicated data directory, listening on the network (put auth and TLS in front, see [Security](#security)), and a token in the environment instead of an interactive login.
 
 ```bash
 git clone https://github.com/ghayeth-bhr/agentic-cv-platform.git
