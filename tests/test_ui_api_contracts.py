@@ -36,11 +36,16 @@ UI_ROUTES = {
     "/v1/agent/sessions": {"get", "post"},
     "/v1/agent/sessions/{session_id}": {"get"},
     "/v1/agent/sessions/{session_id}/confirm": {"post"},
+    "/v1/agent/sessions/{session_id}/messages": {"post"},
+    "/v1/agent/sessions/{session_id}/calibration-preview": {"get"},
+    "/v1/agent/sessions/{session_id}/calibration-samples/{image_id}/image": {"get"},
     "/v1/agent/sessions/{session_id}/cancel": {"post"},
     "/v1/agent/sessions/{session_id}/calibration-overlays/{overlay_id}": {"get"},
     "/v1/datasets": {"get"},
     "/v1/datasets/{version_id}/images": {"get"},
     "/v1/datasets/{version_id}/images/{image_id}/file": {"get"},
+    "/v1/jobs/{job_id}/preview": {"get"},
+    "/v1/label-jobs/{job_id}/preview/{image_id}/image": {"get"},
     "/v1/datasets/{version_id}/rebuild": {"post"},
     "/v1/refinements/{session_id}/accept": {"post"},
     "/v1/dataset-exports": {"post"},
@@ -99,6 +104,7 @@ def test_empty_library_response_envelopes_are_stable(tmp_path):
         assert info_body["model_runtime"]["resources"]["models"].keys() == {
             "siglip2",
             "sam3",
+            "sam3-tracker",  # point-prompt refinement (Phase 4b)
         }
 
         assets = client.get("/v1/assets", headers=TENANT_HEADERS)
@@ -139,7 +145,10 @@ def test_ui_selector_and_navigation_contract():
     html = (root / "src" / "agentic_cv" / "web" / "index.html").read_text(encoding="utf-8")
     javascript = (root / "src" / "agentic_cv" / "web" / "app.js").read_text(encoding="utf-8")
 
-    html_ids = set(re.findall(r'id="([^"]+)"', html))
+    all_ids = re.findall(r'id="([^"]+)"', html)
+    duplicates = sorted({item for item in all_ids if all_ids.count(item) > 1})
+    assert not duplicates, f"duplicate DOM ids: {duplicates}"
+    html_ids = set(all_ids)
     js_ids = set(re.findall(r'\$\("([^"]+)"\)', javascript))
     assert not (js_ids - html_ids), f"app.js references missing ids: {sorted(js_ids - html_ids)}"
 
@@ -152,4 +161,17 @@ def test_ui_selector_and_navigation_contract():
     assert 'format.dataset.exportFormat = "true"' in javascript
     for format_value in ("coco", "yolo-detection", "yolo-segmentation"):
         assert f'["{format_value}", ' in javascript
+    for element_id in (
+        "dataset-gallery", "dataset-gallery-back", "gallery-filter-class",
+        "gallery-filter-split", "gallery-filter-unannotated",
+        "gallery-filter-lowconfidence", "gallery-toggle-boxes",
+        "gallery-toggle-masks", "gallery-toggle-labels", "gallery-counter",
+        "gallery-image", "gallery-overlay", "gallery-prev", "gallery-next",
+        "gallery-filmstrip", "gallery-details", "gallery-annotations",
+        "gallery-refine", "agent-live", "agent-live-grid", "agent-live-badge",
+        "agent-live-progress-bar", "agent-live-count", "agent-open-gallery",
+        "agent-assets", "agent-quick-replies", "agent-message", "agent-plan",
+        "agent-board", "agent-board-classes", "agent-board-apply", "agent-board-actions",
+    ):
+        assert f'id="{element_id}"' in html, f"missing DOM id: {element_id}"
     assert "tenant-id" not in html

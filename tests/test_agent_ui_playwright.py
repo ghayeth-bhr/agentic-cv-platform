@@ -170,9 +170,8 @@ def test_agent_chat_download_and_session_restore_in_browser(tmp_path):
             # Open the Agent, plan a task, and confirm the extracted spec.
             page.locator(".nav-item[data-view='agent']").click()
             expect(page.locator("#view-title")).to_have_text("Agent")
-            expect(page.locator("#agent-asset")).to_have_value(
-                page.locator("#agent-asset option").first.get_attribute("value")
-            )
+            # The uploaded asset is preselected in the multi-asset picker.
+            expect(page.locator("#agent-assets .agent-asset-option input").first).to_be_checked()
             page.locator("#agent-message").fill(
                 "Create a segmentation dataset of workers wearing yellow vests."
             )

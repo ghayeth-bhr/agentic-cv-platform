@@ -22,8 +22,14 @@ from .agent import (
     AgentServiceDependencies,
     TaskPlanner,
     planner_from_environment,
+    prompt_enhancer_from_environment,
 )
 from .agent_api import AgentApiDependencies, create_app as create_agent_app
+from .review_api import ReviewApiDependencies, create_app as create_review_app
+from .label_monitor import LabelHealthStore
+from .review_store import ReviewStore
+from .sam3_points import Sam3PointProvider, Sam3PointRefinementProvider
+from .prompt_enhancement import PromptEnhancer
 from .agent_store import AgentSessionBackend, AgentSessionStore
 from .agent_worker import AgentWorker
 from .api import ApiDependencies, CalibrationApiDependencies, DatasetApiDependencies, ExportApiDependencies, LabelApiDependencies, RefinementApiDependencies, create_app as create_core_app
@@ -108,6 +114,10 @@ class LocalAppConfig:
     refinement_provider: ClickRefinementProvider | None = None
     postgres: PostgresConfig | None = None
     agent_planner: TaskPlanner | None = None
+    # SAM 3 prompt agent. Defaults to the local Ollama enhancer when the
+    # planner also comes from the environment; injected planners get none
+    # unless one is passed, which keeps tests deterministic.
+    agent_prompt_enhancer: PromptEnhancer | None = None
     calibration_validator_factory: (
         Callable[[UUID, UUID], ValidatorSelection] | None
     ) = None
@@ -165,12 +175,13 @@ class LocalAppResources:
     sam3_provider: Sam3Provider
     agent_sessions: AgentSessionBackend
     model_resources: ModelResourceManager
+    reviews: ReviewStore
     outbox_dispatcher: OutboxDispatcher | None = None
 
     def close(self) -> None:
         for resource in (
             self.registry, self.outbox, self.versions, self.jobs, self.preview, self.sub_assets, self.annotations,
-            self.agent_sessions,
+            self.agent_sessions, self.reviews,
         ):
             resource.close()
         for component in (self.vector_index, self.embedding_provider, self.sam3_provider):
@@ -214,6 +225,8 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
     else:
         jobs = JobStore(str(metadata_dir / "jobs.sqlite3"))
     agent_sessions = AgentSessionStore(str(metadata_dir / "agent-sessions.sqlite3"))
+    reviews = ReviewStore(str(metadata_dir / "reviews.sqlite3"))
+    label_health = LabelHealthStore(config.data_dir / "label-health")
     if config.postgres is not None:
         from .postgres_preview import open_postgres_preview_store
 
@@ -269,7 +282,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
         registry=registry, outbox=outbox, versions=versions, jobs=jobs, preview=preview,
         sub_assets=sub_assets, annotations=annotations, vector_index=vector_index,
         embedding_provider=embedding_provider, sam3_provider=sam3_provider,
-        agent_sessions=agent_sessions, model_resources=model_resources,
+        agent_sessions=agent_sessions, model_resources=model_resources, reviews=reviews,
     )
     export_service = DatasetExportService(versions, config.data_dir / "exports")
     export_workflow = DatasetExportWorkflow(
@@ -281,6 +294,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
         LabelWorkflowDependencies(
             jobs=jobs, annotations=annotations, outbox=outbox,
             labeler=Sam3BatchLabeler(sam3_provider), preview=preview,
+            health=label_health,
         )
     )
     label_images = LabelImageResolver(registry=registry, data_dir=config.data_dir)
@@ -295,9 +309,23 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
         images_root=config.data_dir / "dataset-images",
     )
     dataset_images_root = config.data_dir / "dataset-images"
-    refinement_provider = config.refinement_provider or Sam3ClickRefinementProvider(
-        sam3_provider
-    )
+    ranked_refinement = Sam3ClickRefinementProvider(sam3_provider)
+    if config.refinement_provider is not None:
+        refinement_provider = config.refinement_provider
+    elif config.sam3_provider is None and os.getenv("AGENTIC_CV_REFINEMENT", "").strip().lower() != "ranked":
+        # Real models: segment from the clicks with SAM 3's tracker; fall
+        # back to ranking text-prompt masks if the tracker cannot load.
+        refinement_provider = Sam3PointRefinementProvider(
+            Sam3PointProvider(
+                model_settings.sam3_config(),
+                resources=model_resources,
+                resource_name="sam3-tracker",
+                estimated_vram_mb=_env_int("AGENTIC_CV_SAM3_TRACKER_VRAM_MB", 1100, minimum=1),
+            ),
+            fallback=ranked_refinement,
+        )
+    else:
+        refinement_provider = ranked_refinement
     refinement_service = ClickRefinementService(refinement_provider)
 
     def load_refinement_target(
@@ -346,12 +374,20 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
             images=label_images,
             sam3_provider=sam3_provider,
             planner=config.agent_planner or planner_from_environment(),
+            prompt_enhancer=(
+                config.agent_prompt_enhancer
+                if config.agent_planner is not None
+                else config.agent_prompt_enhancer or prompt_enhancer_from_environment()
+            ),
             calibration_timeout_sec=config.calibration_timeout_sec,
             validator_factory=(
                 config.calibration_validator_factory
                 or default_validator_factory(config.data_dir)
             ),
             vectors=vector_index,
+            text_embedder=embedding_provider.embed_text,
+            release_models=lambda name: model_resources.close(name, reason="calibration"),
+            health=label_health,
             overlay_root=config.data_dir / "calibration-overlays",
         )
     )
@@ -392,6 +428,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
             yield
         finally:
             worker_stop.set()
+            agent_service.shutdown()
             for thread in workers:
                 thread.join(timeout=5)
                 if thread.is_alive():
@@ -441,6 +478,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
         create_core_app(ApiDependencies(
             registry=registry, uploads=uploads, outbox=outbox,
             authorizer=authorizer,
+            thumbnail_cache=config.data_dir / "derived" / "thumbnails",
             exports=ExportApiDependencies(workflow=export_workflow),
             labels=LabelApiDependencies(workflow=label_workflow),
             datasets=DatasetApiDependencies(
@@ -456,6 +494,8 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
             calibration=CalibrationApiDependencies(provider=sam3_provider),
             orchestrator=TaskOrchestrator(),
             sam3=sam3_provider,
+            label_images=label_images,
+            annotations=annotations,
             jobs=jobs,
         )).router
     )
@@ -475,6 +515,18 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
         ).router
     )
     app.include_router(create_preview_app(PreviewApiDependencies(store=preview, authorizer=authorizer)).router)
+    app.include_router(
+        create_review_app(
+            ReviewApiDependencies(
+                versions=versions,
+                annotations=annotations,
+                reviews=reviews,
+                builder=dataset_builder,
+                authorizer=authorizer,
+                registry=registry,
+            )
+        ).router
+    )
     app.include_router(create_sam3_app(sam3_provider).router)
 
     @app.get("/api-info")

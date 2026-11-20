@@ -184,10 +184,11 @@ def test_calibration_api_runs_workflow(tmp_path):
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "calibrated"
-    assert body["threshold"] == 0.3
+    # Every threshold is scored now; all pass, so the middle one is chosen.
+    assert body["threshold"] == 0.6
     assert body["prompt"] == "bear"
-    assert len(body["attempts"]) == 1
-    assert body["attempts"][0]["accepted_count"] == 2
+    assert len(body["attempts"]) == 3
+    assert all(attempt["accepted_count"] == 2 for attempt in body["attempts"])
 
     registry.close(); outbox.close(); jobs.close(); annotations.close(); preview.close()
 

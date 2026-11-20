@@ -7,9 +7,16 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
+from .dataset import Annotation
 from .sam3 import Sam3Prediction
 
 _COLORS = ((255, 64, 64), (64, 160, 255), (64, 210, 120), (245, 180, 55))
+
+
+def class_color(category_id: int) -> tuple[int, int, int]:
+    """Stable display color for a dataset category."""
+
+    return _COLORS[abs(int(category_id)) % len(_COLORS)]
 
 
 def render_prediction_overlay(
@@ -42,3 +49,52 @@ def render_prediction_overlay(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     canvas.convert("RGB").save(output_path, format="PNG")
     return output_path
+
+
+def render_annotation_overlay(
+    image: Image.Image,
+    annotations: list[Annotation],
+    *,
+    class_names: dict[int, str] | None = None,
+) -> Image.Image:
+    """Return a source image with boxes, polygons, class names, and scores.
+
+    This is the server-side twin of the browser gallery overlay. It exists so
+    a running label job can expose a finished image before a dataset version
+    has been built.
+    """
+
+    canvas = image.convert("RGBA")
+    fill_layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    fill_draw = ImageDraw.Draw(fill_layer)
+    for annotation in annotations:
+        color = class_color(annotation.category_id)
+        for polygon in annotation.segmentation:
+            if not polygon or len(polygon) < 6 or len(polygon) % 2:
+                continue
+            points = [
+                (float(polygon[index]), float(polygon[index + 1]))
+                for index in range(0, len(polygon), 2)
+            ]
+            fill_draw.polygon(points, fill=color + (70,))
+    canvas = Image.alpha_composite(canvas, fill_layer)
+    draw = ImageDraw.Draw(canvas)
+
+    for annotation in annotations:
+        color = class_color(annotation.category_id)
+        for polygon in annotation.segmentation:
+            if not polygon or len(polygon) < 6 or len(polygon) % 2:
+                continue
+            points = [
+                (float(polygon[index]), float(polygon[index + 1]))
+                for index in range(0, len(polygon), 2)
+            ]
+            draw.line(points + [points[0]], fill=color + (220,), width=2, joint="curve")
+        x, y, width, height = annotation.bbox
+        draw.rectangle((x, y, x + width, y + height), outline=color, width=3)
+        name = (class_names or {}).get(
+            annotation.category_id, f"class {annotation.category_id}"
+        )
+        score = "" if annotation.score is None else f" {annotation.score:.2f}"
+        draw.text((max(0, x), max(0, y - 14)), f"{name}{score}", fill=color)
+    return canvas.convert("RGB")

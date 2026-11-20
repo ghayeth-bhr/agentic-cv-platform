@@ -3,19 +3,20 @@
 from __future__ import annotations
 
 import io
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Literal
 from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from PIL import Image
 from pydantic import BaseModel, Field
 
-from .annotation_store import AnnotationRevisionBackend
+from .annotation_sets import in_set, job_set_id, live_in_set, manual_annotation_id
+from .annotation_store import AnnotationRevisionBackend, RevisionConflictError
 from .asset_registry import AssetRegistry
 from .auth import Authorizer
 from .batch_labeling import mask_polygons
@@ -34,9 +35,11 @@ from .dataset_export_workflow import DatasetExportWorkflow
 from .dataset_store import DatasetVersionBackend, DatasetVersionRecord
 from .errors import ModelUnavailableError, install_model_unavailable_handler
 from .job_store import JobRecord, JobStoreBackend
-from .label_workflow import DurableLabelWorkflow
+from .label_images import LabelImageResolver, image_display_names
+from .label_workflow import DurableLabelWorkflow, label_plan
 from .orchestrator import TaskOrchestrationRequest, TaskOrchestrator
 from .outbox import Outbox
+from .overlay import class_color, render_annotation_overlay
 from .sam3 import Sam3Prediction, Sam3Provider
 from .uploads import ResumableUploadService
 
@@ -174,6 +177,11 @@ class ApiDependencies:
     orchestrator: TaskOrchestrator | None = None
     sam3: Sam3Provider | None = None
     jobs: JobStoreBackend | None = None
+    label_images: LabelImageResolver | None = None
+    annotations: AnnotationRevisionBackend | None = None
+    # Directory for generated thumbnails (sources are immutable, so a
+    # thumbnail is keyed by source id). None regenerates on every request.
+    thumbnail_cache: Path | None = None
 
 
 def _authorize(
@@ -241,6 +249,13 @@ class DatasetCategoryResponse(BaseModel):
     name: str
 
 
+class DatasetClassCountResponse(BaseModel):
+    category_id: int
+    name: str
+    count: int
+    color: str
+
+
 class DatasetSummaryResponse(BaseModel):
     version_id: UUID
     name: str
@@ -248,6 +263,9 @@ class DatasetSummaryResponse(BaseModel):
     annotation_count: int
     categories: list[DatasetCategoryResponse]
     created_at: str
+    source_asset: str = ""
+    status: str = "ready"
+    class_counts: list[DatasetClassCountResponse] = Field(default_factory=list)
 
 
 class DatasetAnnotationResponse(BaseModel):
@@ -261,13 +279,20 @@ class DatasetAnnotationResponse(BaseModel):
 class DatasetImageResponse(BaseModel):
     image_id: str
     file_name: str
+    source_name: str | None = None
     width: int
     height: int
     annotations: list[DatasetAnnotationResponse]
+    split: str = "train"
+    file_size: int = 0
 
 
 class DatasetImagesResponse(BaseModel):
     images: list[DatasetImageResponse]
+    total: int = 0
+    limit: int = 0
+    offset: int = 0
+    has_more: bool = False
 
 
 class DatasetRebuildRequest(BaseModel):
@@ -277,9 +302,18 @@ class DatasetRebuildRequest(BaseModel):
 
 class RefinementAcceptRequest(BaseModel):
     annotation_id: str | None = None
+    # Class for the accepted object; defaults to the session's class.
+    category_id: int | None = None
     prediction_index: int = 0
     refinement_revision: int | None = None
     expected_revision: int | None = None
+
+
+class AnnotationDeleteResponse(BaseModel):
+    image_id: str
+    annotation_id: str
+    revision: int
+    deleted: bool = True
 
 
 class RefinementAcceptResponse(BaseModel):
@@ -347,7 +381,49 @@ def _label_job_response(job: JobRecord) -> LabelJobResponse:
     )
 
 
-def _dataset_summary(record: DatasetVersionRecord) -> DatasetSummaryResponse:
+def _color_hex(category_id: int) -> str:
+    red, green, blue = class_color(category_id)
+    return f"#{red:02x}{green:02x}{blue:02x}"
+
+
+def _dataset_source(
+    record: DatasetVersionRecord, asset_names: dict[str, str] | None
+) -> str:
+    """Name the source asset(s) from recorded ids; parse the name for old versions."""
+
+    ids = record.dataset.source_asset_ids
+    if ids and asset_names is not None:
+        names = [asset_names[asset_id] for asset_id in ids if asset_id in asset_names]
+        if names:
+            return ", ".join(names)
+    return _source_asset_name(record.name)
+
+
+def _source_asset_name(name: str) -> str:
+    for separator in (" — ", " – ", " - "):
+        if separator in name:
+            return name.split(separator, 1)[0].strip()
+    return name
+
+
+def _dataset_summary(
+    record: DatasetVersionRecord, asset_names: dict[str, str] | None = None
+) -> DatasetSummaryResponse:
+    categories = {
+        category.category_id: category.name for category in record.dataset.categories
+    }
+    counts: dict[int, int] = {}
+    for annotation in record.dataset.annotations:
+        counts[annotation.category_id] = counts.get(annotation.category_id, 0) + 1
+    class_counts = [
+        DatasetClassCountResponse(
+            category_id=category_id,
+            name=categories.get(category_id, f"class {category_id}"),
+            count=count,
+            color=_color_hex(category_id),
+        )
+        for category_id, count in sorted(counts.items())
+    ]
     return DatasetSummaryResponse(
         version_id=record.version_id,
         name=record.name,
@@ -358,6 +434,9 @@ def _dataset_summary(record: DatasetVersionRecord) -> DatasetSummaryResponse:
             for category in record.dataset.categories
         ],
         created_at=record.created_at,
+        source_asset=_dataset_source(record, asset_names),
+        status="ready",
+        class_counts=class_counts,
     )
 
 
@@ -378,7 +457,35 @@ def _dataset_image_path(
     return path
 
 
-def _snapshot_payload(snapshot: RefinementSnapshot) -> dict:
+def _snapshot_payload(snapshot: RefinementSnapshot, *, polygons: bool = False) -> dict:
+    """Refinement state for the browser.
+
+    ``polygons=True`` sends each mask as simplified polygons (a few KB)
+    instead of a full boolean grid (several MB for a 720x1280 frame), so a
+    0.03 s point-prompt click is not dominated by JSON transfer.
+    """
+
+    if polygons:
+        return {
+            "type": "snapshot",
+            "session_id": str(snapshot.session_id),
+            "image_id": snapshot.image_id,
+            "revision": snapshot.revision,
+            "prompt": snapshot.prompt,
+            "category_id": snapshot.category_id,
+            "points": [
+                {"x": point.x, "y": point.y, "label": point.label}
+                for point in snapshot.points
+            ],
+            "predictions": [
+                {
+                    "score": prediction.score,
+                    "box": prediction.box,
+                    "polygons": [list(polygon) for polygon in mask_polygons(prediction.mask)],
+                }
+                for prediction in snapshot.predictions
+            ],
+        }
     return {
         "type": "snapshot",
         "session_id": str(snapshot.session_id),
@@ -399,6 +506,16 @@ def _snapshot_payload(snapshot: RefinementSnapshot) -> dict:
             for prediction in snapshot.predictions
         ],
     }
+
+
+def _asset_names(registry, tenant_id: UUID) -> dict[str, str]:
+    try:
+        return {
+            str(asset.asset_id): asset.name
+            for asset in registry.list_assets(tenant_id=tenant_id)
+        }
+    except Exception:
+        return {}
 
 
 def _credential(authorization: str | None, api_key: str | None) -> str | None:
@@ -466,6 +583,28 @@ def _thumbnail_bytes(source) -> bytes | None:
     except Exception:
         return None
     return None
+
+
+def _cached_thumbnail(cache_dir: Path | None, source) -> bytes | None:
+    """Thumbnail bytes, generated once per source (videos are decoded once)."""
+
+    if cache_dir is None:
+        return _thumbnail_bytes(source)
+    path = cache_dir / f"{source.source_id}.jpg"
+    try:
+        return path.read_bytes()
+    except OSError:
+        pass
+    data = _thumbnail_bytes(source)
+    if data is not None:
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_bytes(data)
+            tmp.replace(path)
+        except OSError:
+            pass
+    return data
 
 
 def _load_source_image(source) -> Image.Image | None:
@@ -626,10 +765,14 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
         representative = _representative_source(summary.sources)
         if representative is None:
             raise HTTPException(status_code=404, detail="asset has no source")
-        data = _thumbnail_bytes(representative)
+        data = _cached_thumbnail(dependencies.thumbnail_cache, representative)
         if data is None:
             raise HTTPException(status_code=404, detail="thumbnail unavailable")
-        return Response(content=data, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=300"})
+        return Response(
+            content=data,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "private, max-age=86400", "ETag": f'"{representative.source_id}"'},
+        )
 
     @app.post("/v1/assets/{asset_id}/uploads", response_model=UploadResponse, status_code=201)
     def start_upload(
@@ -924,6 +1067,7 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                 websocket: WebSocket, version_id: str, image_id: str
             ) -> None:
                 await websocket.accept()
+                as_polygons = websocket.query_params.get("format") == "polygons"
                 tenant_raw = websocket.query_params.get("tenant_id")
                 if not tenant_raw:
                     await websocket.close(
@@ -953,7 +1097,7 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                     detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
                     await websocket.close(code=1008, reason=str(detail))
                     return
-                await websocket.send_json(_snapshot_payload(snapshot))
+                await websocket.send_json(_snapshot_payload(snapshot, polygons=as_polygons))
                 try:
                     while True:
                         message = await websocket.receive_json()
@@ -979,7 +1123,7 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                                     {"type": "error", "detail": str(exc)}
                                 )
                                 continue
-                            await websocket.send_json(_snapshot_payload(snapshot))
+                            await websocket.send_json(_snapshot_payload(snapshot, polygons=as_polygons))
                         elif message_type == "get":
                             await websocket.send_json(
                                 _snapshot_payload(
@@ -1091,6 +1235,67 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             return _label_job_response(job)
 
+        if dependencies.label_images is not None and dependencies.annotations is not None:
+            @app.get("/v1/label-jobs/{job_id}/preview/{image_id}/image")
+            def label_preview_image(
+                job_id: UUID,
+                image_id: str,
+                x_tenant_id: str | None = Header(None),
+                tenant_id_q: str | None = Query(None, alias="tenant_id"),
+                x_api_key: str | None = Header(None),
+                authorization: str | None = Header(None),
+            ) -> Response:
+                raw_tenant = x_tenant_id or tenant_id_q
+                if raw_tenant is None:
+                    raise HTTPException(status_code=400, detail="X-Tenant-ID or tenant_id is required")
+                tenant_id = _tenant(raw_tenant)
+                _authorize(
+                    dependencies.authorizer,
+                    credential=_credential(authorization, x_api_key),
+                    tenant_id=tenant_id,
+                    role="labels:read",
+                )
+                try:
+                    job = label_workflow.dependencies.jobs.get(job_id)
+                except KeyError as exc:
+                    raise HTTPException(status_code=404, detail=str(exc)) from exc
+                if job.tenant_id != tenant_id or job.kind != "batch-label":
+                    raise HTTPException(status_code=404, detail="unknown label job")
+                try:
+                    plan = label_plan(job.payload)
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise HTTPException(status_code=404, detail="label job has no source asset") from exc
+                try:
+                    images = dependencies.label_images.resolve_many(
+                        tenant_id=tenant_id, asset_ids=plan.asset_ids
+                    )
+                except (KeyError, ValueError) as exc:
+                    raise HTTPException(status_code=404, detail=str(exc)) from exc
+                match = next((item for item in images if item.image_id == image_id), None)
+                if match is None:
+                    raise HTTPException(status_code=404, detail="unknown preview image")
+                revisions = dependencies.annotations.list_latest(
+                    tenant_id=tenant_id, image_ids=[image_id]
+                )
+                class_names = {
+                    category.category_id: category.name for category in plan.categories
+                }
+                revisions = live_in_set(
+                    revisions, job_set_id(job_id), category_ids=set(class_names)
+                )
+                try:
+                    with Image.open(match.path) as source:
+                        overlay = render_annotation_overlay(
+                            source.convert("RGB"),
+                            [revision.annotation for revision in revisions],
+                            class_names=class_names,
+                        )
+                except OSError as exc:
+                    raise HTTPException(status_code=404, detail="preview image unavailable") from exc
+                buffer = io.BytesIO()
+                overlay.save(buffer, format="PNG")
+                return Response(content=buffer.getvalue(), media_type="image/png")
+
     if dependencies.datasets is not None:
         dataset_builder = dependencies.datasets.builder
         versions = dependencies.datasets.versions
@@ -1119,7 +1324,9 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
             except ValueError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
-            return _dataset_summary(result.record)
+            return _dataset_summary(
+                result.record, _asset_names(dependencies.registry, tenant_id)
+            )
 
         @app.get("/v1/datasets", response_model=list[DatasetSummaryResponse])
         def list_datasets(
@@ -1129,7 +1336,11 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
         ) -> list[DatasetSummaryResponse]:
             tenant_id = _tenant(x_tenant_id)
             _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="labels:read")
-            return [_dataset_summary(record) for record in versions.list(tenant_id=tenant_id)]
+            names = _asset_names(dependencies.registry, tenant_id)
+            return [
+                _dataset_summary(record, names)
+                for record in versions.list(tenant_id=tenant_id)
+            ]
 
         @app.get("/v1/datasets/{version_id}", response_model=DatasetSummaryResponse)
         def get_dataset(
@@ -1144,7 +1355,7 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                 record = versions.get(tenant_id=tenant_id, version_id=version_id)
             except KeyError as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
-            return _dataset_summary(record)
+            return _dataset_summary(record, _asset_names(dependencies.registry, tenant_id))
 
         @app.get(
             "/v1/datasets/{version_id}/images",
@@ -1155,6 +1366,8 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
             x_tenant_id: str = Header(...),
             x_api_key: str | None = Header(None),
             authorization: str | None = Header(None),
+            limit: int = Query(default=200, ge=1, le=1000),
+            offset: int = Query(default=0, ge=0),
         ) -> DatasetImagesResponse:
             tenant_id = _tenant(x_tenant_id)
             _authorize(
@@ -1172,6 +1385,27 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
             }
             for annotation in record.dataset.annotations:
                 by_image.setdefault(annotation.image_id, []).append(annotation)
+            page = list(record.dataset.images[offset : offset + limit])
+            splits = {
+                image.image_id: record.dataset.split_of(image) for image in page
+            }
+            names = image_display_names(
+                dependencies.registry, tenant_id=tenant_id, image_ids=[image.image_id for image in page]
+            )
+
+            def image_size(image: object) -> int:
+                if dependencies.datasets is None or dependencies.datasets.images_root is None:
+                    return 0
+                try:
+                    return _dataset_image_path(
+                        dependencies.datasets.images_root,
+                        tenant_id=tenant_id,
+                        version_id=version_id,
+                        file_name=image.file_name,
+                    ).stat().st_size
+                except (OSError, ValueError):
+                    return 0
+
             return DatasetImagesResponse(
                 images=[
                     DatasetImageResponse(
@@ -1179,6 +1413,9 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                         file_name=image.file_name,
                         width=image.width,
                         height=image.height,
+                        split=splits[image.image_id],
+                        source_name=names.get(image.image_id),
+                        file_size=image_size(image),
                         annotations=[
                             DatasetAnnotationResponse(
                                 annotation_id=annotation.annotation_id,
@@ -1192,8 +1429,12 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                             for annotation in by_image[image.image_id]
                         ],
                     )
-                    for image in record.dataset.images
-                ]
+                    for image in page
+                ],
+                total=len(record.dataset.images),
+                limit=limit,
+                offset=offset,
+                has_more=offset + len(page) < len(record.dataset.images),
             )
 
         @app.get("/v1/datasets/{version_id}/images/{image_id}/file")
@@ -1263,7 +1504,9 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
             except ValueError as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
-            return _dataset_summary(result.record)
+            return _dataset_summary(
+                result.record, _asset_names(dependencies.registry, tenant_id)
+            )
 
     if (
         dependencies.refinement is not None
@@ -1334,7 +1577,10 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
             )
             if dataset_image is None:
                 raise HTTPException(status_code=404, detail="dataset image not found")
-            if snapshot.category_id not in {
+            category_id = (
+                request.category_id if request.category_id is not None else snapshot.category_id
+            )
+            if category_id not in {
                 category.category_id for category in version_record.dataset.categories
             }:
                 raise HTTPException(
@@ -1343,7 +1589,13 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                 )
 
             latest = None
+            set_id = version_record.dataset.annotation_set
             annotation_id = request.annotation_id
+            if annotation_id is not None and not in_set(annotation_id, set_id):
+                raise HTTPException(
+                    status_code=422,
+                    detail="annotation does not belong to this dataset",
+                )
             if annotation_id is not None:
                 try:
                     latest = annotations.latest(
@@ -1355,23 +1607,16 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                     raise HTTPException(
                         status_code=404, detail="annotation not found"
                     ) from exc
-                if latest.annotation.category_id != snapshot.category_id:
+                if request.category_id is None and latest.annotation.category_id != snapshot.category_id:
                     raise HTTPException(
                         status_code=422,
                         detail="annotation belongs to a different category",
                     )
             else:
-                for revision in annotations.list_latest(
-                    tenant_id=tenant_id, image_ids=[snapshot.image_id]
-                ):
-                    if revision.annotation.category_id == snapshot.category_id:
-                        latest = revision
-                        annotation_id = revision.annotation.annotation_id
-                        break
-                if annotation_id is None:
-                    annotation_id = (
-                        f"manual:{snapshot.image_id}:{uuid4().hex[:8]}"
-                    )
+                # No target annotation means "add a new object". Replacing an
+                # existing mask must name it explicitly, so a click on a missed
+                # object never overwrites a correct one.
+                annotation_id = manual_annotation_id(set_id, snapshot.image_id)
 
             current_revision = latest.revision if latest is not None else 0
             if (
@@ -1391,7 +1636,7 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
             annotation = Annotation(
                 annotation_id=str(annotation_id),
                 image_id=snapshot.image_id,
-                category_id=snapshot.category_id,
+                category_id=category_id,
                 bbox=(x1, y1, max(0.0, x2 - x1), max(0.0, y2 - y1)),
                 segmentation=mask_polygons(prediction.mask),
                 score=None,
@@ -1410,6 +1655,65 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
                 session_id=snapshot.session_id,
                 image_id=snapshot.image_id,
                 annotation_id=saved.annotation.annotation_id,
+                revision=saved.revision,
+            )
+
+        @app.delete(
+            "/v1/datasets/{version_id}/images/{image_id}/annotations/{annotation_id:path}",
+            response_model=AnnotationDeleteResponse,
+        )
+        def delete_annotation(
+            version_id: UUID,
+            image_id: str,
+            annotation_id: str,
+            expected_revision: int | None = Query(default=None, ge=0),
+            x_tenant_id: str = Header(...),
+            x_api_key: str | None = Header(None),
+            authorization: str | None = Header(None),
+        ) -> AnnotationDeleteResponse:
+            """Retire an annotation (e.g. a false positive) with a tombstone revision.
+
+            The version itself is immutable: the deletion shows up in the next
+            ``/rebuild`` of this version, like any other correction.
+            """
+
+            tenant_id = _tenant(x_tenant_id)
+            _authorize(
+                dependencies.authorizer,
+                credential=_credential(authorization, x_api_key),
+                tenant_id=tenant_id,
+                role="labels:write",
+            )
+            try:
+                version_record = versions.get(tenant_id=tenant_id, version_id=version_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            if not any(image.image_id == image_id for image in version_record.dataset.images):
+                raise HTTPException(status_code=404, detail="dataset image not found")
+            if not in_set(annotation_id, version_record.dataset.annotation_set):
+                raise HTTPException(status_code=404, detail="annotation not found")
+            try:
+                latest = annotations.latest(
+                    tenant_id=tenant_id, image_id=image_id, annotation_id=annotation_id
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail="annotation not found") from exc
+            if latest.annotation.deleted:
+                raise HTTPException(status_code=409, detail="annotation is already deleted")
+            try:
+                saved = annotations.save(
+                    tenant_id=tenant_id,
+                    annotation=replace(latest.annotation, deleted=True),
+                    author_id="manual-review",
+                    expected_revision=(
+                        latest.revision if expected_revision is None else expected_revision
+                    ),
+                )
+            except RevisionConflictError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            return AnnotationDeleteResponse(
+                image_id=image_id,
+                annotation_id=annotation_id,
                 revision=saved.revision,
             )
 

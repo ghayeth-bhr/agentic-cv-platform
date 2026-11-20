@@ -10,7 +10,7 @@ from uuid import UUID
 
 from .asset_registry import AssetRegistryBackend, SourceRecord
 from .semantic_search import ImageRecord, SemanticSearchService
-from .video_frames import FrameExtractionConfig, extract_frames
+from .video_frames import extract_frames_cached, frames_dir_for
 
 
 def path_from_file_uri(uri: str) -> Path | None:
@@ -79,8 +79,9 @@ class AssetSemanticIndexer:
         if media_type.startswith("image/"):
             return [ImageRecord(record_id=f"{asset_key}:{source_key}:image", asset_id=asset_key, image_path=path)]
         if media_type.startswith("video/"):
-            frames_dir = self.data_dir / "derived" / "semantic-frames" / asset_key / source_key
-            frames = extract_frames(path, frames_dir, config=FrameExtractionConfig(frame_stride=30, max_frames=120))
+            frames = extract_frames_cached(
+                path, frames_dir_for(self.data_dir, asset_key, source_key)
+            )
             return [
                 ImageRecord(
                     record_id=f"{asset_key}:{source_key}:frame:{frame.frame_index}",

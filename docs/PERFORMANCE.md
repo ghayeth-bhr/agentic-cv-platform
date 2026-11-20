@@ -398,6 +398,58 @@ a wrong response key; both were harness-script errors and were corrected before
 the passing run. Full output is in
 [`docs/branches/validator-reliability-gpu.md`](branches/validator-reliability-gpu.md).
 
+## Phase 2a calibration engine (real models, 2026-11-20)
+
+Same machine (RTX 4050 Laptop 6 GB), `qwen3-vl:4b` on Ollama 0.31.2 for
+planning and validation, `facebook/sam3`, SigLIP2 indexing. Input: 9 real
+720x1280 wildlife frames in two assets; 6 contain elephants, 3 do not (dik-dik,
+buffalo, gerenuk). Task from chat: segmentation of `elephants` and `tusks`,
+YOLO export. Harness: `scripts/real_agent_journey.py`.
+
+| Run | Calibration change | Elephants | Tusks | Calibration time | Result |
+|---|---|---|---|---|---|
+| 1 (Phase 1) | ladder, empty result = rejection | 2/5 at every threshold | 2/5 | 459 s | `needs_attention`, no dataset |
+| 2 | one SAM 3 pass/sample, best threshold, VLM presence check, target-aware samples | 3/5 → 0.45 | 4/5 → 0.45 | 1101 s | dataset built |
+| 3 | + presence decided by the boolean (model answered "absent" with low confidence), 768 px VLM images, SigLIP unloaded | **5/5** → 0.45 | **5/5** → 0.45 | 995 s | dataset built |
+| 4 | + **phased rounds: SAM 3 never resident with the VLM** | **5/5** → 0.45 | **5/5** → 0.45 | **142 s** | dataset built |
+
+Run 4 detail: 5 SAM 3 forward passes per class (previously 25), 20 VLM
+verdicts in 90 s (~4.5 s each; ~4 s measured for a VLM call on an idle GPU vs
+~45 s while SAM 3 was co-resident and Windows paged GPU memory), labeling +
+build + export 27 s (includes reloading SAM 3), whole-GPU peak 5,868 MB.
+Output: 9 images, 26 instances (8 elephants, 18 tusks), YOLO segmentation with
+`nc: 2`, train/val/test folders. Correct negatives were recorded as such, e.g.
+"No elephants in this image, so returning no masks is correct. The image shows
+a buffalo...".
+
+These are single local runs on one small set, not benchmarks; they show the
+order of magnitude and the failure modes, not label quality.
+
+## Phase 2b background calibration + live board (real models, 2026-11-20)
+
+Same machine and 9 frames, driven through the real browser UI
+(`scripts/real_ui_calibration_board.py`): upload → SigLIP index (30 s) → one
+chat message "Segment the elephants and their tusks, export YOLO" (planned at
+60 s) → **Confirm returned immediately** (status `calibrating`) → the board
+showed SAM 3 masks on every sample before the first VLM verdict and filled
+the threshold chips as verdicts arrived → calibrated `elephant` 0.45 (5/5) and
+`tusk` 0.60 (5/5) → labeling, build, YOLO-seg export ready at 211 s total
+(~150 s from confirm). 21 instances. The VLM recorded "no target" for the
+gerenuk and buffalo (elephant) and for frames without visible tusks.
+
+## Phase 3 labeling throughput + monitor (real models, 2026-11-20)
+
+`predict_many` (one SAM 3 vision pass per image, all class prompts on it),
+warm model, 9 real 720x1280 frames, prompts `elephant` + `tusk` at 0.45:
+**1.112 s -> 0.633 s per image**, identical detection counts on every frame,
+peak 2,359 MB allocated.
+
+End-to-end (`scripts/real_agent_journey.py`, production wiring): calibration
+142 s (unchanged, 5/5 and 5/5), label + build + export **24.2 s** (27.2 s in
+Phase 2a; the ~14 s SAM 3 reload after phased calibration dominates 9 images),
+26 instances (identical), monitor health at the end: 9/9 processed, 2 images
+without detections, mean scores 0.88 (elephants) / 0.68 (tusks), no alert.
+
 ## How to reproduce
 
 The two harnesses are not collected by pytest; they load real model weights and

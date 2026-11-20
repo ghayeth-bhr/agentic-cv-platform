@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from uuid import UUID
 
 from PIL import Image
 
+from .annotation_sets import job_set_id, live_in_set
 from .annotation_store import AnnotationRevisionBackend
 from .batch_labeling import LabelImage
-from .dataset import DatasetCategory, DatasetImage, DatasetVersion
+from .dataset import DatasetImage, DatasetVersion
 from .dataset_store import DatasetVersionBackend, DatasetVersionRecord
 from .job_store import JobStoreBackend
 from .label_images import LabelImageResolver
+from .label_workflow import label_plan
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -67,22 +69,21 @@ class DatasetBuilder:
                 f"label job must be succeeded before building a dataset; current status is {job.status}"
             )
 
-        payload = job.payload
-        asset_id = str(payload["asset_id"])
-        category_id = int(payload["category_id"])
-        category = DatasetCategory(
-            category_id=category_id,
-            name=str(payload["category_name"]),
-        )
-        label_images = self.images.resolve(tenant_id=tenant_id, asset_id=asset_id)
+        plan = label_plan(job.payload)
+        categories = plan.categories
+        label_images = self.images.resolve_many(tenant_id=tenant_id, asset_ids=plan.asset_ids)
+        set_id = job_set_id(job_id)
         revisions = self.annotations.list_latest(
             tenant_id=tenant_id,
             image_ids=[image.image_id for image in label_images],
         )
         annotations = tuple(
             revision.annotation
-            for revision in revisions
-            if revision.annotation.category_id == category_id
+            for revision in live_in_set(
+                revisions,
+                set_id,
+                category_ids={category.category_id for category in categories},
+            )
         )
 
         dataset_images: list[DatasetImage] = []
@@ -101,9 +102,11 @@ class DatasetBuilder:
 
         dataset = DatasetVersion(
             images=tuple(dataset_images),
-            categories=(category,),
+            categories=categories,
             annotations=annotations,
-        )
+            annotation_set=set_id,
+            source_asset_ids=plan.asset_ids,
+        ).with_splits()
         record = self.versions.create(
             tenant_id=tenant_id,
             name=name.strip() or f"Label run {job_id}",
@@ -128,8 +131,12 @@ class DatasetBuilder:
         version_id: UUID,
         name: str = "",
         idempotency_key: str,
+        image_ids: set[str] | None = None,
     ) -> DatasetBuildResult:
-        """Create a new immutable version from one version's latest revisions."""
+        """Create a new immutable version from one version's latest revisions.
+
+        ``image_ids`` keeps only those images (e.g. the approved ones).
+        """
         if not idempotency_key.strip():
             raise ValueError("idempotency_key must not be empty")
         previous = self.versions.get(tenant_id=tenant_id, version_id=version_id)
@@ -138,16 +145,19 @@ class DatasetBuilder:
             tenant_id=tenant_id,
             image_ids=[image.image_id for image in previous.dataset.images],
         )
+        set_id = previous.dataset.annotation_set
         annotations = tuple(
             revision.annotation
-            for revision in revisions
-            if revision.annotation.category_id in category_ids
+            for revision in live_in_set(revisions, set_id, category_ids=category_ids)
         )
-        dataset = DatasetVersion(
-            images=previous.dataset.images,
-            categories=previous.dataset.categories,
-            annotations=annotations,
-        )
+        images = previous.dataset.images
+        if image_ids is not None:
+            images = tuple(image for image in images if image.image_id in image_ids)
+            if not images:
+                raise ValueError("no images left to build: approve at least one image")
+            kept = {image.image_id for image in images}
+            annotations = tuple(item for item in annotations if item.image_id in kept)
+        dataset = replace(previous.dataset, images=images, annotations=annotations).with_splits()
         record = self.versions.create(
             tenant_id=tenant_id,
             name=name.strip() or f"{previous.name} — refined",

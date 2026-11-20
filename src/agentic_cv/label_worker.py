@@ -9,10 +9,9 @@ from dataclasses import dataclass
 from threading import Event
 from uuid import UUID
 
-from .dataset import DatasetCategory
 from .job_store import JobStoreBackend
 from .label_images import LabelImageResolver
-from .label_workflow import DurableLabelWorkflow
+from .label_workflow import DurableLabelWorkflow, JobPaused, label_plan
 
 logger = logging.getLogger("agentic_cv.worker")
 
@@ -49,22 +48,29 @@ class LabelWorker:
             )
             try:
                 payload = job.payload
+                plan = label_plan(payload)
+                first = plan.classes[0]
                 self.workflow.execute(
                     job.job_id,
-                    image_loader=lambda job=job: self.images.resolve(
+                    image_loader=lambda job=job, plan=plan: self.images.resolve_many(
                         tenant_id=job.tenant_id,
-                        asset_id=str(job.payload["asset_id"]),
+                        asset_ids=plan.asset_ids,
                     ),
                     tenant_id=job.tenant_id,
-                    prompt=str(payload["prompt"]),
-                    threshold=float(payload["threshold"]),
+                    prompt=first.prompt,
+                    threshold=first.threshold,
                     task=payload["task"],
-                    category=DatasetCategory(
-                        category_id=int(payload["category_id"]),
-                        name=str(payload["category_name"]),
-                    ),
+                    category=first.category,
+                    classes=list(plan.classes),
                     worker_id=worker_id,
                 )
+            except JobPaused as exc:
+                # Not a failure: the monitor paused the run to ask the user.
+                logger.info(
+                    "label job paused by the health monitor",
+                    extra={"worker_id": worker_id, "job_id": str(job.job_id), "alert": exc.alert.get("code")},
+                )
+                continue
             except Exception:
                 duration_ms = round((time.perf_counter() - start) * 1000, 3)
                 status = "unknown"

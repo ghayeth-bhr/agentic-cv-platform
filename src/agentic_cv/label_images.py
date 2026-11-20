@@ -8,7 +8,7 @@ from uuid import UUID
 from .asset_registry import AssetRegistryBackend
 from .batch_labeling import LabelImage
 from .semantic_indexing import path_from_file_uri
-from .video_frames import FrameExtractionConfig, extract_frames
+from .video_frames import extract_frames_cached, frames_dir_for
 
 
 _IMAGE_EXTENSIONS = {
@@ -77,13 +77,8 @@ class LabelImageResolver:
                 )
                 continue
             if media_type.startswith("video/"):
-                frames_dir = (
-                    self.data_dir / "derived" / "label-frames" / asset_key / source_key
-                )
-                frames = extract_frames(
-                    path,
-                    frames_dir,
-                    config=FrameExtractionConfig(frame_stride=30, max_frames=120),
+                frames = extract_frames_cached(
+                    path, frames_dir_for(self.data_dir, asset_key, source_key)
                 )
                 if not frames:
                     raise ValueError(f"video source produced no frames: {path}")
@@ -103,3 +98,44 @@ class LabelImageResolver:
         if not images:
             raise ValueError("asset has no indexable image or video sources")
         return images
+
+    def resolve_many(self, *, tenant_id: UUID, asset_ids: list[str] | tuple[str, ...]) -> list[LabelImage]:
+        """Images of several assets in order, without duplicates."""
+
+        seen: set[str] = set()
+        images: list[LabelImage] = []
+        for asset_id in asset_ids:
+            for image in self.resolve(tenant_id=tenant_id, asset_id=str(asset_id)):
+                if image.image_id not in seen:
+                    seen.add(image.image_id)
+                    images.append(image)
+        return images
+
+
+def image_display_names(
+    registry: AssetRegistryBackend, *, tenant_id: UUID, image_ids: list[str] | tuple[str, ...]
+) -> dict[str, str]:
+    """Readable names for label image ids: the uploaded file name, plus the frame.
+
+    Ids are ``<asset>:<source>:image`` or ``<asset>:<source>:frame:<n>``.
+    Unknown ids are left out (callers fall back to the stored file name).
+    """
+
+    sources: dict[str, str] = {}
+    try:
+        for asset in registry.list_assets(tenant_id=tenant_id):
+            for source in asset.sources:
+                sources[str(source.source_id)] = source.filename
+    except Exception:
+        return {}
+    names: dict[str, str] = {}
+    for image_id in image_ids:
+        parts = image_id.split(":")
+        if len(parts) < 3 or parts[1] not in sources:
+            continue
+        filename = sources[parts[1]]
+        if parts[2] == "frame" and len(parts) >= 4:
+            names[image_id] = f"{filename} · frame {parts[3]}"
+        else:
+            names[image_id] = filename
+    return names

@@ -42,6 +42,7 @@ def _annotation_dict(annotation: Annotation) -> dict:
         "bbox": list(annotation.bbox),
         "segmentation": [list(polygon) for polygon in annotation.segmentation],
         "score": annotation.score,
+        **({"deleted": True} if annotation.deleted else {}),
     }
 
 
@@ -196,6 +197,7 @@ class PostgresAnnotationRevisionStore:
             bbox=tuple(value["bbox"]),
             segmentation=tuple(tuple(polygon) for polygon in value["segmentation"]),
             score=value["score"],
+            deleted=bool(value.get("deleted", False)),
         )
         return AnnotationRevision(
             revision_id=UUID(str(row["revision_id"])),

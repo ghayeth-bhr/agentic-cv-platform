@@ -45,6 +45,10 @@ class OllamaVlmClient:
     temperature: float = 0.0
     keep_alive: str = "10m"
     num_predict: int = 256
+    # Longest side of the image sent to the model. Qwen3-VL's cost grows with
+    # pixel count: full 720x1280 overlays took ~45-50 s per verdict on a 6 GB
+    # GPU. 0 disables resizing.
+    max_side: int = 768
 
     def __post_init__(self) -> None:
         if not self.model.strip():
@@ -61,7 +65,7 @@ class OllamaVlmClient:
             raise ValueError("num_predict must be at least 1")
 
     def judge(self, *, overlay_uri: str, prompt: str) -> dict[str, Any]:
-        image_bytes = _read_overlay(overlay_uri)
+        image_bytes = _downscale(_read_overlay(overlay_uri), self.max_side)
         payload = {
             "model": self.model,
             "messages": [
@@ -159,3 +163,28 @@ def _read_overlay(overlay_uri: str) -> bytes:
         return path.read_bytes()
     except OSError as exc:
         raise ValueError(f"could not read overlay image: {path}") from exc
+
+
+def _downscale(image_bytes: bytes, max_side: int) -> bytes:
+    """Shrink the image so its longest side is at most ``max_side`` (JPEG q90)."""
+
+    if max_side <= 0:
+        return image_bytes
+    import io
+
+    from PIL import Image
+
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            if max(image.size) <= max_side:
+                return image_bytes
+            scale = max_side / max(image.size)
+            resized = image.convert("RGB").resize(
+                (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
+                Image.Resampling.LANCZOS,
+            )
+    except OSError:
+        return image_bytes
+    buffer = io.BytesIO()
+    resized.save(buffer, format="JPEG", quality=90)
+    return buffer.getvalue()

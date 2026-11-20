@@ -100,7 +100,7 @@ def test_agent_service_reads_vectors_from_the_index_before_sampling():
     }
 
     class Images:
-        def resolve(self, *, tenant_id, asset_id):
+        def resolve_many(self, *, tenant_id, asset_ids):
             return images
 
     class Vectors:
@@ -108,11 +108,11 @@ def test_agent_service_reads_vectors_from_the_index_before_sampling():
             return embeddings.get(record_id)
 
     service = object.__new__(AgentService)
-    service.dependencies = SimpleNamespace(images=Images(), vectors=Vectors())
+    service.dependencies = SimpleNamespace(images=Images(), vectors=Vectors(), text_embedder=None)
 
     selected = service._sample_images(
         tenant_id=UUID("00000000-0000-0000-0000-000000000001"),
-        asset_id=UUID("00000000-0000-0000-0000-000000000002"),
+        asset_ids=("00000000-0000-0000-0000-000000000002",),
         sample_size=3,
     )
 
@@ -121,3 +121,38 @@ def test_agent_service_reads_vectors_from_the_index_before_sampling():
         "frame-4",
         "frame-5",
     ]
+
+
+def test_target_aware_sampling_prefers_images_that_match_the_class_text():
+    from agentic_cv.calibration_samples import select_samples_for_target
+
+    images = _images(9)
+    # Six "elephant" frames near [1, 0]; three outliers (antelope, buffalo, gerenuk).
+    embeddings = {
+        "frame-0": [0.0, 1.0],
+        "frame-1": [1.0, 0.05],
+        "frame-2": [1.0, 0.1],
+        "frame-3": [1.0, 0.0],
+        "frame-4": [-0.2, 1.0],
+        "frame-5": [0.1, -1.0],
+        "frame-6": [1.0, -0.05],
+        "frame-7": [1.0, 0.02],
+        "frame-8": [0.98, 0.0],
+    }
+    selected = select_samples_for_target(
+        images, count=5, embeddings=embeddings, text_embedding=[1.0, 0.0]
+    )
+    ids = [image.image_id for image in selected]
+    outliers = {"frame-0", "frame-4", "frame-5"}
+    assert len(ids) == 5
+    assert len([image for image in ids if image not in outliers]) >= 3  # ceil(5 * 0.6)
+    assert len([image for image in ids if image in outliers]) >= 1  # still tests negatives
+
+    # Pure diversity (the old behaviour) picks mostly outliers on the same data.
+    diverse = select_calibration_images(images, count=5, embeddings=embeddings)
+    assert len([image for image in diverse if image.image_id in outliers]) == 3
+
+    # Without a text vector the old selector is used.
+    assert select_samples_for_target(
+        images, count=5, embeddings=embeddings, text_embedding=None
+    ) == diverse
