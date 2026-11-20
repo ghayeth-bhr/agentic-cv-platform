@@ -16,7 +16,7 @@ Everything runs locally on one machine with an NVIDIA GPU: models, data, and the
 
 - [What the app does](#what-the-app-does)
 - [Architecture](#architecture)
-  - [Deployment view](#deployment-view)
+  - [App service architecture](#app-service-architecture)
   - [Services](#services)
   - [The agent workflow](#the-agent-workflow)
   - [Session lifecycle](#session-lifecycle)
@@ -49,61 +49,48 @@ flowchart LR
 
 ## Architecture
 
-### Deployment view
+### App service architecture
 
 Today the app is a **modular monolith**: one Python process (`agentic-cv serve`) serves the UI and the API and runs the background workers and the GPU models. Two things live outside it: the **Ollama** server for the vision-language model, and the **data directory** on disk. The export worker can optionally run as a second process on the same data volume.
 
 ```mermaid
 flowchart TB
-    user(["Browser<br/>http://host:8000"])
+    user(["User (browser)"]) --> ui["Web UI"]
+    ui --> api["API layer (FastAPI)<br/>HTTP, WebSocket, SSE"]
 
-    subgraph host["GPU host (one machine)"]
-        direction TB
-        subgraph app["agentic-cv serve  :8000"]
-            direction TB
-            ui["Web UI<br/>/ and /static"]
-            api["HTTP API, WebSocket, SSE<br/>/v1/*"]
-            subgraph workers["In-process background workers"]
-                lw["Label worker<br/>+ health monitor"]
-                iw["Index worker"]
-                ew["Export worker"]
-                aw["Agent worker"]
-                cx["Calibration executor<br/>(one run at a time)"]
-            end
-            subgraph gpu["Model manager (shared GPU lock)"]
-                siglip["SigLIP 2<br/>search embeddings"]
-                sam3["SAM 3<br/>text-prompted masks"]
-                tracker["SAM 3 tracker<br/>click refinement"]
-            end
-        end
-        ollama["Ollama  :11434<br/>qwen3-vl:4b<br/>planner, prompts, VLM judge"]
-        xw["agentic-cv worker<br/>(optional, export only)"]
-        data[("Data directory<br/>SQLite metadata, media,<br/>frames, datasets, exports")]
+    subgraph services["Application services (agentic-cv serve)"]
+        assets["Assets and uploads"]
+        search["Semantic search"]
+        agent["Agent orchestrator<br/>dialogue and prompt agent"]
+        cal["Calibration"]
+        label["Labeling and health monitor"]
+        review["Datasets and review"]
+        refine["Click refinement"]
+        export["Exports<br/>COCO, YOLO"]
     end
 
-    hf[("Hugging Face Hub<br/>facebook/sam3 (gated),<br/>SigLIP 2: first download only")]
-
-    subgraph optional["Optional / experimental integrations"]
-        pg[("PostgreSQL + pgvector")]
-        s3[("S3 / MinIO")]
-        mq[["RabbitMQ"]]
-        oidc["OIDC identity provider"]
+    subgraph platform["Shared platform services"]
+        jobs["Job queue and workers"]
+        models["Model manager (GPU)"]
+        auth["Auth, metrics, event outbox"]
     end
 
-    user -->|HTTP, WebSocket, SSE| ui
-    user --> api
-    api --> workers
-    workers --> gpu
-    api --> gpu
-    workers -->|HTTP JSON| ollama
-    api -->|HTTP JSON| ollama
-    app --> data
-    xw --> data
-    gpu -. downloads weights .-> hf
-    app -. AGENTIC_CV_POSTGRES_DSN .-> pg
-    app -. AGENTIC_CV_S3_BUCKET .-> s3
-    app -. AGENTIC_CV_RABBITMQ_HOST .-> mq
-    api -. OIDC settings .-> oidc
+    subgraph ai["AI models (local)"]
+        siglip["SigLIP 2"]
+        sam3["SAM 3"]
+        tracker["SAM 3 tracker"]
+        ollama["Ollama qwen3-vl"]
+    end
+
+    store[("Data directory<br/>SQLite, media, datasets, exports")]
+
+    api --> assets & search & agent & review & refine & export
+    agent --> cal --> label --> review
+    agent --> export
+    services --> platform
+    models --> siglip & sam3 & tracker
+    agent & cal --> ollama
+    services --> store
 ```
 
 What this means for operations:
