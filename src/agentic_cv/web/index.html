@@ -227,6 +227,19 @@
 
               <div id="agent-spec" class="agent-spec"></div>
               <ol id="agent-progress" class="agent-progress"></ol>
+              <section id="agent-board" class="agent-board" hidden aria-labelledby="agent-board-title">
+                <div class="agent-board-head">
+                  <div>
+                    <h3 id="agent-board-title" class="card-title">Calibration board</h3>
+                    <p id="agent-board-summary" class="card-desc">SAM 3 results on the sample images. Move a slider to see each threshold.</p>
+                  </div>
+                  <span id="agent-board-badge" class="live-badge" hidden>Live</span>
+                </div>
+                <div id="agent-board-classes" class="agent-board-classes"></div>
+                <div class="actions" id="agent-board-actions" hidden>
+                  <button type="button" class="btn btn-primary" id="agent-board-apply">Label with these thresholds</button>
+                </div>
+              </section>
               <div id="agent-calibration" class="agent-calibration" hidden></div>
               <div id="agent-run-error" class="agent-error" hidden></div>
 

@@ -43,6 +43,7 @@ This repository now contains a working local product path: **Assets** for upload
 | Conversational agent: asks for missing details, several assets and classes per run, SAM 3 prompt agent, COCO/YOLO chosen in chat | Added in Phase 1 ([`docs/branches/agent-dialogue.md`](docs/branches/agent-dialogue.md)) |
 | Select individual search results (checkboxes, min-score slider) and save only the selection as a named asset; tenant-scoped search | Added in [`docs/branches/search-selection.md`](docs/branches/search-selection.md) |
 | Calibration engine: one SAM 3 pass per sample, best threshold, correct negatives via VLM presence check, target-aware samples, prompt alternatives, SAM 3/VLM never co-resident (real run: 459 s failed → 142 s calibrated) | Added in Phase 2a ([`docs/branches/calibration-engine.md`](docs/branches/calibration-engine.md)) |
+| Background calibration (confirm returns at once, resumes after restarts) and a live calibration board: sample tiles per class, verdict chips, threshold slider re-drawing SAM 3 masks in the browser, label with your thresholds | Added in Phase 2b ([`docs/branches/calibration-live.md`](docs/branches/calibration-live.md)) |
 
 The original root README was a 950-line concatenation of 23 branch READMEs. Those are preserved verbatim in [`docs/branches/`](docs/branches/README.md).
 
@@ -212,7 +213,9 @@ Heavy dependencies are lazy or injectable. Default `pytest` runs with fakes and 
 | POST/GET | `/v1/agent/sessions` | start an agent conversation (one or more `asset_ids`) / list sessions |
 | POST | `/v1/agent/sessions/{id}/messages` | answer the agent or change the plan before confirming |
 | GET | `/v1/agent/sessions/{id}` | read a durable agent session |
-| POST | `/v1/agent/sessions/{id}/confirm` | calibrate (or use a fixed threshold) and start whole-asset labeling |
+| POST | `/v1/agent/sessions/{id}/confirm` | start calibration + labeling in the background (`wait: true` runs inline; `threshold` or `class_thresholds` skip calibration) |
+| GET | `/v1/agent/sessions/{id}/calibration-preview` | raw SAM 3 predictions per class and sample, for the threshold slider |
+| GET | `/v1/agent/sessions/{id}/calibration-samples/{image_id}/image` | a calibration sample image |
 | POST | `/v1/agent/sessions/{id}/cancel` | cancel the active calibration/labeling/export run |
 | GET | `/v1/agent/sessions/{id}/calibration-overlays/{overlay_id}` | authenticated calibration sample overlay PNG |
 | POST | `/v1/assets/{id}/predict` | prompted SAM 3 on one source |

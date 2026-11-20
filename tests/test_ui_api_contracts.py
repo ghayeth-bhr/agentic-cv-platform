@@ -37,6 +37,8 @@ UI_ROUTES = {
     "/v1/agent/sessions/{session_id}": {"get"},
     "/v1/agent/sessions/{session_id}/confirm": {"post"},
     "/v1/agent/sessions/{session_id}/messages": {"post"},
+    "/v1/agent/sessions/{session_id}/calibration-preview": {"get"},
+    "/v1/agent/sessions/{session_id}/calibration-samples/{image_id}/image": {"get"},
     "/v1/agent/sessions/{session_id}/cancel": {"post"},
     "/v1/agent/sessions/{session_id}/calibration-overlays/{overlay_id}": {"get"},
     "/v1/datasets": {"get"},
@@ -165,6 +167,7 @@ def test_ui_selector_and_navigation_contract():
         "gallery-refine", "agent-live", "agent-live-grid", "agent-live-badge",
         "agent-live-progress-bar", "agent-live-count", "agent-open-gallery",
         "agent-assets", "agent-quick-replies", "agent-message", "agent-plan",
+        "agent-board", "agent-board-classes", "agent-board-apply", "agent-board-actions",
     ):
         assert f'id="{element_id}"' in html, f"missing DOM id: {element_id}"
     assert "tenant-id" not in html

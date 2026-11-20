@@ -425,6 +425,18 @@ a buffalo...".
 These are single local runs on one small set, not benchmarks; they show the
 order of magnitude and the failure modes, not label quality.
 
+## Phase 2b background calibration + live board (real models, 2026-11-20)
+
+Same machine and 9 frames, driven through the real browser UI
+(`scripts/real_ui_calibration_board.py`): upload → SigLIP index (30 s) → one
+chat message "Segment the elephants and their tusks, export YOLO" (planned at
+60 s) → **Confirm returned immediately** (status `calibrating`) → the board
+showed SAM 3 masks on every sample before the first VLM verdict and filled
+the threshold chips as verdicts arrived → calibrated `elephant` 0.45 (5/5) and
+`tusk` 0.60 (5/5) → labeling, build, YOLO-seg export ready at 211 s total
+(~150 s from confirm). 21 instances. The VLM recorded "no target" for the
+gerenuk and buffalo (elephant) and for frames without visible tusks.
+
 ## How to reproduce
 
 The two harnesses are not collected by pytest; they load real model weights and

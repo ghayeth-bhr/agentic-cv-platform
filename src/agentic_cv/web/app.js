@@ -45,6 +45,7 @@
     agentPollToken: 0,
     agentOverlayUrls: [],
     agentCalibrationKey: "",
+    agentBoard: { sessionId: null, preview: null, fetchedAt: 0, fetching: false, images: new Map(), sliders: {}, touched: new Set() },
     review: {
       open: false, versionId: null, dataset: null, panel: null, images: [],
       index: -1, image: null, objectUrl: null, socket: null, snapshot: null,
@@ -1266,7 +1267,9 @@
     state.agentCalibrationKey = nextKey;
     revokeAgentOverlays();
     box.innerHTML = "";
-    if (!calibration) {
+    // While calibration runs, the calibration board shows live progress;
+    // this verdict log only describes a finished run.
+    if (!calibration || calibration.status === "running") {
       box.hidden = true;
       return;
     }
@@ -1584,6 +1587,7 @@
     renderAgentSpec(session);
     renderAgentProgress(session);
     renderAgentCalibration(session);
+    syncAgentBoard(session);
     syncAgentLiveView(session);
 
     const classNames = (session.classes || []).map((item) => item.name).join(", ");
@@ -1786,31 +1790,302 @@
     await sendAgentMessage(null);
   }
 
-  async function confirmAgentTask(threshold) {
+  // Calibration board: SAM 3's raw predictions per sample, re-thresholded live.
+  const BOARD_COLORS = [[255, 64, 64], [64, 160, 255], [64, 210, 120], [245, 180, 55]];
+  const BOARD_STATES = new Set(["calibrating", "needs_attention", "labeling", "exporting", "complete"]);
+
+  function boardAttempts(session) {
+    // Attempts per class name from live progress or the final payload.
+    const calibration = (session && session.calibration) || {};
+    const byClass = {};
+    if (calibration.status === "running") {
+      (calibration.progress || []).forEach((attempt) => {
+        (byClass[attempt.name] = byClass[attempt.name] || []).push(attempt);
+      });
+      return byClass;
+    }
+    const source = calibration.status === "manual" && calibration.previous ? calibration.previous : calibration;
+    (source.classes || []).forEach((item) => {
+      byClass[item.name] = (item.attempts || []).map((attempt) => ({ ...attempt, prompt: item.prompt, chosen: item.threshold }));
+    });
+    return byClass;
+  }
+
+  function boardDefault(session, name, attempts) {
+    const calibration = (session && session.calibration) || {};
+    if (calibration.class_thresholds && calibration.class_thresholds[name] != null) return Number(calibration.class_thresholds[name]);
+    const chosen = attempts.find((attempt) => attempt.chosen != null);
+    if (chosen) return Number(chosen.chosen);
+    if (attempts.length) {
+      const best = attempts.reduce((a, b) => (Number(b.agreement) > Number(a.agreement) ? b : a));
+      return Number(best.threshold);
+    }
+    return 0.5;
+  }
+
+  async function boardImage(session, imageId) {
+    const board = state.agentBoard;
+    if (board.images.has(imageId)) return board.images.get(imageId);
+    const promise = (async () => {
+      const path = `/v1/agent/sessions/${encodeURIComponent(session.session_id)}/calibration-samples/${encodeURIComponent(imageId)}/image`;
+      const response = await fetch(path, { headers: tenantHeaders(false) });
+      if (!response.ok) throw new Error(`Sample unavailable (${response.status})`);
+      const url = URL.createObjectURL(await response.blob());
+      state.agentOverlayUrls.push(url);
+      const img = new Image();
+      img.src = url;
+      await img.decode();
+      return img;
+    })();
+    board.images.set(imageId, promise);
+    return promise;
+  }
+
+  function drawBoardTile(canvas, img, sample, threshold, color) {
+    const width = canvas.width;
+    const height = canvas.height;
+    const scaleX = width / sample.width;
+    const scaleY = height / sample.height;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, width, height);
+    if (img) ctx.drawImage(img, 0, 0, width, height);
+    const kept = sample.predictions.filter((prediction) => prediction.score >= threshold);
+    const [r, g, b] = color;
+    kept.forEach((prediction) => {
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = `rgb(${r}, ${g}, ${b})`;
+      ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.35)`;
+      if (prediction.polygons && prediction.polygons.length) {
+        prediction.polygons.forEach((polygon) => {
+          ctx.beginPath();
+          for (let i = 0; i + 1 < polygon.length; i += 2) {
+            const x = polygon[i] * scaleX;
+            const y = polygon[i + 1] * scaleY;
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          }
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+        });
+      } else {
+        const [x1, y1, x2, y2] = prediction.box;
+        ctx.fillRect(x1 * scaleX, y1 * scaleY, (x2 - x1) * scaleX, (y2 - y1) * scaleY);
+        ctx.strokeRect(x1 * scaleX, y1 * scaleY, (x2 - x1) * scaleX, (y2 - y1) * scaleY);
+      }
+      const [bx, by] = prediction.box;
+      ctx.font = "11px IBM Plex Mono, monospace";
+      ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+      ctx.fillText(prediction.score.toFixed(2), Math.max(2, bx * scaleX + 2), Math.max(11, by * scaleY - 3));
+    });
+    return kept.length;
+  }
+
+  function verdictAt(attempts, threshold, imageId) {
+    const attempt = attempts.find((item) => Math.abs(Number(item.threshold) - threshold) < 0.0005);
+    if (!attempt) return null;
+    return (attempt.verdicts || []).find((verdict) => verdict.image_id === imageId) || null;
+  }
+
+  function renderBoardClass(container, session, entry, attempts, index) {
+    const board = state.agentBoard;
+    const color = BOARD_COLORS[index % BOARD_COLORS.length];
+    const panel = node("div", "agent-board-class");
+    panel.dataset.className = entry.name;
+    if (!(entry.name in board.sliders) || !board.touched.has(entry.name)) {
+      board.sliders[entry.name] = boardDefault(session, entry.name, attempts);
+    }
+    const head = node("div", "agent-board-class-head");
+    const swatch = node("span", "agent-board-swatch");
+    swatch.style.background = `rgb(${color.join(",")})`;
+    head.append(swatch, node("strong", null, entry.name), node("span", "agent-board-prompt", `SAM 3: “${entry.prompt}”`));
+    panel.appendChild(head);
+
+    const controls = node("div", "agent-board-controls");
+    const slider = document.createElement("input");
+    slider.type = "range";
+    slider.min = "0.05";
+    slider.max = "0.95";
+    slider.step = "0.01";
+    slider.value = String(board.sliders[entry.name]);
+    slider.className = "agent-board-slider";
+    slider.setAttribute("aria-label", `Threshold for ${entry.name}`);
+    const value = node("output", "agent-board-value", Number(slider.value).toFixed(2));
+    controls.append(node("span", null, "Threshold"), slider, value);
+    panel.appendChild(controls);
+
+    const chips = node("div", "agent-board-chips");
+    attempts.forEach((attempt) => {
+      const chip = node("button", "chip agent-board-chip", `${Number(attempt.threshold).toFixed(2)} · ${attempt.accepted_count}/${attempt.sample_count}`);
+      chip.type = "button";
+      if (attempt.chosen != null && Number(attempt.chosen) === Number(attempt.threshold)) chip.dataset.chosen = "true";
+      chip.title = "Show this threshold";
+      chip.addEventListener("click", () => {
+        slider.value = String(attempt.threshold);
+        slider.dispatchEvent(new Event("input"));
+      });
+      chips.appendChild(chip);
+    });
+    if (!attempts.length) chips.appendChild(node("span", "agent-board-waiting", session.status === "calibrating" ? "Waiting for the vision check…" : "No verdicts recorded"));
+    panel.appendChild(chips);
+
+    const grid = node("div", "agent-board-grid");
+    const tiles = entry.samples.map((sample) => {
+      const tile = node("figure", "agent-board-tile");
+      const canvas = document.createElement("canvas");
+      const ratio = sample.height / sample.width;
+      canvas.width = 240;
+      canvas.height = Math.max(60, Math.round(240 * ratio));
+      const caption = node("figcaption", "agent-board-caption");
+      tile.append(canvas, caption);
+      grid.appendChild(tile);
+      return { sample, canvas, caption, tile, img: null };
+    });
+    panel.appendChild(grid);
+    container.appendChild(panel);
+
+    const redraw = () => {
+      const threshold = Number(slider.value);
+      value.textContent = threshold.toFixed(2);
+      tiles.forEach((item) => {
+        const count = drawBoardTile(item.canvas, item.img, item.sample, threshold, color);
+        const verdict = verdictAt(attempts, threshold, item.sample.image_id);
+        item.caption.innerHTML = "";
+        item.caption.appendChild(node("span", null, `${count} mask${count === 1 ? "" : "s"}`));
+        delete item.tile.dataset.verdict;
+        if (verdict) {
+          const label = verdict.accepted
+            ? (verdict.prediction_count === 0 ? "✓ no target" : "✓ accepted")
+            : (verdict.prediction_count === 0 && verdict.target_present ? "✗ missed" : "✗ rejected");
+          item.tile.dataset.verdict = verdict.accepted ? "ok" : "bad";
+          const badge = node("span", "agent-board-verdict", label);
+          if (verdict.reasoning) badge.title = verdict.reasoning;
+          item.caption.appendChild(badge);
+        }
+      });
+    };
+    slider.addEventListener("input", () => {
+      board.sliders[entry.name] = Number(slider.value);
+      board.touched.add(entry.name);
+      redraw();
+    });
+    redraw();
+    tiles.forEach((item) => {
+      boardImage(session, item.sample.image_id)
+        .then((img) => { item.img = img; redraw(); })
+        .catch(() => item.caption.appendChild(node("span", "agent-board-verdict", "image unavailable")));
+    });
+  }
+
+  function renderAgentBoard(session) {
+    const board = state.agentBoard;
+    const section = $("agent-board");
+    const container = $("agent-board-classes");
+    if (!section || !container) return;
+    const preview = board.preview;
+    if (!preview || !(preview.classes || []).length) {
+      section.hidden = true;
+      return;
+    }
+    section.hidden = false;
+    const attempts = boardAttempts(session);
+    const live = session.status === "calibrating";
+    if ($("agent-board-badge")) $("agent-board-badge").hidden = !live;
+    if ($("agent-board-summary")) {
+      $("agent-board-summary").textContent = live
+        ? "SAM 3 ran on the sample images; the vision model is judging each threshold."
+        : session.status === "needs_attention"
+          ? "No threshold passed. Inspect the samples, set a threshold per class, and label with it."
+          : "SAM 3 results on the sample images. Move a slider to see each threshold.";
+    }
+    const key = JSON.stringify([preview, attempts, session.status, session.calibration && session.calibration.class_thresholds]);
+    if (key !== board.renderKey) {
+      board.renderKey = key;
+      container.innerHTML = "";
+      (preview.classes || []).forEach((entry, index) => {
+        renderBoardClass(container, session, entry, attempts[entry.name] || [], index);
+      });
+    }
+    const actions = $("agent-board-actions");
+    if (actions) actions.hidden = session.status !== "needs_attention";
+  }
+
+  async function fetchAgentBoard(session) {
+    const board = state.agentBoard;
+    if (board.fetching) return;
+    board.fetching = true;
+    try {
+      const response = await fetch(
+        `/v1/agent/sessions/${encodeURIComponent(session.session_id)}/calibration-preview`,
+        { headers: tenantHeaders(false) },
+      );
+      board.fetchedAt = Date.now();
+      if (response.ok) board.preview = await response.json();
+    } catch {
+      board.fetchedAt = Date.now();
+    } finally {
+      board.fetching = false;
+    }
+    if (state.agentSession && state.agentSession.session_id === session.session_id) renderAgentBoard(state.agentSession);
+  }
+
+  function syncAgentBoard(session) {
+    const board = state.agentBoard;
+    if (!session || board.sessionId !== session.session_id) {
+      Object.assign(board, { sessionId: session ? session.session_id : null, preview: null, fetchedAt: 0, images: new Map(), sliders: {}, touched: new Set(), renderKey: "" });
+    }
+    const section = $("agent-board");
+    if (!session || !BOARD_STATES.has(session.status)) {
+      if (section) section.hidden = true;
+      return;
+    }
+    const calibrating = session.status === "calibrating";
+    const missingClasses = !board.preview || (board.preview.classes || []).length < (session.classes || []).length;
+    const stale = Date.now() - board.fetchedAt > (calibrating ? 1500 : 60000);
+    if ((calibrating && stale) || (!board.preview && stale) || (missingClasses && calibrating)) fetchAgentBoard(session);
+    renderAgentBoard(session);
+  }
+
+  if ($("agent-board-apply")) $("agent-board-apply").addEventListener("click", () => {
     const session = state.agentSession;
     if (!session) return;
-    const button = threshold == null ? $("agent-confirm") : $("agent-retry");
+    const values = {};
+    (session.classes || []).forEach((item) => {
+      const value = state.agentBoard.sliders[item.name];
+      values[item.name] = Number((value == null ? 0.5 : value).toFixed(2));
+    });
+    confirmAgentTask(null, values);
+  });
+
+  async function confirmAgentTask(threshold, classThresholds) {
+    const session = state.agentSession;
+    if (!session) return;
+    const fixed = threshold != null || !!classThresholds;
+    const button = classThresholds ? $("agent-board-apply") : threshold == null ? $("agent-confirm") : $("agent-retry");
     const original = button ? button.textContent : "";
     if (button) {
       button.disabled = true;
-      button.textContent = threshold == null ? "Calibrating…" : "Starting…";
+      button.textContent = fixed ? "Starting…" : "Calibrating…";
     }
     const confirm = $("agent-confirm");
     const retry = $("agent-retry");
     const cancel = $("agent-cancel");
-    if (confirm && threshold == null) confirm.hidden = true;
-    if (retry && threshold != null) retry.hidden = true;
+    if (confirm && !fixed) confirm.hidden = true;
+    if (retry && fixed) retry.hidden = true;
     if (cancel) {
       cancel.hidden = false;
       cancel.disabled = false;
     }
     setStatus(
       "agent-status",
-      threshold == null ? "Calibrating on a sample. This can take a moment…" : "Starting at the fixed threshold…",
+      classThresholds
+        ? "Starting with your thresholds…"
+        : threshold == null
+          ? "Calibrating on the sample images. Watch the calibration board…"
+          : "Starting at the fixed threshold…",
       "busy",
     );
     try {
-      const body = threshold == null ? {} : { threshold };
+      const body = classThresholds ? { class_thresholds: classThresholds } : threshold == null ? {} : { threshold };
       const fresh = await request(`/v1/agent/sessions/${encodeURIComponent(session.session_id)}/confirm`, {
         method: "POST",
         headers: tenantHeaders(true),

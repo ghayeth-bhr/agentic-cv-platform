@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import json
 import queue
 import re
 import threading
@@ -49,7 +50,7 @@ from .agent_dialogue import (
     resolve_defaults,
     rules_prompt,
 )
-from .batch_labeling import LabelClass
+from .batch_labeling import LabelClass, mask_polygons
 from .calibration_samples import select_samples_for_target
 from .dataset import DatasetCategory
 from .prompt_enhancement import OllamaPromptEnhancer, PromptEnhancer
@@ -933,6 +934,16 @@ class AgentService:
                         }
                         self._release_model("sam3")
                         for index, prompt in round_prompts.items():
+                            self._save_preview(
+                                tenant_id,
+                                session_id,
+                                index=index,
+                                name=classes[index].name,
+                                prompt=prompt,
+                                samples=samples_for[index],
+                                raw=raw[index],
+                            )
+                        for index, prompt in round_prompts.items():
                             item = classes[index]
                             result = calibrator.score(
                                 samples_for[index],
@@ -1354,6 +1365,100 @@ class AgentService:
             release(name)
         except Exception:
             logger.warning("could not release model %s", name, exc_info=True)
+
+    def _preview_path(self, tenant_id: UUID, session_id: UUID) -> Path | None:
+        root = self.dependencies.overlay_root
+        if root is None:
+            return None
+        return root / str(tenant_id) / str(session_id) / "preview.json"
+
+    def _save_preview(
+        self,
+        tenant_id: UUID,
+        session_id: UUID,
+        *,
+        index: int,
+        name: str,
+        prompt: str,
+        samples: list[CalibrationSample],
+        raw: list[list[Any]],
+    ) -> None:
+        """Keep SAM 3's raw predictions so the browser can re-threshold them live.
+
+        Each prediction is stored as score, box, and simplified polygons, so a
+        threshold slider redraws instantly without running the model again.
+        """
+
+        path = self._preview_path(tenant_id, session_id)
+        if path is None:
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {"classes": []}
+        except (OSError, ValueError):
+            data = {"classes": []}
+        entry = {
+            "index": index,
+            "name": name,
+            "category_id": index + 1,
+            "prompt": prompt,
+            "samples": [
+                {
+                    "image_id": sample.image_id,
+                    "width": sample.image.width,
+                    "height": sample.image.height,
+                    "predictions": [
+                        {
+                            "score": round(float(prediction.score), 4),
+                            "box": [round(float(value), 1) for value in prediction.box],
+                            "polygons": [
+                                [round(value, 1) for value in polygon]
+                                for polygon in (
+                                    mask_polygons(prediction.mask) if prediction.mask is not None else ()
+                                )
+                            ],
+                        }
+                        for prediction in predictions
+                    ],
+                }
+                for sample, predictions in zip(samples, raw)
+            ],
+        }
+        classes = [item for item in data.get("classes", []) if item.get("index") != index]
+        classes.append(entry)
+        classes.sort(key=lambda item: item.get("index", 0))
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"classes": classes}), encoding="utf-8")
+            tmp.replace(path)
+        except OSError:
+            logger.warning("could not save the calibration preview", exc_info=True)
+
+    def calibration_preview(self, *, tenant_id: UUID, session_id: UUID) -> dict[str, Any]:
+        self.dependencies.store.get(tenant_id=tenant_id, session_id=session_id)
+        path = self._preview_path(tenant_id, session_id)
+        if path is None or not path.is_file():
+            raise KeyError("calibration preview not found")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def calibration_sample_path(
+        self, *, tenant_id: UUID, session_id: UUID, image_id: str
+    ) -> Path:
+        """The source image of one calibration sample (only samples in the preview)."""
+
+        preview = self.calibration_preview(tenant_id=tenant_id, session_id=session_id)
+        known = {
+            sample["image_id"] for item in preview.get("classes", []) for sample in item.get("samples", [])
+        }
+        if image_id not in known:
+            raise KeyError("calibration sample not found")
+        record = self.dependencies.store.get(tenant_id=tenant_id, session_id=session_id)
+        for image in self.dependencies.images.resolve_many(
+            tenant_id=tenant_id, asset_ids=session_draft(record).asset_ids
+        ):
+            if image.image_id == image_id:
+                return image.path
+        raise KeyError("calibration sample not found")
 
     def _save_progress(
         self, tenant_id: UUID, session_id: UUID, attempts: list[dict[str, Any]]
