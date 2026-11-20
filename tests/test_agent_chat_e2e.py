@@ -153,7 +153,7 @@ def test_agent_chat_to_downloadable_coco_dataset(tmp_path):
         confirmed = client.post(
             f"/v1/agent/sessions/{session['session_id']}/confirm",
             headers=headers(),
-            json={},
+            json={"wait": True},
         )
         assert confirmed.status_code == 200, confirmed.text
         assert confirmed.json()["status"] == "labeling"
@@ -193,7 +193,7 @@ def test_agent_reports_calibration_timeout_and_marks_session_failed(tmp_path):
         confirmed = client.post(
             f"/v1/agent/sessions/{session['session_id']}/confirm",
             headers=headers(),
-            json={},
+            json={"wait": True},
         )
         assert confirmed.status_code == 504, confirmed.text
         assert "Calibration timed out" in confirmed.json()["detail"]
@@ -218,7 +218,7 @@ def test_agent_cancel_cancels_queued_label_job(tmp_path):
         confirmed = client.post(
             f"/v1/agent/sessions/{session['session_id']}/confirm",
             headers=headers(),
-            json={"threshold": 0.5},
+            json={"threshold": 0.5, "wait": True},
         )
         assert confirmed.status_code == 200, confirmed.text
         assert confirmed.json()["status"] == "labeling"
@@ -244,7 +244,7 @@ def test_agent_allows_fixed_threshold_when_calibration_does_not_agree(tmp_path):
         calibrated = client.post(
             f"/v1/agent/sessions/{session['session_id']}/confirm",
             headers=headers(),
-            json={},
+            json={"wait": True},
         )
         assert calibrated.status_code == 200, calibrated.text
         body = calibrated.json()
@@ -256,7 +256,7 @@ def test_agent_allows_fixed_threshold_when_calibration_does_not_agree(tmp_path):
         manual = client.post(
             f"/v1/agent/sessions/{session['session_id']}/confirm",
             headers=headers(),
-            json={"threshold": 0.5},
+            json={"threshold": 0.5, "wait": True},
         )
         assert manual.status_code == 200, manual.text
         body = manual.json()
@@ -344,7 +344,7 @@ def test_agent_uses_the_vlm_validator_and_serves_sample_overlays(tmp_path):
         confirmed = client.post(
             f"/v1/agent/sessions/{session['session_id']}/confirm",
             headers=headers(),
-            json={},
+            json={"wait": True},
         )
         assert confirmed.status_code == 200, confirmed.text
         body = confirmed.json()
@@ -398,7 +398,7 @@ def test_agent_labels_the_fallback_validator_in_chat_and_calibration(tmp_path):
         confirmed = client.post(
             f"/v1/agent/sessions/{session['session_id']}/confirm",
             headers=headers(),
-            json={},
+            json={"wait": True},
         )
         assert confirmed.status_code == 200, confirmed.text
         body = confirmed.json()
@@ -447,7 +447,7 @@ def test_agent_surfaces_a_runtime_validator_fallback_in_chat_and_calibration(tmp
         confirmed = client.post(
             f"/v1/agent/sessions/{session['session_id']}/confirm",
             headers=headers(),
-            json={},
+            json={"wait": True},
         )
         assert confirmed.status_code == 200, confirmed.text
         body = confirmed.json()
@@ -484,7 +484,7 @@ def test_timed_out_calibration_does_not_block_the_next_run(tmp_path):
         timed_out = client.post(
             f"/v1/agent/sessions/{first['session_id']}/confirm",
             headers=headers(),
-            json={},
+            json={"wait": True},
         )
         assert timed_out.status_code == 504, timed_out.text
 
@@ -494,7 +494,7 @@ def test_timed_out_calibration_does_not_block_the_next_run(tmp_path):
         confirmed = client.post(
             f"/v1/agent/sessions/{second['session_id']}/confirm",
             headers=headers(),
-            json={},
+            json={"wait": True},
         )
         elapsed = time.monotonic() - started
 
@@ -543,7 +543,7 @@ def test_cancel_during_calibration_stops_the_run(tmp_path):
             response_holder["response"] = client.post(
                 f"/v1/agent/sessions/{session['session_id']}/confirm",
                 headers=headers(),
-                json={},
+                json={"wait": True},
             )
 
         thread = threading.Thread(target=confirm)
@@ -576,7 +576,7 @@ def test_absent_target_ends_with_cant_segment_reliably(tmp_path):
         confirmed = client.post(
             f"/v1/agent/sessions/{session['session_id']}/confirm",
             headers=headers(),
-            json={},
+            json={"wait": True},
         )
         assert confirmed.status_code == 200, confirmed.text
         body = confirmed.json()
@@ -609,7 +609,7 @@ def test_validator_is_released_before_the_labeling_message(tmp_path):
         confirmed = client.post(
             f"/v1/agent/sessions/{session['session_id']}/confirm",
             headers=headers(),
-            json={},
+            json={"wait": True},
         )
         assert confirmed.status_code == 200, confirmed.text
         body = confirmed.json()

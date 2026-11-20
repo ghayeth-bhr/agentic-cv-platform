@@ -272,7 +272,7 @@ def test_agent_asks_for_missing_details_then_runs_two_classes(tmp_path):
         assert "What should I label" in session["messages"][-1]["content"]
         assert session["spec"] is None
 
-        early = client.post(f"/v1/agent/sessions/{session['session_id']}/confirm", headers=headers())
+        early = client.post(f"/v1/agent/sessions/{session['session_id']}/confirm", headers=headers(), json={"wait": True})
         assert early.status_code == 409
 
         session = post_message(client, session["session_id"], "hard hats, safety vests")
@@ -289,7 +289,7 @@ def test_agent_asks_for_missing_details_then_runs_two_classes(tmp_path):
         assert "Here is the plan" in session["messages"][-1]["content"]
         assert any("COCO by default" in text for text in session["assumptions"])
 
-        confirmed = client.post(f"/v1/agent/sessions/{session['session_id']}/confirm", headers=headers())
+        confirmed = client.post(f"/v1/agent/sessions/{session['session_id']}/confirm", headers=headers(), json={"wait": True})
         assert confirmed.status_code == 200, confirmed.text
         assert confirmed.json()["status"] == "labeling"
         assert "Calibrated hard hats at" in confirmed.json()["messages"][-1]["content"]
@@ -336,7 +336,7 @@ def test_one_message_with_everything_runs_on_two_assets_and_exports_yolo(tmp_pat
         assert session["export_format"] == "yolo"
         assert "(2 images)" in session["messages"][-1]["content"]
 
-        confirmed = client.post(f"/v1/agent/sessions/{session['session_id']}/confirm", headers=headers())
+        confirmed = client.post(f"/v1/agent/sessions/{session['session_id']}/confirm", headers=headers(), json={"wait": True})
         assert confirmed.status_code == 200, confirmed.text
         done = wait_for_session(client, session["session_id"])
         assert done["dataset"]["image_count"] == 2
@@ -531,7 +531,7 @@ def test_calibration_falls_back_to_the_prompt_agents_alternative(tmp_path):
             json={"asset_ids": [asset_id], "message": "detect helmets"},
         ).json()
         assert session["classes"][0]["prompts"] == ["helmets", "safety helmet"]
-        confirmed = client.post(f"/v1/agent/sessions/{session['session_id']}/confirm", headers=headers()).json()
+        confirmed = client.post(f"/v1/agent/sessions/{session['session_id']}/confirm", headers=headers(), json={"wait": True}).json()
         assert confirmed["status"] == "labeling", confirmed["messages"][-1]
         calibration = confirmed["calibration"]
         assert calibration["prompts_tried"] == ["helmets", "safety helmet"]
@@ -602,7 +602,7 @@ def test_calibration_never_keeps_sam3_and_the_vlm_loaded_together(tmp_path, monk
             json={"asset_ids": [asset_id], "message": "detect helmets and vests"},
         ).json()
         events.clear()
-        confirmed = client.post(f"/v1/agent/sessions/{session['session_id']}/confirm", headers=headers()).json()
+        confirmed = client.post(f"/v1/agent/sessions/{session['session_id']}/confirm", headers=headers(), json={"wait": True}).json()
         assert confirmed["status"] == "labeling", confirmed["messages"][-1]
 
     # Round 1: SAM 3 for both classes, then SAM 3 is unloaded, then validation.

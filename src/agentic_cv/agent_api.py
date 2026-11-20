@@ -43,6 +43,11 @@ class AgentClassResponse(BaseModel):
 
 
 class AgentConfirmRequest(BaseModel):
+    # Run synchronously and return the outcome (scripts, tests). By default
+    # the call returns at once with status "calibrating".
+    wait: bool = False
+    # Skip calibration and label each class at the given threshold.
+    class_thresholds: dict[str, float] | None = None
     threshold: float | None = Field(default=None, ge=0, le=1)
     thresholds: list[float] | None = None
     minimum_agreement: float | None = Field(default=None, gt=0, le=1)
@@ -368,6 +373,8 @@ def create_app(dependencies: AgentApiDependencies) -> FastAPI:
                     tuple(body.thresholds) if body.thresholds is not None else None
                 ),
                 minimum_agreement=body.minimum_agreement,
+                class_thresholds=body.class_thresholds,
+                wait=body.wait,
             )
         except Exception as exc:
             _raise_http(exc)
