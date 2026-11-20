@@ -252,6 +252,38 @@
     if (name === "jobs") loadJobs();
   }
 
+  // Theme: follows the system until the user flips the switch; the choice
+  // is remembered in this browser (applied before paint by index.html).
+  const THEME_KEY = "agentic-cv-theme";
+  const systemDark = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+
+  function activeTheme() {
+    const chosen = document.documentElement.dataset.theme;
+    if (chosen === "dark" || chosen === "light") return chosen;
+    return systemDark && systemDark.matches ? "dark" : "light";
+  }
+
+  function renderThemeToggle() {
+    const toggle = $("theme-toggle");
+    if (toggle) toggle.setAttribute("aria-checked", String(activeTheme() === "dark"));
+  }
+
+  function setTheme(theme) {
+    document.documentElement.dataset.theme = theme;
+    try { localStorage.setItem(THEME_KEY, theme); } catch { /* not remembered; still applied */ }
+    renderThemeToggle();
+  }
+
+  if ($("theme-toggle")) {
+    $("theme-toggle").addEventListener("click", () => setTheme(activeTheme() === "dark" ? "light" : "dark"));
+  }
+  if (systemDark) {
+    const onSystemChange = () => renderThemeToggle();
+    if (systemDark.addEventListener) systemDark.addEventListener("change", onSystemChange);
+    else if (systemDark.addListener) systemDark.addListener(onSystemChange);
+  }
+  renderThemeToggle();
+
   document.querySelectorAll(".nav-item").forEach((btn) => {
     btn.addEventListener("click", () => {
       if (btn.dataset.view === "datasets" && galleryVersionFromHash()) {
