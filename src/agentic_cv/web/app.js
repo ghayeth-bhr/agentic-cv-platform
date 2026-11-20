@@ -778,9 +778,16 @@
         method: "POST",
         headers: tenantHeaders(false),
       });
-      for (let attempt = 0; attempt < 60; attempt += 1) {
-        if (job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") break;
-        await sleep(500);
+      // Videos can take minutes to index: poll until the job ends (0.5 s,
+      // then every 2 s after the first 30 s), with a 30-minute safety stop.
+      const started = Date.now();
+      const done = (status) => status === "succeeded" || status === "failed" || status === "cancelled";
+      while (!done(job.status) && Date.now() - started < 30 * 60 * 1000) {
+        const elapsed = Math.round((Date.now() - started) / 1000);
+        const waiting = `Indexing ${assetName(asset)} for search… ${elapsed} s`;
+        setStatus("gallery-status", waiting, "busy");
+        if (opts.source === "upload") setStatus("upload-status", waiting, "busy");
+        await sleep(elapsed < 30 ? 500 : 2000);
         job = await request(`/v1/index-jobs/${encodeURIComponent(job.job_id)}`, {
           headers: tenantHeaders(false),
         });
@@ -797,7 +804,9 @@
           setStatus("upload-status", `Upload complete. Search indexing unavailable: ${detail}`, "error");
         }
       } else {
-        setStatus("gallery-status", `Indexing ${job.status || "queued"}…`, "busy");
+        const still = `Indexing is still ${job.status || "queued"}. Check the Jobs view for progress.`;
+        setStatus("gallery-status", still, "busy");
+        if (opts.source === "upload") setStatus("upload-status", still, "busy");
       }
       if ($("view-jobs") && !$("view-jobs").hidden) loadJobs();
       return job;

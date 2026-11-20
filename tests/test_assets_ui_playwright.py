@@ -191,3 +191,60 @@ def test_assets_upload_index_search_and_subasset_in_browser(tmp_path, asset_imag
             )
 
             browser.close()
+
+
+def test_upload_status_waits_for_slow_indexing(tmp_path, asset_images):
+    """Indexing a video can take minutes; the upload status must still end on the result.
+
+    The UI used to give up after 60 polls (about 30 s) and leave
+    "Queuing search indexing…" on screen forever. Here the index job reports
+    "running" for 70 polls before the real answer comes through.
+    """
+    playwright_api = pytest.importorskip("playwright.sync_api")
+    expect = playwright_api.expect
+    app = create_local_app(
+        LocalAppConfig(
+            data_dir=tmp_path / "data",
+            embedding_provider=FakeEmbeddingProvider(),
+            start_workers=True,
+            worker_poll_interval=0.05,
+        )
+    )
+    red, _ = asset_images
+    polls = {"count": 0}
+
+    def slow_index_job(route):
+        polls["count"] += 1
+        if polls["count"] <= 70:
+            response = route.fetch()
+            body = response.json()
+            body["status"] = "running"
+            route.fulfill(response=response, json=body)
+        else:
+            route.continue_()
+
+    with _serve(app) as base_url:
+        with playwright_api.sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch()
+            except playwright_api.Error as exc:
+                pytest.skip(f"Playwright Chromium is not installed: {exc}")
+            page = browser.new_page(viewport={"width": 1440, "height": 1000})
+            page.clock.install()
+            page.route("**/v1/index-jobs/*", slow_index_job)
+            page.goto(base_url, wait_until="domcontentloaded")
+            page.locator("#upload-toggle").click()
+            page.locator("#asset-name").fill("Long video")
+            page.locator("#asset-file").set_input_files([str(red)])
+            page.locator("#upload-button").click()
+
+            expect(page.locator("#upload-status")).to_contain_text("Indexing Long video for search", timeout=15_000)
+            # Move the page clock forward so the 70 slow polls take seconds, not minutes.
+            for _ in range(400):
+                if polls["count"] > 70:
+                    break
+                page.clock.fast_forward(2000)
+                page.wait_for_timeout(25)
+            assert polls["count"] > 70, polls
+            expect(page.locator("#upload-status")).to_contain_text("indexed for search", timeout=15_000)
+            browser.close()
