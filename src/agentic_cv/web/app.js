@@ -10,22 +10,22 @@
     assets: {
       title: "Assets",
       eyebrow: "Workspace",
-      desc: "Upload photos and videos, inspect what is inside, and search across the library.",
+      desc: "Bring in photos and video, find the frames you need, and group them into assets for labeling.",
     },
     agent: {
       title: "Agent",
       eyebrow: "Workspace",
-      desc: "Turn a natural-language task into a calibrated, whole-asset labeling run.",
+      desc: "Tell the agent what to label. It asks for anything missing, tunes SAM 3 on a few samples, then labels every image.",
     },
     datasets: {
       title: "Datasets",
       eyebrow: "Library",
-      desc: "Dataset versions built from label revisions, ready to export.",
+      desc: "Check the labels, fix or approve them, and export COCO or YOLO.",
     },
     jobs: {
       title: "Jobs",
       eyebrow: "Library",
-      desc: "Background indexing, labeling, and export activity.",
+      desc: "Indexing, labeling, and export runs, with any errors.",
     },
   };
 
@@ -167,7 +167,8 @@
     panel.appendChild(node("strong", null, title));
     if (detail) panel.appendChild(node("p", null, detail));
     if (actionLabel && action) {
-      const button = node("button", "btn btn-secondary btn-small", actionLabel);
+      // An empty screen invites the next step; an error offers a retry.
+      const button = node("button", kind === "empty" ? "btn btn-primary" : "btn btn-secondary btn-small", actionLabel);
       button.type = "button";
       button.addEventListener("click", action);
       panel.appendChild(button);
@@ -2374,6 +2375,7 @@
       selected: new Set(),
       counts: null,
       selectedAnnotation: null,
+      shownId: null,
     });
     closeGalleryClick();
     if ($("gallery-filter-status")) $("gallery-filter-status").value = "all";
@@ -2518,23 +2520,32 @@
       gallery.selectedAnnotation = null;
     }
     gallery.index = index;
-    const image = gallery.visible[index];
     renderGallery();
-    try {
-      const url = await galleryImageUrl(image);
-      if (!gallery.open || gallery.visible[index] !== image) return;
-      const img = $("gallery-image");
-      if (!img) return;
-      await new Promise((resolve, reject) => {
-        img.onload = resolve;
-        img.onerror = () => reject(new Error("Could not display this image"));
-        img.src = url;
-      });
-      if (!gallery.open || gallery.visible[index] !== image) return;
-      drawGalleryOverlay();
-    } catch (err) {
-      galleryStatus(cleanMessage(err.message || err), "error");
+  }
+
+  // The viewer always shows the current image, however the index changed
+  // (opening the gallery, filters, approve-and-next, keyboard).
+  function ensureGalleryImage() {
+    const gallery = state.gallery;
+    const img = $("gallery-image");
+    if (!img) return;
+    const image = gallery.visible[gallery.index] || null;
+    if (!image) {
+      gallery.shownId = null;
+      img.removeAttribute("src");
+      img.hidden = true;
+      return;
     }
+    if (gallery.shownId === image.image_id) return;
+    gallery.shownId = image.image_id;
+    galleryImageUrl(image)
+      .then((url) => {
+        if (!gallery.open || gallery.shownId !== image.image_id) return;
+        img.hidden = false;
+        img.alt = `Image ${cleanMessage(image.source_name || image.file_name)}`;
+        img.src = url;
+      })
+      .catch((err) => galleryStatus(cleanMessage(err.message || err), "error"));
   }
 
   function renderGallery() {
@@ -2661,6 +2672,7 @@
     if (refine) refine.disabled = !image;
     if ($("gallery-click-mode")) $("gallery-click-mode").disabled = !image;
     renderGalleryReviewBar();
+    ensureGalleryImage();
     drawGalleryOverlay();
   }
 

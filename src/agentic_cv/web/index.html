@@ -6,7 +6,7 @@
   <title>Agentic CV Platform</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
@@ -14,37 +14,50 @@
     <aside class="sidebar" aria-label="Workspace navigation">
       <div class="sidebar-top">
         <div class="brand">
-          <svg class="brand-mark" width="22" height="22" viewBox="0 0 22 22" aria-hidden="true">
-            <rect x="1" y="1" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5"/>
-            <rect x="4.5" y="4.5" width="5" height="5" fill="currentColor"/>
-            <rect x="12.5" y="4.5" width="5" height="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
-            <rect x="4.5" y="12.5" width="5" height="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
-            <line x1="12.5" y1="15" x2="17.5" y2="15" stroke="currentColor" stroke-width="1.5"/>
+          <svg class="brand-mark" width="30" height="30" viewBox="0 0 30 30" aria-hidden="true">
+            <rect x="1" y="1" width="28" height="28" rx="8" class="brand-tile"/>
+            <path d="M8 19.5c1.6-4.4 4.2-7.2 7.4-7.6 2.9-.4 5.3 1.4 6.6 4.1-2.3 2.2-5 3.5-8 3.6-2.2.1-4.2-.1-6-.1z" class="brand-mask"/>
+            <path d="M7.5 7.5h4M7.5 7.5v4M22.5 22.5h-4M22.5 22.5v-4" class="brand-corners"/>
           </svg>
           <span class="brand-name">Agentic CV</span>
         </div>
-        <div class="workspace-label">Local workspace</div>
+        <div class="workspace-label">Runs on this computer</div>
         <nav class="nav" aria-label="Sections">
-          <div class="nav-group">
-            <div class="nav-group-label">Workspace</div>
-            <button type="button" class="nav-item is-active" data-view="assets" aria-current="page">
-              <span class="nav-label">Assets</span>
-              <span class="nav-hint">Upload, inspect, search</span>
-            </button>
-            <button type="button" class="nav-item" data-view="agent">
-              <span class="nav-label">Agent</span>
-              <span class="nav-hint">Chat-driven labeling</span>
-            </button>
-          </div>
+          <ol class="nav-group nav-steps">
+            <li>
+              <button type="button" class="nav-item is-active" data-view="assets" aria-current="page">
+                <span class="nav-step" aria-hidden="true">1</span>
+                <span class="nav-text">
+                  <span class="nav-label">Assets</span>
+                  <span class="nav-hint">Collect photos and video</span>
+                </span>
+              </button>
+            </li>
+            <li>
+              <button type="button" class="nav-item" data-view="agent">
+                <span class="nav-step" aria-hidden="true">2</span>
+                <span class="nav-text">
+                  <span class="nav-label">Agent</span>
+                  <span class="nav-hint">Describe it, get it labeled</span>
+                </span>
+              </button>
+            </li>
+            <li>
+              <button type="button" class="nav-item" data-view="datasets">
+                <span class="nav-step" aria-hidden="true">3</span>
+                <span class="nav-text">
+                  <span class="nav-label">Datasets</span>
+                  <span class="nav-hint">Review, approve, export</span>
+                </span>
+              </button>
+            </li>
+          </ol>
           <div class="nav-group nav-group-secondary">
-            <div class="nav-group-label">Library</div>
-            <button type="button" class="nav-item" data-view="datasets">
-              <span class="nav-label">Datasets</span>
-              <span class="nav-hint">Versions and exports</span>
-            </button>
-            <button type="button" class="nav-item" data-view="jobs">
-              <span class="nav-label">Jobs</span>
-              <span class="nav-hint">Background activity</span>
+            <button type="button" class="nav-item nav-item-utility" data-view="jobs">
+              <span class="nav-text">
+                <span class="nav-label">Jobs</span>
+                <span class="nav-hint">What is running in the background</span>
+              </span>
             </button>
           </div>
         </nav>
@@ -63,7 +76,7 @@
         <div>
           <p class="view-eyebrow" id="view-eyebrow">Workspace</p>
           <h1 class="view-title" id="view-title">Assets</h1>
-          <p class="view-desc" id="view-desc">Upload photos and videos, inspect what is inside, and search across the library.</p>
+          <p class="view-desc" id="view-desc">Bring in photos and video, find the frames you need, and group them into assets for labeling.</p>
         </div>
         <div class="view-actions" id="view-actions"></div>
       </header>
@@ -172,7 +185,7 @@
 
           <aside class="asset-detail" id="asset-detail" aria-live="polite">
             <div class="detail-placeholder" id="asset-detail-placeholder">
-              <div class="detail-placeholder-mark" aria-hidden="true">01</div>
+              <div class="detail-placeholder-mark" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 22 22"><path d="M2 7V2h5M15 2h5v5M20 15v5h-5M7 20H2v-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div>
               <h2>Select an asset</h2>
               <p>Open a card to inspect its sources, search inside it, or see where it came from.</p>
             </div>
@@ -218,7 +231,7 @@
 
           <aside class="agent-run card" aria-live="polite">
             <div class="detail-placeholder" id="agent-run-empty">
-              <div class="detail-placeholder-mark" aria-hidden="true">02</div>
+              <div class="detail-placeholder-mark" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 22 22"><path d="M2 7V2h5M15 2h5v5M20 15v5h-5M7 20H2v-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div>
               <h2>No active run</h2>
               <p>Plan a task to see the confirmed specification, calibration, labeling progress, and the downloadable dataset.</p>
             </div>
