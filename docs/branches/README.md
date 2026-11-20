@@ -38,5 +38,7 @@ instead of appending to the root README. Current phase records:
 [`agent-chat.md`](agent-chat.md) (P3),
 [`manual-refinement-ui.md`](manual-refinement-ui.md) (P4),
 [`gpu-resource-manager.md`](gpu-resource-manager.md) (P5),
-[`ux-e2e-quality.md`](ux-e2e-quality.md) (P6), and
-[`real-validation-loop.md`](real-validation-loop.md) (P7).
+[`ux-e2e-quality.md`](ux-e2e-quality.md) (P6),
+[`real-validation-loop.md`](real-validation-loop.md) (P7),
+[`validator-reliability-gpu.md`](validator-reliability-gpu.md) (P8), and
+[`dataset-gallery-live-view.md`](dataset-gallery-live-view.md) (P10).

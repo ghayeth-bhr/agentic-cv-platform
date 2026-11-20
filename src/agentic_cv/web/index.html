@@ -107,6 +107,12 @@
                 <span>Filter assets</span>
                 <input id="asset-filter" type="search" placeholder="Filter by asset name" autocomplete="off">
               </label>
+              <div id="assets-selection-bar" class="assets-selection-bar" hidden>
+                <strong id="assets-selection-count">0 selected</strong>
+                <button id="assets-use-in-agent" type="button" class="btn btn-primary btn-small">Use in Agent</button>
+                <button id="assets-search-selected" type="button" class="btn btn-ghost btn-small">Search these</button>
+                <button id="assets-selection-clear" type="button" class="btn btn-ghost btn-small">Clear</button>
+              </div>
             </div>
 
             <div id="gallery-status" class="status" role="status" aria-live="polite"></div>
@@ -130,12 +136,34 @@
                   <select id="search-scope">
                     <option value="all">All assets</option>
                     <option value="selected">Selected asset</option>
+                    <option value="chosen">Ticked assets</option>
                   </select>
+                </label>
+                <label class="field field-tiny">
+                  <span>Results</span>
+                  <input id="search-limit" type="number" min="1" max="500" step="1" value="20">
                 </label>
                 <button id="search-button" type="button" class="btn btn-primary">Search</button>
               </div>
-              <div class="actions">
-                <button id="subasset-button" type="button" class="btn btn-secondary" disabled>Save results as sub-asset</button>
+              <div id="search-selection" class="search-selection" hidden>
+                <div class="search-selection-row">
+                  <strong id="search-selected-count" class="search-selected-count">0 selected</strong>
+                  <button id="search-select-all" type="button" class="btn btn-ghost btn-small">Select all</button>
+                  <button id="search-select-none" type="button" class="btn btn-ghost btn-small">Clear</button>
+                  <label class="search-threshold">
+                    <span>Min score <output id="search-min-score-value">0%</output></span>
+                    <input id="search-min-score" type="range" min="0" max="100" step="1" value="0">
+                  </label>
+                  <button id="search-select-above" type="button" class="btn btn-ghost btn-small">Select ≥ min score</button>
+                </div>
+                <p class="card-desc">Click an image to include or exclude it. Only the selected images go into the new asset.</p>
+              </div>
+              <div class="actions subasset-actions">
+                <label class="field field-grow">
+                  <span>New asset name</span>
+                  <input id="subasset-name" type="text" maxlength="120" placeholder="Defaults to “Sub-asset: your query”" autocomplete="off">
+                </label>
+                <button id="subasset-button" type="button" class="btn btn-secondary" disabled>Save selected as asset</button>
               </div>
               <div id="search-status" class="status" role="status" aria-live="polite"></div>
               <div id="search-results" class="results-area" aria-live="polite"></div>
@@ -167,18 +195,19 @@
 
             <div id="agent-messages" class="agent-messages" aria-live="polite">
               <div class="agent-empty-chat" id="agent-empty-chat">
-                Start with a task such as “Create a segmentation dataset of workers wearing yellow vests.”
+                Describe the dataset you need, for example “Segment hard hats and safety vests, export YOLO.” I'll ask for anything that's missing.
               </div>
             </div>
 
             <div class="agent-compose">
+              <div class="field">
+                <span>Assets <small id="agent-assets-count" class="agent-assets-count"></small></span>
+                <div id="agent-assets" class="agent-assets" role="group" aria-label="Assets to label"></div>
+              </div>
+              <div id="agent-quick-replies" class="agent-quick-replies" hidden></div>
               <label class="field">
-                <span>Asset</span>
-                <select id="agent-asset"></select>
-              </label>
-              <label class="field">
-                <span>Task</span>
-                <textarea id="agent-message" rows="3" placeholder="e.g. Create a segmentation dataset of workers wearing yellow vests."></textarea>
+                <span>Message</span>
+                <textarea id="agent-message" rows="3" placeholder="e.g. Segment hard hats and safety vests, export YOLO. (Enter to send, Shift+Enter for a new line)"></textarea>
               </label>
               <div class="actions">
                 <button type="button" class="btn btn-primary" id="agent-plan">Plan task</button>
@@ -205,8 +234,51 @@
 
               <div id="agent-spec" class="agent-spec"></div>
               <ol id="agent-progress" class="agent-progress"></ol>
+              <section id="agent-health" class="agent-health" hidden aria-labelledby="agent-health-title">
+                <div class="agent-health-head">
+                  <h3 id="agent-health-title" class="card-title">Labeling health</h3>
+                  <span id="agent-health-state" class="agent-health-state"></span>
+                </div>
+                <div id="agent-health-alert" class="agent-health-alert" role="alert" hidden></div>
+                <div class="agent-live-progress"><div id="agent-health-bar" class="agent-live-progress-bar"></div></div>
+                <dl id="agent-health-metrics" class="agent-health-metrics"></dl>
+                <div id="agent-health-classes" class="agent-health-classes"></div>
+              </section>
+              <section id="agent-board" class="agent-board" hidden aria-labelledby="agent-board-title">
+                <div class="agent-board-head">
+                  <div>
+                    <h3 id="agent-board-title" class="card-title">Calibration board</h3>
+                    <p id="agent-board-summary" class="card-desc">SAM 3 results on the sample images. Move a slider to see each threshold.</p>
+                  </div>
+                  <span id="agent-board-badge" class="live-badge" hidden>Live</span>
+                </div>
+                <div id="agent-board-classes" class="agent-board-classes"></div>
+                <div class="actions" id="agent-board-actions" hidden>
+                  <button type="button" class="btn btn-primary" id="agent-board-apply">Label with these thresholds</button>
+                </div>
+              </section>
               <div id="agent-calibration" class="agent-calibration" hidden></div>
               <div id="agent-run-error" class="agent-error" hidden></div>
+
+              <section id="agent-live" class="agent-live" hidden aria-labelledby="agent-live-title">
+                <div class="agent-live-head">
+                  <div>
+                    <h3 id="agent-live-title" class="card-title">Live view</h3>
+                    <p id="agent-live-summary" class="card-desc">Waiting for the whole-asset run to start.</p>
+                  </div>
+                  <span id="agent-live-badge" class="live-badge" hidden>Live</span>
+                </div>
+                <div class="agent-live-progress">
+                  <div id="agent-live-progress-bar" class="agent-live-progress-bar"></div>
+                </div>
+                <div class="agent-live-meta">
+                  <span id="agent-live-count">0 / 0 images</span>
+                  <span id="agent-live-phase">Waiting</span>
+                </div>
+                <div id="agent-live-grid" class="agent-live-grid" aria-live="polite"></div>
+                <div id="agent-live-notice" class="status" role="status" aria-live="polite"></div>
+                <a id="agent-open-gallery" class="btn btn-primary" href="#" hidden>Open gallery</a>
+              </section>
 
               <div class="agent-run-actions">
                 <button type="button" class="btn btn-primary" id="agent-confirm">Confirm and calibrate</button>
@@ -226,6 +298,110 @@
         </div>
         <div id="datasets-status" class="status" role="status" aria-live="polite"></div>
         <div id="datasets-list" class="stack" aria-live="polite"></div>
+
+        <section id="dataset-gallery" class="dataset-gallery" hidden aria-labelledby="gallery-title">
+          <div class="gallery-top">
+            <div>
+              <a id="dataset-gallery-back" class="gallery-back" href="#/datasets">← Back to datasets</a>
+              <h2 id="gallery-title" class="card-title">Dataset gallery</h2>
+              <p id="gallery-subtitle" class="card-desc"></p>
+            </div>
+            <div id="gallery-counter" class="gallery-counter" aria-live="polite">image 0 of 0</div>
+          </div>
+
+          <div id="dataset-gallery-status" class="status" role="status" aria-live="polite"></div>
+          <div class="gallery-filters" role="group" aria-label="Dataset image filters">
+            <label class="field field-narrow">
+              <span>Class</span>
+              <select id="gallery-filter-class"><option value="all">All classes</option></select>
+            </label>
+            <label class="field field-narrow">
+              <span>Split</span>
+              <select id="gallery-filter-split">
+                <option value="all">All splits</option>
+                <option value="train">Train</option>
+                <option value="validation">Validation</option>
+                <option value="test">Test</option>
+              </select>
+            </label>
+            <label class="gallery-check">
+              <input id="gallery-filter-unannotated" type="checkbox">
+              <span>Images without annotations</span>
+            </label>
+            <label class="gallery-check">
+              <input id="gallery-filter-lowconfidence" type="checkbox">
+              <span>Low confidence only (&lt;0.50)</span>
+            </label>
+            <label class="field field-narrow">
+              <span>Review</span>
+              <select id="gallery-filter-status">
+                <option value="all">All images</option>
+                <option value="pending">Pending</option>
+                <option value="approved">Approved</option>
+                <option value="rejected">Rejected</option>
+              </select>
+            </label>
+            <button id="gallery-reset-filters" type="button" class="btn btn-ghost btn-small">Reset filters</button>
+          </div>
+          <div id="gallery-review-bar" class="gallery-review-bar" role="group" aria-label="Review actions">
+            <span id="gallery-review-counts" class="gallery-review-counts">0 pending</span>
+            <button id="gallery-approve" type="button" class="btn btn-primary btn-small" title="Approve this image and go to the next (A)">Approve <kbd>A</kbd></button>
+            <button id="gallery-reject" type="button" class="btn btn-secondary btn-small" title="Reject this image and go to the next (R)">Reject <kbd>R</kbd></button>
+            <span class="gallery-review-sep" aria-hidden="true"></span>
+            <button id="gallery-select-visible" type="button" class="btn btn-ghost btn-small">Select shown</button>
+            <button id="gallery-select-clear" type="button" class="btn btn-ghost btn-small">Clear</button>
+            <button id="gallery-approve-selected" type="button" class="btn btn-ghost btn-small" disabled>Approve selected</button>
+            <button id="gallery-reject-selected" type="button" class="btn btn-ghost btn-small" disabled>Reject selected</button>
+            <button id="gallery-approve-pending" type="button" class="btn btn-ghost btn-small">Approve all pending</button>
+            <span class="gallery-review-sep" aria-hidden="true"></span>
+            <button id="gallery-build-approved" type="button" class="btn btn-primary btn-small">Build approved dataset</button>
+          </div>
+          <div id="gallery-class-counts" class="category-row gallery-class-counts" aria-live="polite"></div>
+
+          <div class="gallery-layout">
+            <div class="card gallery-main">
+              <div id="gallery-stage" class="gallery-stage">
+                <img id="gallery-image" alt="Selected dataset image">
+                <canvas id="gallery-overlay" aria-label="Annotation overlay"></canvas>
+              </div>
+              <div class="gallery-controls">
+                <button id="gallery-prev" type="button" class="btn btn-secondary btn-small">← Previous</button>
+                <div id="gallery-caption" class="gallery-caption">No image selected.</div>
+                <button id="gallery-next" type="button" class="btn btn-secondary btn-small">Next →</button>
+              </div>
+              <div class="gallery-toggles" role="group" aria-label="Overlay toggles">
+                <label class="gallery-check"><input id="gallery-toggle-boxes" type="checkbox" checked> <span>Boxes</span></label>
+                <label class="gallery-check"><input id="gallery-toggle-masks" type="checkbox" checked> <span>Masks</span></label>
+                <label class="gallery-check"><input id="gallery-toggle-labels" type="checkbox" checked> <span>Labels</span></label>
+              </div>
+              <div id="gallery-filmstrip" class="gallery-filmstrip" aria-label="Image thumbnails"></div>
+              <button id="gallery-load-more" type="button" class="btn btn-ghost btn-small" hidden>Load more images</button>
+            </div>
+            <aside class="card gallery-side">
+              <h3 class="card-title">Image details</h3>
+              <dl id="gallery-details" class="gallery-details"></dl>
+              <h4 class="gallery-side-heading">Annotations</h4>
+              <div id="gallery-annotations" class="gallery-annotations"></div>
+              <div class="gallery-click">
+                <button id="gallery-click-mode" type="button" class="btn btn-secondary" disabled>Add or fix an object by clicking</button>
+                <div id="gallery-click-panel" class="gallery-click-panel" hidden>
+                  <p class="card-desc">Click the object on the image. Shift+click marks background. Select an annotation above first to replace it.</p>
+                  <label class="field">
+                    <span>Class</span>
+                    <select id="gallery-click-class"></select>
+                  </label>
+                  <div class="actions">
+                    <button id="gallery-click-save" type="button" class="btn btn-primary btn-small" disabled>Save object</button>
+                    <button id="gallery-click-reset" type="button" class="btn btn-ghost btn-small">Reset points</button>
+                    <button id="gallery-click-done" type="button" class="btn btn-ghost btn-small">Done</button>
+                  </div>
+                  <div id="gallery-click-status" class="status" role="status" aria-live="polite"></div>
+                </div>
+              </div>
+              <button id="gallery-refine" type="button" class="btn btn-ghost btn-small" disabled>Open the classic review panel</button>
+            </aside>
+          </div>
+        </section>
       </section>
 
       <section id="view-jobs" class="view" aria-labelledby="jobs-heading" hidden>

@@ -39,6 +39,14 @@ This repository now contains a working local product path: **Assets** for upload
 | Dataset-card COCO / YOLO detection / YOLO segmentation export selector | Added in P7 |
 | Doctor warning for CPU-only torch on an NVIDIA machine + Windows cu124 lock config | Added in P7 |
 | Real 20-image VLM journey: 5/5 verdicts, 5.82 GB whole-GPU peak, 383 s calibration/label/export | Measured in P7 |
+| Run-scoped annotation sets, tombstone deletes, persisted source-aware splits, 0-based YOLO with split folders, integer-id COCO, time-based shared video frames, SQLite WAL | Fixed in Phase 0 ([`docs/branches/data-correctness.md`](docs/branches/data-correctness.md)) |
+| Conversational agent: asks for missing details, several assets and classes per run, SAM 3 prompt agent, COCO/YOLO chosen in chat | Added in Phase 1 ([`docs/branches/agent-dialogue.md`](docs/branches/agent-dialogue.md)) |
+| Select individual search results (checkboxes, min-score slider) and save only the selection as a named asset; tenant-scoped search | Added in [`docs/branches/search-selection.md`](docs/branches/search-selection.md) |
+| Calibration engine: one SAM 3 pass per sample, best threshold, correct negatives via VLM presence check, target-aware samples, prompt alternatives, SAM 3/VLM never co-resident (real run: 459 s failed → 142 s calibrated) | Added in Phase 2a ([`docs/branches/calibration-engine.md`](docs/branches/calibration-engine.md)) |
+| Background calibration (confirm returns at once, resumes after restarts) and a live calibration board: sample tiles per class, verdict chips, threshold slider re-drawing SAM 3 masks in the browser, label with your thresholds | Added in Phase 2b ([`docs/branches/calibration-live.md`](docs/branches/calibration-live.md)) |
+| Review in the dataset gallery: approve/reject (A/R, selected, all pending), status filter, delete or reclassify masks, click-to-segment with SAM 3's point tracker (~0.03-0.15 s per click), build an approved-only dataset | Added in Phase 4 ([`docs/branches/review-approval.md`](docs/branches/review-approval.md)) |
+| Monitoring agent: labeling health (speed, ETA, empty rate, per-class counts/scores), rules that pause the run and ask in chat (continue resumes without relabeling); multi-class labeling shares one SAM 3 vision pass per image (1.76x faster) | Added in Phase 3 ([`docs/branches/label-monitor.md`](docs/branches/label-monitor.md)) |
+| Tick several assets in the gallery to search across them or use them in the Agent; vector search from an in-memory matrix (~160 ms -> ~2 ms at 20k vectors); cached thumbnails; original file names in the dataset gallery | Added in Phase 5 ([`docs/branches/assets-scale.md`](docs/branches/assets-scale.md)) |
 
 The original root README was a 950-line concatenation of 23 branch READMEs. Those are preserved verbatim in [`docs/branches/`](docs/branches/README.md).
 
@@ -110,7 +118,7 @@ The workbench has two primary sections, **Assets** and **Agent**, plus a small *
 1. **Assets**: list assets by name and thumbnail. Open a card to inspect its sources, media type, and lineage.
 2. **Upload media**: create one asset from several images/videos. Files are hashed and uploaded in 5 MB chunks; a durable search-index job is queued automatically when upload finishes.
 3. **Search the library**: search all assets or only the selected asset with a natural-language description. Results show images and scores.
-4. **Save results as sub-asset**: materializes the matches as a real gallery asset with parent-asset query lineage shown in its detail panel.
+4. **Save selected as asset**: every result starts selected; untick the images that do not belong (or use the min-score slider), name the asset, and only the selection is copied into a new gallery asset with query lineage.
 5. **Agent**: choose an asset, describe the task, inspect the extracted specification, and confirm. The agent selects a diverse sample using stored SigLIP vectors, calibrates a threshold with the real VLM, and shows the validator mode, thresholds tried, sample overlays, and each verdict. It then labels the whole asset in the background, builds a dataset version, packages a COCO archive, and exposes a download button. Sessions survive a page reload; failures, fallbacks, and timeouts are shown in the chat.
 6. **Datasets**: list dataset versions built from label revisions and export them as COCO, YOLO detection, or YOLO segmentation.
 7. **Review labels**: in a dataset card, open **Review labels**, click an image, place positive/negative points, accept the previewed mask, and the app writes a new annotation revision, rebuilds a fresh dataset version, and leaves it ready to export.
@@ -202,12 +210,15 @@ Heavy dependencies are lazy or injectable. Default `pytest` runs with fakes and 
 | GET | `/v1/index-jobs/{id}` | read index-job status |
 | POST | `/v1/search` | semantic search |
 | GET | `/v1/search/records/{id}/image` | search-result image |
-| POST | `/v1/sub-assets/from-search` | create a sub-asset (and gallery asset) |
+| POST | `/v1/sub-assets/from-search` | create an asset from the selected `record_ids` (or, without them, from every result) |
 | GET | `/v1/sub-assets` | list sub-assets with parent names and lineage |
 | GET | `/v1/jobs` | list background jobs for the tenant |
-| POST/GET | `/v1/agent/sessions` | plan an agent task / list sessions |
+| POST/GET | `/v1/agent/sessions` | start an agent conversation (one or more `asset_ids`) / list sessions |
+| POST | `/v1/agent/sessions/{id}/messages` | answer the agent or change the plan before confirming |
 | GET | `/v1/agent/sessions/{id}` | read a durable agent session |
-| POST | `/v1/agent/sessions/{id}/confirm` | calibrate (or use a fixed threshold) and start whole-asset labeling |
+| POST | `/v1/agent/sessions/{id}/confirm` | start calibration + labeling in the background (`wait: true` runs inline; `threshold` or `class_thresholds` skip calibration) |
+| GET | `/v1/agent/sessions/{id}/calibration-preview` | raw SAM 3 predictions per class and sample, for the threshold slider |
+| GET | `/v1/agent/sessions/{id}/calibration-samples/{image_id}/image` | a calibration sample image |
 | POST | `/v1/agent/sessions/{id}/cancel` | cancel the active calibration/labeling/export run |
 | GET | `/v1/agent/sessions/{id}/calibration-overlays/{overlay_id}` | authenticated calibration sample overlay PNG |
 | POST | `/v1/assets/{id}/predict` | prompted SAM 3 on one source |
@@ -220,7 +231,11 @@ Heavy dependencies are lazy or injectable. Default `pytest` runs with fakes and 
 | GET | `/v1/datasets/{id}/images` | list dataset images and their annotations |
 | GET | `/v1/datasets/{id}/images/{image_id}/file` | fetch the image bytes for review |
 | POST | `/v1/datasets/{id}/rebuild` | rebuild a version from its latest annotation revisions |
-| WS | `/v1/refinement/{version_id}/{image_id}` | click-point mask preview (tenant query parameter) |
+| DELETE | `/v1/datasets/{id}/images/{image_id}/annotations/{annotation_id}` | retire an annotation (applied by the next rebuild) |
+| WS | `/v1/refinement/{version_id}/{image_id}` | click-point mask preview with SAM 3's point tracker (`tenant_id`; `format=polygons` for compact masks) |
+| GET/POST | `/v1/datasets/{id}/review` | live annotations + review status / approve, reject, reset (list or all) |
+| PATCH | `/v1/datasets/{id}/images/{image_id}/annotations/{annotation_id}` | move an annotation to another class |
+| POST | `/v1/datasets/{id}/rebuild-approved` | new version with approved images only |
 | POST | `/v1/refinements/{session_id}/accept` | save the previewed mask as an annotation revision |
 | POST | `/v1/calibration/run` | threshold calibration on uploaded images |
 | POST/GET | `/v1/dataset-exports` | submit/read dataset-export jobs |
@@ -272,7 +287,10 @@ Default runtime uses SQLite; `AGENTIC_CV_POSTGRES_DSN` enables PostgreSQL stores
 | `AGENTIC_CV_EMBEDDING_VRAM_MB` | `2304` | SigLIP2 footprint used by the unload policy |
 | `AGENTIC_CV_SAM3_VRAM_MB` | `2048` | SAM 3 footprint used by the unload policy |
 | `AGENTIC_CV_POSTGRES_DSN` | unset | opt-in PostgreSQL + pgvector |
+| `AGENTIC_CV_VIDEO_SAMPLE_FPS` | `1.0` | video frames sampled per second (search and labeling share them) |
+| `AGENTIC_CV_VIDEO_MAX_FRAMES` | `1000` | per-video frame cap; `0` = unlimited (a warning is logged when reached) |
 | `AGENTIC_CV_AGENT_PLANNER` | `ollama` | set `rules` to skip the text model entirely |
+| `AGENTIC_CV_AGENT_PROMPTS` | `ollama` | set `rules` to keep the LLM planner but skip SAM 3 prompt rewriting |
 | `AGENTIC_CV_TEXT_MODEL` | `qwen3-vl:4b` | Ollama model used for task-spec JSON |
 | `AGENTIC_CV_OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint |
 | `AGENTIC_CV_OLLAMA_TIMEOUT_SEC` | `30` | task-spec request timeout |
@@ -282,6 +300,8 @@ Default runtime uses SQLite; `AGENTIC_CV_POSTGRES_DSN` enables PostgreSQL stores
 | `AGENTIC_CV_VLM_TIMEOUT_SEC` | `100` | per-VLM-request timeout; raise for first-load/warm-up on a 6 GB GPU |
 | `AGENTIC_CV_VLM_MAX_CALLS` | `50` | hard cap on VLM calls per calibration run |
 | `AGENTIC_CV_VLM_MIN_CONFIDENCE` | `0.7` | minimum VLM confidence for an accepted verdict |
+| `AGENTIC_CV_VLM_MAX_SIDE` | `768` | longest side of images sent to the VLM; `0` sends full size |
+| `AGENTIC_CV_REFINEMENT` | points | set `ranked` to use the old text-mask ranking instead of SAM 3's point tracker |
 | `AGENTIC_CV_VLM_PROBE_TIMEOUT_SEC` | `1.0` | Ollama `/api/tags` reachability probe timeout |
 | `AGENTIC_CV_OIDC_ISSUER/AUDIENCE/JWKS_URL` | unset | opt-in OIDC/JWT auth |
 | `AGENTIC_CV_S3_BUCKET/ENDPOINT_URL` + `AWS_REGION` | unset | opt-in S3/MinIO storage |

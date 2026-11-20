@@ -121,10 +121,10 @@ def test_loading_then_empty_states_across_views(tmp_path):
                 )
                 expect(page.locator("#assets-meta")).to_have_text("Loading assets…")
 
-                # The Agent view shows its own loading option rather than a blank select.
+                # The Agent view shows its own loading state rather than a blank picker.
                 page.locator(".nav-item[data-view='agent']").click()
-                expect(page.locator("#agent-asset option")).to_have_text("Loading assets…")
-                expect(page.locator("#agent-asset")).to_be_disabled()
+                expect(page.locator("#agent-assets")).to_contain_text("Loading assets…")
+                expect(page.locator("#agent-plan")).to_be_disabled()
 
                 page.locator(".nav-item[data-view='assets']").click()
                 expect(page.locator("#asset-gallery .skeleton-card")).to_have_count(3)
@@ -150,8 +150,8 @@ def test_loading_then_empty_states_across_views(tmp_path):
                 expect(page.locator("#upload-panel")).to_be_hidden()
 
                 page.locator(".nav-item[data-view='agent']").click()
-                expect(page.locator("#agent-asset")).to_be_disabled()
-                expect(page.locator("#agent-asset option")).to_have_text(
+                expect(page.locator("#agent-plan")).to_be_disabled()
+                expect(page.locator("#agent-assets")).to_contain_text(
                     "No assets yet — upload media first"
                 )
                 expect(page.locator("#agent-status")).to_contain_text(

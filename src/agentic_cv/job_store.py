@@ -9,11 +9,14 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Protocol
 from uuid import UUID, uuid4
+from .sqlite_utils import connect_sqlite
 
-JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
+JobStatus = Literal["queued", "running", "paused", "succeeded", "failed", "cancelled"]
 ALLOWED_TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
     "queued": frozenset({"running", "cancelled"}),
-    "running": frozenset({"succeeded", "failed", "cancelled", "queued"}),
+    "running": frozenset({"succeeded", "failed", "cancelled", "queued", "paused"}),
+    # A monitor paused the run to ask the user; resume re-queues it.
+    "paused": frozenset({"queued", "cancelled"}),
     "succeeded": frozenset(),
     "failed": frozenset({"queued"}),
     "cancelled": frozenset(),
@@ -73,7 +76,7 @@ class JobStoreBackend(Protocol):
 
 class JobStore:
     def __init__(self, path: str) -> None:
-        self._connection = sqlite3.connect(path, check_same_thread=False)
+        self._connection = connect_sqlite(path)
         self._connection.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self._connection.execute("PRAGMA foreign_keys = ON")
@@ -276,7 +279,7 @@ class JobStore:
     def request_cancel(self, job_id: UUID) -> JobRecord:
         with self._lock:
             current = self.get(job_id)
-            if current.status == "queued":
+            if current.status in ("queued", "paused"):
                 now = _utc_now()
                 self._connection.execute(
                     "UPDATE jobs SET status = 'cancelled', cancel_requested = 1, updated_at = ? WHERE job_id = ?",

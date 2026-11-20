@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from .agent import AgentConflict, AgentService, AgentSessionView, CalibrationTimeoutError
+from .agent_dialogue import missing_slots
 from .api import _authorize, _credential, _tenant
 from .auth import Authorizer
 from .contracts import TaskSpec
@@ -18,7 +19,9 @@ from .errors import ModelUnavailableError
 
 
 class AgentSessionCreateRequest(BaseModel):
-    asset_id: UUID
+    # One or more assets; ``asset_id`` is the v1 single-asset field.
+    asset_id: UUID | None = None
+    asset_ids: list[UUID] = Field(default_factory=list, max_length=50)
     message: str = Field(min_length=1)
     task_type: Literal["detection", "segmentation"] | None = None
     target_objects: list[str] = Field(default_factory=list)
@@ -27,7 +30,24 @@ class AgentSessionCreateRequest(BaseModel):
     max_iterations: int | None = Field(default=None, ge=1, le=10)
 
 
+class AgentMessageRequest(BaseModel):
+    message: str = Field(min_length=1)
+    # When present, replaces the session's asset selection before this turn.
+    asset_ids: list[UUID] | None = Field(default=None, max_length=50)
+
+
+class AgentClassResponse(BaseModel):
+    name: str
+    attributes: list[str]
+    prompts: list[str]
+
+
 class AgentConfirmRequest(BaseModel):
+    # Run synchronously and return the outcome (scripts, tests). By default
+    # the call returns at once with status "calibrating".
+    wait: bool = False
+    # Skip calibration and label each class at the given threshold.
+    class_thresholds: dict[str, float] | None = None
     threshold: float | None = Field(default=None, ge=0, le=1)
     thresholds: list[float] | None = None
     minimum_agreement: float | None = Field(default=None, gt=0, le=1)
@@ -58,10 +78,18 @@ class AgentSessionResponse(BaseModel):
     session_id: UUID
     tenant_id: UUID
     asset_id: UUID
+    asset_ids: list[str]
     asset_name: str
     message: str
     status: str
     spec: AgentTaskSpecResponse | None
+    task_type: str | None
+    classes: list[AgentClassResponse]
+    export_format: str | None
+    missing_slots: list[str]
+    pending_slot: str | None
+    quick_replies: list[str]
+    assumptions: list[str]
     planner_mode: str
     planner_note: str | None
     prompt: str | None
@@ -74,6 +102,7 @@ class AgentSessionResponse(BaseModel):
     export_job_id: UUID | None
     export_status: str | None
     download_path: str | None
+    health: dict | None = None
     error: str | None
     messages: list[AgentMessageResponse]
     created_at: str
@@ -92,12 +121,32 @@ class AgentApiDependencies:
 
 def _session_response(view: AgentSessionView) -> AgentSessionResponse:
     record = view.record
-    spec = TaskSpec.from_dict(record.spec) if record.spec is not None else None
+    spec = (
+        TaskSpec.from_dict(record.spec)
+        if record.spec is not None and "target_objects" in record.spec
+        else None
+    )
+    draft = view.draft
     return AgentSessionResponse(
         session_id=record.session_id,
         tenant_id=record.tenant_id,
         asset_id=record.asset_id,
+        asset_ids=list(draft.asset_ids),
         asset_name=record.asset_name,
+        task_type=draft.task_type,
+        classes=[
+            AgentClassResponse(
+                name=item.name,
+                attributes=list(item.attributes),
+                prompts=list(item.prompts),
+            )
+            for item in draft.classes
+        ],
+        export_format=draft.export_format,
+        missing_slots=list(missing_slots(draft)),
+        pending_slot=draft.pending_slot,
+        quick_replies=list(view.quick_replies),
+        assumptions=list(draft.assumptions),
         message=record.message,
         status=record.status,
         spec=(
@@ -125,6 +174,7 @@ def _session_response(view: AgentSessionView) -> AgentSessionResponse:
         export_job_id=record.export_job_id,
         export_status=view.export_status,
         download_path=view.download_path,
+        health=view.health,
         error=record.error,
         messages=[
             AgentMessageResponse(
@@ -175,12 +225,46 @@ def create_app(dependencies: AgentApiDependencies) -> FastAPI:
             view = dependencies.service.create_session(
                 tenant_id=tenant_id,
                 asset_id=request.asset_id,
+                asset_ids=tuple(request.asset_ids),
                 message=request.message,
                 task_type=request.task_type,
                 target_objects=tuple(request.target_objects),
                 visual_attributes=tuple(request.visual_attributes),
                 sample_size=request.sample_size,
                 max_iterations=request.max_iterations,
+            )
+        except Exception as exc:
+            _raise_http(exc)
+            raise
+        return _session_response(view)
+
+    @router.post(
+        "/v1/agent/sessions/{session_id}/messages", response_model=AgentSessionResponse
+    )
+    def post_message(
+        session_id: UUID,
+        request: AgentMessageRequest,
+        x_tenant_id: str = Header(...),
+        x_api_key: str | None = Header(None),
+        authorization: str | None = Header(None),
+    ) -> AgentSessionResponse:
+        """Continue the conversation: answer the agent's question or change the plan."""
+
+        tenant_id = _tenant(x_tenant_id)
+        _authorize(
+            dependencies.authorizer,
+            credential=_credential(authorization, x_api_key),
+            tenant_id=tenant_id,
+            role="labels:write",
+        )
+        try:
+            view = dependencies.service.add_message(
+                tenant_id=tenant_id,
+                session_id=session_id,
+                message=request.message,
+                asset_ids=(
+                    tuple(request.asset_ids) if request.asset_ids is not None else None
+                ),
             )
         except Exception as exc:
             _raise_http(exc)
@@ -264,6 +348,50 @@ def create_app(dependencies: AgentApiDependencies) -> FastAPI:
             ) from exc
         return FileResponse(path, media_type="image/png")
 
+    @router.get("/v1/agent/sessions/{session_id}/calibration-preview")
+    def get_calibration_preview(
+        session_id: UUID,
+        x_tenant_id: str = Header(...),
+        x_api_key: str | None = Header(None),
+        authorization: str | None = Header(None),
+    ) -> dict:
+        """Raw SAM 3 predictions per class and sample, for the live threshold slider."""
+
+        tenant_id = _tenant(x_tenant_id)
+        _authorize(
+            dependencies.authorizer,
+            credential=_credential(authorization, x_api_key),
+            tenant_id=tenant_id,
+            role="labels:read",
+        )
+        try:
+            return dependencies.service.calibration_preview(tenant_id=tenant_id, session_id=session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="calibration preview not found") from exc
+
+    @router.get("/v1/agent/sessions/{session_id}/calibration-samples/{image_id}/image")
+    def get_calibration_sample_image(
+        session_id: UUID,
+        image_id: str,
+        x_tenant_id: str = Header(...),
+        x_api_key: str | None = Header(None),
+        authorization: str | None = Header(None),
+    ) -> FileResponse:
+        tenant_id = _tenant(x_tenant_id)
+        _authorize(
+            dependencies.authorizer,
+            credential=_credential(authorization, x_api_key),
+            tenant_id=tenant_id,
+            role="labels:read",
+        )
+        try:
+            path = dependencies.service.calibration_sample_path(
+                tenant_id=tenant_id, session_id=session_id, image_id=image_id
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="calibration sample not found") from exc
+        return FileResponse(path)
+
     @router.post(
         "/v1/agent/sessions/{session_id}/confirm", response_model=AgentSessionResponse
     )
@@ -291,6 +419,8 @@ def create_app(dependencies: AgentApiDependencies) -> FastAPI:
                     tuple(body.thresholds) if body.thresholds is not None else None
                 ),
                 minimum_agreement=body.minimum_agreement,
+                class_thresholds=body.class_thresholds,
+                wait=body.wait,
             )
         except Exception as exc:
             _raise_http(exc)

@@ -9,11 +9,14 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Literal, Protocol
 from uuid import UUID, uuid4
+from .sqlite_utils import connect_sqlite
 
 AgentSessionStatus = Literal[
+    "gathering",
     "awaiting_confirmation",
     "calibrating",
     "needs_attention",
+    "paused",
     "labeling",
     "exporting",
     "complete",
@@ -82,7 +85,7 @@ class AgentSessionBackend(Protocol):
 
 class AgentSessionStore:
     def __init__(self, path: str) -> None:
-        self._connection = sqlite3.connect(path, check_same_thread=False)
+        self._connection = connect_sqlite(path)
         self._connection.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self._connection.execute(
@@ -178,7 +181,7 @@ class AgentSessionStore:
             rows = self._connection.execute(
                 """
                 SELECT * FROM agent_sessions
-                WHERE status IN ('labeling', 'exporting')
+                WHERE status IN ('calibrating', 'labeling', 'exporting')
                 ORDER BY sequence
                 """
             ).fetchall()
@@ -258,7 +261,7 @@ def new_session_record(
     spec: dict[str, Any],
     planner_mode: str,
     planner_note: str | None,
-    prompt: str,
+    prompt: str | None,
     messages: tuple[AgentMessage, ...],
 ) -> AgentSessionRecord:
     now = _utc_now()

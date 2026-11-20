@@ -29,8 +29,17 @@ def test_export_service_writes_coco_and_manifest(tmp_path):
     payload = json.loads((result.output_dir / "annotations.json").read_text())
     manifest = json.loads((result.output_dir / "manifest.json").read_text())
     assert payload["images"][0]["file_name"] == "frame.jpg"
+    assert payload["images"][0]["id"] == 1
+    assert payload["images"][0]["image_uid"] == "image-1"
+    assert payload["images"][0]["split"] == "train"
+    assert payload["annotations"][0]["image_id"] == 1
     assert manifest["format"] == "coco"
-    assert result.files == (result.output_dir / "annotations.json", result.output_dir / "manifest.json")
+    assert manifest["splits"] == {"train": 1, "validation": 0, "test": 0}
+    assert result.files == (
+        result.output_dir / "annotations.json",
+        result.output_dir / "annotations" / "instances_train.json",
+        result.output_dir / "manifest.json",
+    )
     versions.close()
 
 
@@ -43,7 +52,7 @@ def test_export_service_writes_yolo_and_enforces_tenant_scope(tmp_path):
     service = DatasetExportService(versions, tmp_path / "exports")
     result = service.export(tenant_id=owner, version_id=version.version_id, format="yolo-detection")
 
-    assert (result.output_dir / "labels" / "frame.txt").read_text() == "0 0.3 0.3 0.4 0.4\n"
+    assert (result.output_dir / "labels" / "train" / "frame.txt").read_text() == "0 0.3 0.3 0.4 0.4\n"
     with pytest.raises(KeyError, match="unknown"):
         service.export(tenant_id=uuid4(), version_id=version.version_id, format="coco")
     versions.close()

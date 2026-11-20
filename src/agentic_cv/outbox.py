@@ -11,6 +11,7 @@ from typing import Any, Protocol
 from uuid import UUID
 
 from .contracts import EventEnvelope
+from .sqlite_utils import connect_sqlite
 
 
 def _utc_now() -> datetime:
@@ -54,7 +55,7 @@ class OutboxBackend(Protocol):
 
 class Outbox:
     def __init__(self, path: str) -> None:
-        self._connection = sqlite3.connect(path, check_same_thread=False)
+        self._connection = connect_sqlite(path)
         self._connection.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self._connection.execute(

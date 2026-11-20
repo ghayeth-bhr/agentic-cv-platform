@@ -11,6 +11,7 @@ from typing import Iterable, Protocol
 from uuid import UUID, uuid4
 
 from .semantic_search import SearchResult
+from .sqlite_utils import connect_sqlite
 
 
 def _utc_now() -> str:
@@ -48,7 +49,7 @@ class SubAssetBackend(Protocol):
 
 class SubAssetStore:
     def __init__(self, path: str) -> None:
-        self._connection = sqlite3.connect(path, check_same_thread=False)
+        self._connection = connect_sqlite(path)
         self._connection.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self._connection.execute(

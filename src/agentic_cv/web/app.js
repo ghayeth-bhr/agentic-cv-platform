@@ -29,6 +29,8 @@
     },
   };
 
+  // Assets ticked in the gallery = assets the Agent will use (one shared set).
+  const agentSelection = new Set();
   const state = {
     assets: [],
     assetsLoading: false,
@@ -37,16 +39,32 @@
     lineage: new Map(),
     searchPayload: null,
     searchResults: [],
+    searchSelected: new Set(),
     uploadFiles: [],
+    datasets: [],
+    datasetThumbUrls: [],
     agentSession: null,
     agentPollToken: 0,
     agentOverlayUrls: [],
     agentCalibrationKey: "",
+    agentBoard: { sessionId: null, preview: null, fetchedAt: 0, fetching: false, images: new Map(), sliders: {}, touched: new Set() },
     review: {
       open: false, versionId: null, dataset: null, panel: null, images: [],
       index: -1, image: null, objectUrl: null, socket: null, snapshot: null,
       mode: "positive", status: null, listEl: null, save: null, canvas: null,
       imageEl: null, labelEl: null,
+    },
+    gallery: {
+      open: false, versionId: null, dataset: null, images: [], visible: [], index: -1,
+      total: 0, offset: 0, hasMore: false, filters: {
+        categoryId: "all", split: "all", unannotated: false, lowConfidence: false,
+      },
+      toggles: { boxes: true, masks: true, labels: true },
+      objectUrls: [],
+    },
+    agentLive: {
+      sessionId: null, jobId: null, cursor: 0, processed: 0, total: 0,
+      images: [], stopped: false, controller: null, retryTimer: null, ready: false,
     },
   };
 
@@ -109,6 +127,30 @@
     if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(2)} MB`;
     if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
     return `${n} B`;
+  }
+
+  const CLASS_COLORS = ["#ff4040", "#40a0ff", "#40d278", "#f5b437", "#b07cff", "#ff7ac6"];
+
+  function classColor(categoryId) {
+    const index = Math.abs(Number(categoryId) || 0) % CLASS_COLORS.length;
+    return CLASS_COLORS[index];
+  }
+
+  function polygonArea(coords) {
+    if (!coords || coords.length < 6) return 0;
+    let sum = 0;
+    for (let i = 0; i + 3 < coords.length; i += 2) {
+      sum += coords[i] * coords[i + 3] - coords[i + 2] * coords[i + 1];
+    }
+    return Math.abs(sum) / 2;
+  }
+
+  function annotationArea(annotation, image) {
+    const polygons = (annotation.segmentation || []).map(polygonArea);
+    const maskArea = polygons.reduce((total, value) => total + value, 0);
+    if (maskArea > 0) return maskArea;
+    const box = annotation.bbox || [];
+    return Math.max(0, (Number(box[2]) || 0) * (Number(box[3]) || 0));
   }
 
   function node(tag, className, text) {
@@ -199,15 +241,38 @@
     if ($("view-title")) $("view-title").textContent = meta.title;
     if ($("view-eyebrow")) $("view-eyebrow").textContent = meta.eyebrow;
     if ($("view-desc")) $("view-desc").textContent = meta.desc;
-    if (name !== "datasets") closeReview();
+    if (name !== "datasets") {
+      closeReview();
+      closeDatasetGallery();
+    }
     if (name === "assets") loadAssets();
     if (name === "agent") initAgentView();
-    if (name === "datasets") loadDatasets();
+    if (name === "datasets") showDatasetsForHash();
     if (name === "jobs") loadJobs();
   }
 
   document.querySelectorAll(".nav-item").forEach((btn) => {
-    btn.addEventListener("click", () => showView(btn.dataset.view));
+    btn.addEventListener("click", () => {
+      if (btn.dataset.view === "datasets" && galleryVersionFromHash()) {
+        window.history.replaceState(null, "", "#/datasets");
+      }
+      showView(btn.dataset.view);
+    });
+  });
+
+  function galleryVersionFromHash() {
+    const match = /^#\/datasets\/([0-9a-f-]{36})$/i.exec(window.location.hash || "");
+    return match ? match[1] : null;
+  }
+
+  window.addEventListener("hashchange", () => {
+    const versionId = galleryVersionFromHash();
+    if (versionId) {
+      if (!$("view-datasets") || $("view-datasets").hidden) showView("datasets");
+      else openDatasetGallery(versionId);
+    } else if (window.location.hash === "#/datasets" && $("view-datasets") && !$("view-datasets").hidden) {
+      showDatasetList();
+    }
   });
 
   async function checkRuntime() {
@@ -347,6 +412,19 @@
     }
     assets.forEach((asset) => {
       const index = state.assets.indexOf(asset);
+      const id = String(asset.asset_id);
+      const wrap = node("div", "asset-card-wrap");
+      const pick = document.createElement("input");
+      pick.type = "checkbox";
+      pick.className = "asset-pick";
+      pick.checked = agentSelection.has(id);
+      pick.setAttribute("aria-label", `Select ${assetName(asset)}`);
+      pick.addEventListener("change", () => {
+        if (pick.checked) agentSelection.add(id); else agentSelection.delete(id);
+        wrap.classList.toggle("is-picked", pick.checked);
+        renderAssetSelection();
+      });
+      wrap.classList.toggle("is-picked", pick.checked);
       const card = node("button", "asset-card");
       card.type = "button";
       card.dataset.assetIndex = String(index);
@@ -382,8 +460,25 @@
       body.append(name, meta);
       card.append(thumb, body);
       card.addEventListener("click", () => selectAsset(index));
-      grid.appendChild(card);
+      wrap.append(card, pick);
+      grid.appendChild(wrap);
     });
+    renderAssetSelection();
+  }
+
+  function pickedAssets() {
+    const known = new Map(state.assets.map((asset) => [String(asset.asset_id), asset]));
+    return [...agentSelection].filter((id) => known.has(id)).map((id) => known.get(id));
+  }
+
+  function renderAssetSelection() {
+    const picked = pickedAssets();
+    const bar = $("assets-selection-bar");
+    if (bar) bar.hidden = !picked.length;
+    if ($("assets-selection-count")) {
+      $("assets-selection-count").textContent = `${picked.length} selected`;
+    }
+    syncSearchScopeOptions();
   }
 
   function selectAsset(index) {
@@ -509,9 +604,20 @@
         : "Selected asset (none)";
     }
     if (!state.selectedAsset && select.value === "selected") select.value = "all";
-    if (chip) chip.textContent = select.value === "selected" && state.selectedAsset
-      ? assetName(state.selectedAsset)
-      : "All assets";
+    const picked = typeof pickedAssets === "function" ? pickedAssets() : [];
+    const chosenOption = select.querySelector('option[value="chosen"]');
+    if (chosenOption) {
+      chosenOption.disabled = !picked.length;
+      chosenOption.textContent = picked.length ? `Ticked assets (${picked.length})` : "Ticked assets (none)";
+    }
+    if (!picked.length && select.value === "chosen") select.value = "all";
+    if (chip) {
+      chip.textContent = select.value === "selected" && state.selectedAsset
+        ? assetName(state.selectedAsset)
+        : select.value === "chosen"
+          ? `${picked.length} asset${picked.length === 1 ? "" : "s"}`
+          : "All assets";
+    }
   }
 
   // Upload
@@ -680,10 +786,15 @@
   // Search
   function currentSearchPayload() {
     const query = (($("search-query") && $("search-query").value) || "").trim();
-    const payload = { query, limit: 20 };
+    const requested = Number($("search-limit") && $("search-limit").value);
+    const limit = Number.isFinite(requested) ? Math.max(1, Math.min(500, Math.round(requested))) : 20;
+    const payload = { query, limit };
     const scope = $("search-scope") ? $("search-scope").value : "all";
     if (scope === "selected" && state.selectedAsset) {
       payload.asset_ids = [state.selectedAsset.asset_id];
+    } else if (scope === "chosen") {
+      const picked = pickedAssets();
+      if (picked.length) payload.asset_ids = picked.map((asset) => asset.asset_id);
     }
     return payload;
   }
@@ -692,12 +803,42 @@
     return new Map(state.assets.map((asset) => [String(asset.asset_id), asset]));
   }
 
+  function searchMinScore() {
+    const slider = $("search-min-score");
+    return slider ? Number(slider.value) / 100 : 0;
+  }
+
+  function updateSearchSelection() {
+    const selected = state.searchSelected;
+    const total = state.searchResults.length;
+    const count = state.searchResults.filter((result) => selected.has(result.record_id)).length;
+    if ($("search-selection")) $("search-selection").hidden = !total;
+    if ($("search-selected-count")) $("search-selected-count").textContent = `${count} of ${total} selected`;
+    const button = $("subasset-button");
+    if (button && !button.dataset.busy) {
+      button.disabled = !count;
+      button.textContent = count ? `Save ${count} selected as asset` : "Save selected as asset";
+    }
+    const threshold = searchMinScore();
+    if ($("search-min-score-value")) $("search-min-score-value").textContent = `${Math.round(threshold * 100)}%`;
+    document.querySelectorAll("#search-results .result-card").forEach((card) => {
+      const id = card.dataset.recordId;
+      const isSelected = selected.has(id);
+      card.classList.toggle("is-selected", isSelected);
+      card.setAttribute("aria-pressed", String(isSelected));
+      const box = card.querySelector(".result-check");
+      if (box) box.checked = isSelected;
+      card.classList.toggle("below-threshold", Number(card.dataset.score) < threshold);
+    });
+  }
+
   function renderSearchResults() {
     const container = $("search-results");
     if (!container) return;
     container.innerHTML = "";
     if (!state.searchResults.length) {
       container.appendChild(node("div", "results-empty", "No results yet. Try a description of the people, objects, or scene."));
+      updateSearchSelection();
       return;
     }
     const byId = assetsById();
@@ -705,9 +846,18 @@
     state.searchResults.forEach((result, index) => {
       const score = Number(result.score);
       const pct = Number.isFinite(score) ? Math.max(0, Math.min(100, score * 100)) : 0;
-      const card = node("button", "result-card");
-      card.type = "button";
-      card.setAttribute("aria-label", `Open match ${index + 1}`);
+      const card = node("div", "result-card");
+      card.dataset.recordId = result.record_id;
+      card.dataset.score = Number.isFinite(score) ? String(score) : "0";
+      card.tabIndex = 0;
+      card.setAttribute("role", "button");
+      card.setAttribute("aria-label", `Match ${index + 1}: include in the new asset`);
+      const check = document.createElement("input");
+      check.type = "checkbox";
+      check.className = "result-check";
+      check.tabIndex = -1;
+      check.setAttribute("aria-hidden", "true");
+      card.appendChild(check);
       if (result.image_url) {
         const thumb = node("div", "result-thumb");
         const img = document.createElement("img");
@@ -723,25 +873,83 @@
         node("span", "result-score", Number.isFinite(score) ? `${pct.toFixed(0)}%` : "—")
       );
       const parent = byId.get(String(result.asset_id));
-      card.append(
-        head,
-        node("p", "result-meta", parent ? assetName(parent) : "Source asset")
-      );
+      const open = node("button", "result-open", parent ? `${assetName(parent)} ↗` : "Source asset ↗");
+      open.type = "button";
+      open.title = "Open the source asset";
+      open.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (result.asset_id) selectAssetById(result.asset_id);
+        if ($("asset-detail")) $("asset-detail").scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+      card.append(head, open);
       const bar = node("div", "score-bar");
       const fill = document.createElement("i");
       fill.style.width = `${pct.toFixed(1)}%`;
       bar.appendChild(fill);
       card.appendChild(bar);
-      card.addEventListener("click", () => {
-        if (result.asset_id) selectAssetById(result.asset_id);
-        if ($("asset-detail")) $("asset-detail").scrollIntoView({ behavior: "smooth", block: "start" });
+      const toggle = () => {
+        if (state.searchSelected.has(result.record_id)) state.searchSelected.delete(result.record_id);
+        else state.searchSelected.add(result.record_id);
+        updateSearchSelection();
+      };
+      card.addEventListener("click", toggle);
+      card.addEventListener("keydown", (event) => {
+        if (event.key === " " || event.key === "Enter") {
+          event.preventDefault();
+          toggle();
+        }
       });
       grid.appendChild(card);
     });
     container.appendChild(grid);
+    updateSearchSelection();
   }
 
+  if ($("search-select-all")) $("search-select-all").addEventListener("click", () => {
+    state.searchResults.forEach((result) => state.searchSelected.add(result.record_id));
+    updateSearchSelection();
+  });
+  if ($("search-select-none")) $("search-select-none").addEventListener("click", () => {
+    state.searchSelected.clear();
+    updateSearchSelection();
+  });
+  if ($("search-min-score")) $("search-min-score").addEventListener("input", updateSearchSelection);
+  if ($("search-select-above")) $("search-select-above").addEventListener("click", () => {
+    const threshold = searchMinScore();
+    state.searchSelected = new Set(
+      state.searchResults.filter((result) => Number(result.score) >= threshold).map((result) => result.record_id)
+    );
+    updateSearchSelection();
+  });
+
   if ($("search-scope")) $("search-scope").addEventListener("change", syncSearchScopeOptions);
+  if ($("assets-selection-clear")) $("assets-selection-clear").addEventListener("click", () => {
+    agentSelection.clear();
+    renderAssets();
+  });
+  if ($("assets-search-selected")) $("assets-search-selected").addEventListener("click", () => {
+    if ($("search-scope")) $("search-scope").value = "chosen";
+    syncSearchScopeOptions();
+    if ($("search-query")) $("search-query").focus();
+  });
+  if ($("assets-use-in-agent")) $("assets-use-in-agent").addEventListener("click", () => {
+    const chosen = pickedAssets().map((asset) => String(asset.asset_id));
+    if (!chosen.length) return;
+    const session = state.agentSession;
+    if (session && AGENT_ACTIVE.has(session.status)) {
+      setStatus("gallery-status", "The Agent is busy with a run; open it to follow or cancel that run first.", "error");
+      showView("agent");
+      return;
+    }
+    // A new task on exactly these assets.
+    resetAgent();
+    agentSelection.clear();
+    chosen.forEach((id) => agentSelection.add(id));
+    showView("agent");
+    renderAgentAssets(null);
+    setStatus("agent-status", `${chosen.length} asset${chosen.length === 1 ? "" : "s"} ready. Describe the dataset you need.`, "ok");
+    if ($("agent-message")) $("agent-message").focus();
+  });
 
   if ($("search-button")) $("search-button").addEventListener("click", async () => {
     const button = $("search-button");
@@ -753,9 +961,9 @@
     setBusy(button, true, "Searching…");
     setStatus("search-status", "Searching…", "busy");
     state.searchResults = [];
+    state.searchSelected = new Set();
     state.searchPayload = null;
     renderSearchResults();
-    if ($("subasset-button")) $("subasset-button").disabled = true;
     try {
       const result = await request("/v1/search", {
         method: "POST",
@@ -763,10 +971,15 @@
         body: JSON.stringify(payload),
       });
       state.searchResults = (result && result.results) || [];
+      // Everything starts selected; untick the images that do not belong.
+      state.searchSelected = new Set(state.searchResults.map((item) => item.record_id));
       state.searchPayload = payload;
       renderSearchResults();
-      if ($("subasset-button")) $("subasset-button").disabled = !state.searchResults.length;
-      setStatus("search-status", `${state.searchResults.length} result${state.searchResults.length === 1 ? "" : "s"}.`, "ok");
+      setStatus(
+        "search-status",
+        `${state.searchResults.length} result${state.searchResults.length === 1 ? "" : "s"}. Untick the images that should not go into the new asset.`,
+        "ok",
+      );
     } catch (err) {
       setStatus("search-status", cleanMessage(err.message || err), "error");
     } finally {
@@ -777,37 +990,53 @@
   if ($("subasset-button")) $("subasset-button").addEventListener("click", async () => {
     const button = $("subasset-button");
     const payload = state.searchPayload || currentSearchPayload();
+    const recordIds = state.searchResults
+      .map((result) => result.record_id)
+      .filter((id) => state.searchSelected.has(id));
     if (!payload.query || !state.searchResults.length) {
       setStatus("search-status", "Run a search before saving results.", "error");
       return;
     }
+    if (!recordIds.length) {
+      setStatus("search-status", "Select at least one image to save.", "error");
+      return;
+    }
+    const name = (($("subasset-name") && $("subasset-name").value) || "").trim();
+    button.dataset.busy = "true";
     setBusy(button, true, "Saving…");
-    setStatus("search-status", "Saving search results as a sub-asset…", "busy");
+    setStatus("search-status", `Saving ${recordIds.length} selected image${recordIds.length === 1 ? "" : "s"} as a new asset…`, "busy");
     try {
       const record = await request("/v1/sub-assets/from-search", {
         method: "POST",
         headers: tenantHeaders(true),
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ query: payload.query, record_ids: recordIds, ...(name ? { name } : {}) }),
       });
+      if ($("subasset-name")) $("subasset-name").value = "";
       await loadAssets({ quiet: true });
       if (record.asset_id) selectAssetById(record.asset_id);
-      const count = Number.isFinite(record.source_count) ? record.source_count : state.searchResults.length;
+      const count = Number.isFinite(record.source_count) ? record.source_count : recordIds.length;
       setStatus("search-status", `Saved “${record.asset_name || "Sub-asset"}” with ${count} matched image${count === 1 ? "" : "s"}.`, "ok");
       setStatus("gallery-status", `Sub-asset saved from search: “${record.query || payload.query}”.`, "ok");
     } catch (err) {
       setStatus("search-status", cleanMessage(err.message || err), "error");
     } finally {
+      delete button.dataset.busy;
       setBusy(button, false);
+      updateSearchSelection();
     }
   });
 
   // Agent
   const AGENT_SESSION_KEY = "agentic-cv-agent-session";
   const AGENT_ACTIVE = new Set(["calibrating", "labeling", "exporting"]);
+  const AGENT_OPEN = new Set(["gathering", "awaiting_confirmation", "needs_attention", "paused"]);
+  const AGENT_DONE = new Set(["complete", "failed", "cancelled"]);
   const AGENT_STATUS_LABEL = {
+    gathering: "Needs details",
     awaiting_confirmation: "Awaiting confirmation",
     calibrating: "Calibrating",
     needs_attention: "Needs attention",
+    paused: "Paused — your call",
     labeling: "Labeling",
     exporting: "Packaging dataset",
     complete: "Dataset ready",
@@ -821,53 +1050,93 @@
 
   function agentPillStatus(status) {
     if (status === "complete") return "succeeded";
-    if (status === "failed" || status === "cancelled" || status === "needs_attention") return "failed";
+    if (status === "failed" || status === "cancelled" || status === "needs_attention" || status === "paused") return "failed";
     if (AGENT_ACTIVE.has(status)) return "running";
     return status;
   }
 
-  function renderAgentAssets(session) {
-    const select = $("agent-asset");
-    if (!select) return;
-    const previous = select.value
-      || (session && session.asset_id)
-      || (state.selectedAsset && state.selectedAsset.asset_id)
-      || "";
-    select.innerHTML = "";
-    if (state.assetsLoading && !state.assets.length) {
-      const option = document.createElement("option");
-      option.value = "";
-      option.textContent = "Loading assets…";
-      select.appendChild(option);
-      select.disabled = true;
-    } else if (state.assetsError) {
-      const option = document.createElement("option");
-      option.value = "";
-      option.textContent = "Assets unavailable";
-      select.appendChild(option);
-      select.disabled = true;
-    } else if (!state.assets.length) {
-      const option = document.createElement("option");
-      option.value = "";
-      option.textContent = "No assets yet — upload media first";
-      select.appendChild(option);
-      select.disabled = true;
-    } else {
-      state.assets.forEach((asset) => {
-        const option = document.createElement("option");
-        option.value = String(asset.asset_id);
-        const count = (asset.sources || []).length;
-        option.textContent = `${assetName(asset)} · ${count} source${count === 1 ? "" : "s"}`;
-        select.appendChild(option);
-      });
-      if (previous) {
-        const match = state.assets.find((asset) => String(asset.asset_id) === String(previous));
-        if (match) select.value = String(match.asset_id);
-      }
-      select.disabled = !!session;
+  function agentComposeOpen(session) {
+    return !session || AGENT_OPEN.has(session.status) || AGENT_DONE.has(session.status);
+  }
+
+  function syncAgentSelection(session) {
+    const known = new Set(state.assets.map((asset) => String(asset.asset_id)));
+    if (session && AGENT_OPEN.has(session.status) && (session.asset_ids || []).length) {
+      agentSelection.clear();
+      session.asset_ids.forEach((id) => agentSelection.add(String(id)));
     }
-    if ($("agent-message")) $("agent-message").disabled = !!session;
-    if ($("agent-plan")) $("agent-plan").disabled = !!session || !state.assets.length;
+    [...agentSelection].forEach((id) => { if (known.size && !known.has(id)) agentSelection.delete(id); });
+    if (!agentSelection.size && state.assets.length) {
+      const preferred = state.selectedAsset && known.has(String(state.selectedAsset.asset_id))
+        ? String(state.selectedAsset.asset_id)
+        : String(state.assets[0].asset_id);
+      agentSelection.add(preferred);
+    }
+  }
+
+  function renderAgentAssets(session) {
+    const box = $("agent-assets");
+    if (!box) return;
+    box.innerHTML = "";
+    const locked = !!session && !agentComposeOpen(session);
+    let ready = false;
+    if (state.assetsLoading && !state.assets.length) {
+      box.appendChild(node("p", "agent-assets-state", "Loading assets…"));
+    } else if (state.assetsError) {
+      box.appendChild(node("p", "agent-assets-state", "Assets unavailable"));
+    } else if (!state.assets.length) {
+      box.appendChild(node("p", "agent-assets-state", "No assets yet — upload media first"));
+    } else {
+      ready = true;
+      syncAgentSelection(session);
+      state.assets.forEach((asset) => {
+        const id = String(asset.asset_id);
+        const option = node("label", "agent-asset-option");
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.value = id;
+        input.checked = agentSelection.has(id);
+        input.disabled = locked;
+        input.addEventListener("change", () => {
+          if (input.checked) agentSelection.add(id);
+          else agentSelection.delete(id);
+          updateAgentAssetCount();
+        });
+        const count = (asset.sources || []).length;
+        option.append(input, node("span", "agent-asset-name", assetName(asset)),
+          node("span", "agent-asset-meta", `${count} source${count === 1 ? "" : "s"}`));
+        box.appendChild(option);
+      });
+    }
+    box.setAttribute("aria-disabled", String(locked || !ready));
+    updateAgentAssetCount();
+    const open = agentComposeOpen(session);
+    if ($("agent-message")) $("agent-message").disabled = !open;
+    if ($("agent-plan")) {
+      $("agent-plan").disabled = !open || !ready;
+      $("agent-plan").textContent = session && AGENT_OPEN.has(session.status) ? "Send" : "Plan task";
+    }
+  }
+
+  function updateAgentAssetCount() {
+    const count = $("agent-assets-count");
+    if (!count) return;
+    const n = agentSelection.size;
+    count.textContent = n ? `${n} selected` : "none selected";
+  }
+
+  function renderAgentQuickReplies(session) {
+    const box = $("agent-quick-replies");
+    if (!box) return;
+    box.innerHTML = "";
+    const replies = (session && AGENT_OPEN.has(session.status) && session.quick_replies) || [];
+    box.hidden = !replies.length;
+    replies.forEach((reply) => {
+      const chip = node("button", "chip agent-quick-reply", reply);
+      chip.type = "button";
+      chip.addEventListener("click", () => sendAgentMessage(reply));
+      box.appendChild(chip);
+    });
   }
 
   function renderAgentMessages(session) {
@@ -876,7 +1145,7 @@
     list.innerHTML = "";
     if (!session || !session.messages || !session.messages.length) {
       const empty = node("div", "agent-empty-chat");
-      empty.textContent = "Start with a task such as “Create a segmentation dataset of workers wearing yellow vests.”";
+      empty.textContent = "Describe the dataset you need, for example “Segment hard hats and safety vests, export YOLO.” I'll ask for anything that's missing.";
       list.appendChild(empty);
       return;
     }
@@ -899,21 +1168,39 @@
     const box = $("agent-spec");
     if (!box) return;
     box.innerHTML = "";
-    const spec = session && session.spec;
-    if (!spec) return;
+    if (!session) return;
+    const classes = session.classes || [];
     const grid = node("dl", "agent-spec-grid");
-    const prompt = session.prompt || (spec.target_objects || []).join(" and ");
+    const exportLabel = { coco: "COCO", yolo: "YOLO" }[session.export_format] || "—";
+    const sample = (session.spec && session.spec.sample_size) || 5;
     [
-      ["Task", spec.task_type],
-      ["Prompt", prompt],
-      ["Calibration", `${spec.sample_size} sample image${spec.sample_size === 1 ? "" : "s"} · ${spec.max_iterations} attempt${spec.max_iterations === 1 ? "" : "s"}`],
-      ["Asset", session.asset_name],
+      ["Task", session.task_type || "—"],
+      ["Assets", session.asset_name],
+      ["Export", exportLabel],
+      ["Calibration", `${sample} sample image${sample === 1 ? "" : "s"} per class`],
       ["Planner", session.planner_mode === "ollama" ? "Local model" : "Local rules"],
     ].forEach(([term, value]) => {
       const [dt, dd] = agentSpecRow(term, value);
       grid.append(dt, dd);
     });
     box.appendChild(grid);
+    const list = node("ul", "agent-class-list");
+    if (!classes.length) list.appendChild(node("li", "agent-class-empty", "No classes yet"));
+    classes.forEach((item) => {
+      const row = node("li", "agent-class");
+      row.appendChild(node("strong", null, item.name));
+      if ((item.attributes || []).length) row.appendChild(node("span", "agent-class-attrs", item.attributes.join(", ")));
+      const prompt = (item.prompts || [])[0];
+      if (prompt) row.appendChild(node("span", "agent-class-prompt", `SAM 3: “${prompt}”`));
+      list.appendChild(row);
+    });
+    box.appendChild(list);
+    const missing = session.missing_slots || [];
+    if (missing.length) {
+      const names = { assets: "assets", classes: "object classes", task_type: "detection or segmentation" };
+      box.appendChild(node("p", "agent-note", `Still needed: ${missing.map((slot) => names[slot] || slot).join(", ")}.`));
+    }
+    (session.assumptions || []).forEach((text) => box.appendChild(node("p", "agent-note", cleanMessage(text))));
     if (session.planner_note) {
       box.appendChild(node("p", "agent-note", cleanMessage(session.planner_note)));
     }
@@ -929,12 +1216,22 @@
     return row;
   }
 
+  function agentFormatLabel(session) {
+    if (session.export_format !== "yolo") return "COCO";
+    return session.task_type === "segmentation" ? "YOLO segmentation" : "YOLO detection";
+  }
+
   function renderAgentProgress(session) {
     const list = $("agent-progress");
     if (!list) return;
     list.innerHTML = "";
     const hasSpec = !!session.spec;
-    list.appendChild(agentStep("Task plan", hasSpec ? "Specification ready" : "Waiting for a task", hasSpec ? "done" : "pending"));
+    const gathering = session.status === "gathering";
+    list.appendChild(agentStep(
+      "Task plan",
+      hasSpec ? "Specification ready" : gathering ? "Waiting for your answer" : "Waiting for a task",
+      hasSpec ? "done" : gathering ? "active" : "pending",
+    ));
 
     let calibrationState = "pending";
     let calibrationDetail = "Runs after confirmation";
@@ -983,7 +1280,7 @@
     let exportDetail = "Runs after the dataset is built";
     if (session.export_status === "succeeded") {
       exportState = "done";
-      exportDetail = "COCO archive ready to download";
+      exportDetail = `${agentFormatLabel(session)} archive ready to download`;
     } else if (session.export_status === "failed") {
       exportState = "error";
       exportDetail = "Export failed";
@@ -992,7 +1289,7 @@
       exportDetail = "Export cancelled";
     } else if (session.export_status === "queued" || session.export_status === "running") {
       exportState = "active";
-      exportDetail = "Packaging the COCO archive";
+      exportDetail = `Packaging the ${agentFormatLabel(session)} archive`;
     }
     list.appendChild(agentStep("Download package", exportDetail, exportState));
   }
@@ -1043,7 +1340,9 @@
     state.agentCalibrationKey = nextKey;
     revokeAgentOverlays();
     box.innerHTML = "";
-    if (!calibration) {
+    // While calibration runs, the calibration board shows live progress;
+    // this verdict log only describes a finished run.
+    if (!calibration || calibration.status === "running") {
       box.hidden = true;
       return;
     }
@@ -1061,6 +1360,27 @@
       box.appendChild(node("p", "agent-calibration-empty", `Running at the fixed threshold ${Number(calibration.threshold).toFixed(2)}.`));
       return;
     }
+    const perClass = calibration.classes || [];
+    if (perClass.length <= 1 && (calibration.prompts_tried || []).length > 1) {
+      box.appendChild(node("p", "agent-calibration-notice", `Prompts tried: ${calibration.prompts_tried.map((prompt) => `“${cleanMessage(prompt)}”`).join(", ")}`));
+    }
+    if (perClass.length > 1) {
+      perClass.forEach((item) => {
+        const result = item.status === "calibrated" && item.threshold != null
+          ? `threshold ${Number(item.threshold).toFixed(2)}`
+          : "no threshold passed";
+        box.appendChild(node("h4", "agent-calibration-class", `${cleanMessage(item.name)} · “${cleanMessage(item.prompt)}” · ${result}`));
+        if ((item.prompts_tried || []).length > 1) {
+          box.appendChild(node("p", "agent-calibration-notice", `Prompts tried: ${item.prompts_tried.map((prompt) => `“${cleanMessage(prompt)}”`).join(", ")}`));
+        }
+        renderCalibrationAttempts(box, item, session);
+      });
+      return;
+    }
+    renderCalibrationAttempts(box, calibration, session);
+  }
+
+  function renderCalibrationAttempts(box, calibration, session) {
     const attempts = calibration.attempts || [];
     if (!attempts.length) {
       box.appendChild(node("p", "agent-calibration-empty", calibration.reason || "No threshold attempts were recorded."));
@@ -1083,7 +1403,10 @@
         const row = node("div", "agent-calibration-sample");
         row.dataset.accepted = verdict.accepted ? "true" : "false";
         const copy = node("div", "agent-calibration-sample-copy");
-        const verdictText = verdict.accepted ? "Accepted" : "Rejected";
+        const emptyResult = verdict.prediction_count === 0;
+        const verdictText = verdict.accepted
+          ? (emptyResult ? "Correct · no target" : "Accepted")
+          : (emptyResult && verdict.target_present ? "Missed" : "Rejected");
         const confidence = verdict.confidence == null ? "" : ` · confidence ${Number(verdict.confidence).toFixed(2)}`;
         copy.append(
           node("strong", null, `${verdictText} · ${cleanMessage(verdict.image_id)}${confidence}`),
@@ -1109,6 +1432,221 @@
     });
   }
 
+  function resetAgentLive() {
+    const live = state.agentLive;
+    stopAgentLiveStream(true);
+    Object.assign(live, {
+      sessionId: null, jobId: null, cursor: 0, processed: 0, total: 0,
+      images: [], stopped: false, ready: false,
+    });
+    const section = $("agent-live");
+    if (section) section.hidden = true;
+    const badge = $("agent-live-badge");
+    if (badge) badge.hidden = true;
+    const grid = $("agent-live-grid");
+    if (grid) grid.replaceChildren();
+    const galleryLink = $("agent-open-gallery");
+    if (galleryLink) galleryLink.hidden = true;
+    setStatus("agent-live-notice", "");
+  }
+
+  function stopAgentLiveStream(clear) {
+    const live = state.agentLive;
+    if (live.retryTimer) {
+      clearTimeout(live.retryTimer);
+      live.retryTimer = null;
+    }
+    if (live.controller) {
+      live.controller.abort();
+      live.controller = null;
+    }
+    live.reading = false;
+    live.stopped = !!clear;
+    if (clear) {
+      live.cursor = 0;
+      live.processed = 0;
+      live.total = 0;
+      live.images = [];
+    }
+  }
+
+  function updateAgentLiveMeta() {
+    const live = state.agentLive;
+    if ($("agent-live-count")) {
+      $("agent-live-count").textContent = `${live.processed} / ${live.total || "?"} images`;
+    }
+    const bar = $("agent-live-progress-bar");
+    if (bar) {
+      const pct = live.total ? Math.min(100, Math.round((live.processed / live.total) * 100)) : 0;
+      bar.style.width = `${pct}%`;
+    }
+  }
+
+  function renderAgentLiveGrid() {
+    const live = state.agentLive;
+    const grid = $("agent-live-grid");
+    if (!grid) return;
+    grid.replaceChildren();
+    live.images.forEach((image, index) => {
+      const figure = node("figure");
+      figure.dataset.imageId = String(image.imageId);
+      const img = node("img");
+      img.alt = `Live label preview ${index + 1}`;
+      img.loading = "lazy";
+      img.src = `/v1/label-jobs/${encodeURIComponent(live.jobId)}/preview/${encodeURIComponent(image.imageId)}/image?tenant_id=${encodeURIComponent(DEFAULT_TENANT)}`;
+      const caption = node("figcaption", null, cleanMessage(image.imageId).split(":").pop());
+      figure.append(img, caption);
+      grid.appendChild(figure);
+    });
+  }
+
+  function handlePreviewEvent(payload) {
+    const live = state.agentLive;
+    const eventId = Number(payload && payload.event_id) || 0;
+    if (eventId && eventId <= live.cursor) return;
+    if (eventId) live.cursor = eventId;
+    live.processed = Number(payload && payload.processed) || live.processed;
+    live.total = Number(payload && payload.total) || live.total;
+    const imageId = payload && payload.image_id;
+    if (imageId && !live.images.some((item) => item.imageId === String(imageId))) {
+      live.images.push({ imageId: String(imageId) });
+      renderAgentLiveGrid();
+    }
+    updateAgentLiveMeta();
+    setStatus("agent-live-notice", "");
+  }
+
+  async function readAgentLiveStream() {
+    const live = state.agentLive;
+    if (live.stopped || !live.jobId || live.reading) return;
+    live.reading = true;
+    try {
+      const response = await fetch(
+        `/v1/jobs/${encodeURIComponent(live.jobId)}/preview?after_event_id=${live.cursor}&tenant_id=${encodeURIComponent(DEFAULT_TENANT)}`,
+        { headers: tenantHeaders(false), signal: live.controller ? live.controller.signal : undefined }
+      );
+      if (!response.ok) throw new Error(`Live view unavailable (${response.status})`);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop();
+        parts.forEach((part) => {
+          const line = part.split("\n").find((item) => item.startsWith("data:"));
+          if (!line) return;
+          try { handlePreviewEvent(JSON.parse(line.slice(5).trim())); } catch { /* ignore malformed frames */ }
+        });
+      }
+      buffer += decoder.decode();
+      const trailing = buffer.split("\n\n").find((part) => part.includes("data:"));
+      if (trailing) {
+        const line = trailing.split("\n").find((item) => item.startsWith("data:"));
+        if (line) {
+          try { handlePreviewEvent(JSON.parse(line.slice(5).trim())); } catch { /* ignore malformed frames */ }
+        }
+      }
+    } catch (err) {
+      if (!live.stopped && !(err && err.name === "AbortError")) {
+        setStatus(
+          "agent-live-notice",
+          `Live view connection dropped (${cleanMessage(err.message || err)}). Reconnecting without losing displayed images.`,
+          "error"
+        );
+      }
+    } finally {
+      live.reading = false;
+      if (!live.stopped && live.jobId) {
+        live.retryTimer = setTimeout(readAgentLiveStream, 300);
+      }
+    }
+  }
+
+  function startAgentLiveStream(session) {
+    const live = state.agentLive;
+    const jobId = session.label_job_id ? String(session.label_job_id) : null;
+    if (!jobId) return;
+    if (live.jobId === jobId && (live.reading || live.retryTimer || live.controller)) return;
+    stopAgentLiveStream(true);
+    Object.assign(live, {
+      sessionId: String(session.session_id), jobId, cursor: 0, processed: 0,
+      total: live.total || 0, images: [], stopped: false, ready: false,
+      controller: new AbortController(), retryTimer: null, reading: false,
+    });
+    renderAgentLiveGrid();
+    updateAgentLiveMeta();
+    if ($("agent-live-phase")) $("agent-live-phase").textContent = "Streaming";
+    if ($("agent-live-summary")) $("agent-live-summary").textContent = "Images appear here as the label worker finishes each one.";
+    if ($("agent-live-badge")) $("agent-live-badge").hidden = false;
+    readAgentLiveStream();
+  }
+
+  function syncAgentLiveView(session) {
+    const section = $("agent-live");
+    if (!section) return;
+    const jobId = session.label_job_id ? String(session.label_job_id) : null;
+    const datasetVersionId = session.dataset_version_id ? String(session.dataset_version_id) : null;
+    if (!jobId) {
+      resetAgentLive();
+      return;
+    }
+    section.hidden = false;
+    const live = state.agentLive;
+    const running = !datasetVersionId && !["failed", "cancelled"].includes(session.status)
+      && ["queued", "running"].includes(session.label_status)
+      || session.status === "labeling";
+    if (running) {
+      startAgentLiveStream(session);
+      return;
+    }
+    stopAgentLiveStream(false);
+    if ($("agent-live-badge")) $("agent-live-badge").hidden = true;
+    if ($("agent-live-phase")) {
+      if (datasetVersionId) $("agent-live-phase").textContent = "Ready";
+      else if (session.label_status === "succeeded") $("agent-live-phase").textContent = "Labeling complete";
+      else if (session.status === "cancelled") $("agent-live-phase").textContent = "Cancelled";
+      else if (session.status === "failed") $("agent-live-phase").textContent = "Failed";
+      else $("agent-live-phase").textContent = "Stopped";
+    }
+    if ($("agent-live-summary")) {
+      $("agent-live-summary").textContent = datasetVersionId
+        ? `${live.images.length} images labeled. The dataset version is ready.`
+        : `${live.images.length} images labeled so far.`;
+    }
+    const link = $("agent-open-gallery");
+    if (link) {
+      link.hidden = !datasetVersionId;
+      if (datasetVersionId) {
+        link.href = `#/datasets/${encodeURIComponent(datasetVersionId)}`;
+        link.dataset.galleryVersion = datasetVersionId;
+      } else link.removeAttribute("href");
+    }
+    if (session.status === "cancelled") {
+      setStatus("agent-live-notice", "Run cancelled. Live view stopped.", "error");
+    } else if (session.status === "failed" || session.label_status === "failed") {
+      setStatus("agent-live-notice", "Labeling failed. Live view stopped.", "error");
+    } else if (datasetVersionId) {
+      setStatus("agent-live-notice", "Dataset ready. Open the gallery to inspect every image.", "ok");
+    }
+    if (live.images.length) setStatus("agent-live-notice",
+      datasetVersionId ? "Dataset ready. Open the gallery to inspect every image." :
+        (session.status === "cancelled" ? "Run cancelled. Live view stopped." : $("agent-live-notice").textContent),
+      datasetVersionId ? "ok" : (session.status === "cancelled" ? "error" : null));
+  }
+
+  if ($("agent-open-gallery")) {
+    $("agent-open-gallery").addEventListener("click", (event) => {
+      const versionId = event.currentTarget.dataset.galleryVersion;
+      if (!versionId) return;
+      event.preventDefault();
+      window.location.hash = `#/datasets/${versionId}`;
+      showView("datasets");
+    });
+  }
+
   function applyAgentSession(session) {
     state.agentSession = session;
     try { localStorage.setItem(AGENT_SESSION_KEY, String(session.session_id)); } catch { /* local storage is optional */ }
@@ -1118,11 +1656,16 @@
     if (content) content.hidden = false;
     renderAgentAssets(session);
     renderAgentMessages(session);
+    renderAgentQuickReplies(session);
     renderAgentSpec(session);
     renderAgentProgress(session);
     renderAgentCalibration(session);
+    syncAgentBoard(session);
+    renderAgentHealth(session);
+    syncAgentLiveView(session);
 
-    if ($("agent-run-title")) $("agent-run-title").textContent = session.prompt || session.asset_name || "Task plan";
+    const classNames = (session.classes || []).map((item) => item.name).join(", ");
+    if ($("agent-run-title")) $("agent-run-title").textContent = classNames || session.asset_name || "Task plan";
     const pill = $("agent-run-pill");
     if (pill) {
       pill.textContent = agentStatusLabel(session.status);
@@ -1161,7 +1704,9 @@
 
     const label = agentStatusLabel(session.status);
     if (session.error) setStatus("agent-status", cleanMessage(session.error), "error");
-    else if (session.status === "complete") setStatus("agent-status", "Dataset ready. Download the COCO archive from the run panel.", "ok");
+    else if (session.status === "complete") setStatus("agent-status", `Dataset ready. Download the ${agentFormatLabel(session)} archive from the run panel.`, "ok");
+    else if (session.status === "gathering") setStatus("agent-status", "Answer the agent's question to continue.", "ok");
+    else if (session.status === "paused") setStatus("agent-status", "Labeling is paused. Answer the agent to continue or stop.", "error");
     else if (AGENT_ACTIVE.has(session.status)) setStatus("agent-status", `${label}…`, "busy");
     else if (session.status === "needs_attention") setStatus("agent-status", "Calibration needs attention. Retry at 0.50 or start a new task.", "error");
     else if (session.status === "awaiting_confirmation") setStatus("agent-status", "Task planned. Confirm the specification to start.", "ok");
@@ -1177,6 +1722,7 @@
     if (empty) empty.hidden = false;
     if (content) content.hidden = true;
     revokeAgentOverlays();
+    resetAgentLive();
     state.agentCalibrationKey = "";
     ["agent-spec", "agent-progress", "agent-calibration", "agent-run-error"].forEach((id) => {
       const el = $(id);
@@ -1190,6 +1736,7 @@
       if (el) el.hidden = true;
     });
     renderAgentMessages(null);
+    renderAgentQuickReplies(null);
     renderAgentAssets(null);
     const input = $("agent-message");
     if (input) input.value = "";
@@ -1270,60 +1817,414 @@
     }
   }
 
-  async function planAgentTask() {
+  async function sendAgentMessage(text) {
     const button = $("agent-plan");
-    const assetId = $("agent-asset") ? $("agent-asset").value : "";
-    const message = (($("agent-message") && $("agent-message").value) || "").trim();
-    if (!assetId) {
-      setStatus("agent-status", "Upload and select an asset before planning a task.", "error");
+    const input = $("agent-message");
+    const message = (text != null ? text : (input && input.value) || "").trim();
+    const session = state.agentSession;
+    const assetIds = [...agentSelection];
+    if (!assetIds.length && !(session && AGENT_OPEN.has(session.status))) {
+      setStatus("agent-status", "Select at least one asset before planning a task.", "error");
       return;
     }
     if (!message) {
       setStatus("agent-status", "Describe what the agent should label.", "error");
       return;
     }
-    setBusy(button, true, "Planning…");
-    setStatus("agent-status", "Planning the task…", "busy");
+    const continuing = session && AGENT_OPEN.has(session.status);
+    setBusy(button, true, continuing ? "Sending…" : "Planning…");
+    setStatus("agent-status", continuing ? "Updating the plan…" : "Planning the task…", "busy");
     try {
-      const session = await request("/v1/agent/sessions", {
-        method: "POST",
-        headers: tenantHeaders(true),
-        body: JSON.stringify({ asset_id: assetId, message }),
-      });
-      applyAgentSession(session);
-      setStatus("agent-status", "Task planned. Confirm the specification to start.", "ok");
+      const fresh = continuing
+        ? await request(`/v1/agent/sessions/${encodeURIComponent(session.session_id)}/messages`, {
+          method: "POST",
+          headers: tenantHeaders(true),
+          body: JSON.stringify({ message, asset_ids: assetIds }),
+        })
+        : await request("/v1/agent/sessions", {
+          method: "POST",
+          headers: tenantHeaders(true),
+          body: JSON.stringify({ asset_ids: assetIds, message }),
+        });
+      if (!continuing) {
+        revokeAgentOverlays();
+        resetAgentLive();
+        state.agentCalibrationKey = "";
+      }
+      if (input) input.value = "";
+      applyAgentSession(fresh);
+      if (AGENT_ACTIVE.has(fresh.status)) startAgentPolling();
     } catch (err) {
       setStatus("agent-status", cleanMessage(err.message || err), "error");
     } finally {
       setBusy(button, false);
+      renderAgentAssets(state.agentSession);
     }
   }
 
-  async function confirmAgentTask(threshold) {
+  async function planAgentTask() {
+    await sendAgentMessage(null);
+  }
+
+  // Calibration board: SAM 3's raw predictions per sample, re-thresholded live.
+  const BOARD_COLORS = [[255, 64, 64], [64, 160, 255], [64, 210, 120], [245, 180, 55]];
+  const BOARD_STATES = new Set(["calibrating", "needs_attention", "labeling", "exporting", "complete"]);
+
+  function boardAttempts(session) {
+    // Attempts per class name from live progress or the final payload.
+    const calibration = (session && session.calibration) || {};
+    const byClass = {};
+    if (calibration.status === "running") {
+      (calibration.progress || []).forEach((attempt) => {
+        (byClass[attempt.name] = byClass[attempt.name] || []).push(attempt);
+      });
+      return byClass;
+    }
+    const source = calibration.status === "manual" && calibration.previous ? calibration.previous : calibration;
+    (source.classes || []).forEach((item) => {
+      byClass[item.name] = (item.attempts || []).map((attempt) => ({ ...attempt, prompt: item.prompt, chosen: item.threshold }));
+    });
+    return byClass;
+  }
+
+  function boardDefault(session, name, attempts) {
+    const calibration = (session && session.calibration) || {};
+    if (calibration.class_thresholds && calibration.class_thresholds[name] != null) return Number(calibration.class_thresholds[name]);
+    const chosen = attempts.find((attempt) => attempt.chosen != null);
+    if (chosen) return Number(chosen.chosen);
+    if (attempts.length) {
+      const best = attempts.reduce((a, b) => (Number(b.agreement) > Number(a.agreement) ? b : a));
+      return Number(best.threshold);
+    }
+    return 0.5;
+  }
+
+  async function boardImage(session, imageId) {
+    const board = state.agentBoard;
+    if (board.images.has(imageId)) return board.images.get(imageId);
+    const promise = (async () => {
+      const path = `/v1/agent/sessions/${encodeURIComponent(session.session_id)}/calibration-samples/${encodeURIComponent(imageId)}/image`;
+      const response = await fetch(path, { headers: tenantHeaders(false) });
+      if (!response.ok) throw new Error(`Sample unavailable (${response.status})`);
+      const url = URL.createObjectURL(await response.blob());
+      state.agentOverlayUrls.push(url);
+      const img = new Image();
+      img.src = url;
+      await img.decode();
+      return img;
+    })();
+    board.images.set(imageId, promise);
+    return promise;
+  }
+
+  function drawBoardTile(canvas, img, sample, threshold, color) {
+    const width = canvas.width;
+    const height = canvas.height;
+    const scaleX = width / sample.width;
+    const scaleY = height / sample.height;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, width, height);
+    if (img) ctx.drawImage(img, 0, 0, width, height);
+    const kept = sample.predictions.filter((prediction) => prediction.score >= threshold);
+    const [r, g, b] = color;
+    kept.forEach((prediction) => {
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = `rgb(${r}, ${g}, ${b})`;
+      ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.35)`;
+      if (prediction.polygons && prediction.polygons.length) {
+        prediction.polygons.forEach((polygon) => {
+          ctx.beginPath();
+          for (let i = 0; i + 1 < polygon.length; i += 2) {
+            const x = polygon[i] * scaleX;
+            const y = polygon[i + 1] * scaleY;
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          }
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+        });
+      } else {
+        const [x1, y1, x2, y2] = prediction.box;
+        ctx.fillRect(x1 * scaleX, y1 * scaleY, (x2 - x1) * scaleX, (y2 - y1) * scaleY);
+        ctx.strokeRect(x1 * scaleX, y1 * scaleY, (x2 - x1) * scaleX, (y2 - y1) * scaleY);
+      }
+      const [bx, by] = prediction.box;
+      ctx.font = "11px IBM Plex Mono, monospace";
+      ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+      ctx.fillText(prediction.score.toFixed(2), Math.max(2, bx * scaleX + 2), Math.max(11, by * scaleY - 3));
+    });
+    return kept.length;
+  }
+
+  function verdictAt(attempts, threshold, imageId) {
+    const attempt = attempts.find((item) => Math.abs(Number(item.threshold) - threshold) < 0.0005);
+    if (!attempt) return null;
+    return (attempt.verdicts || []).find((verdict) => verdict.image_id === imageId) || null;
+  }
+
+  function renderBoardClass(container, session, entry, attempts, index) {
+    const board = state.agentBoard;
+    const color = BOARD_COLORS[index % BOARD_COLORS.length];
+    const panel = node("div", "agent-board-class");
+    panel.dataset.className = entry.name;
+    if (!(entry.name in board.sliders) || !board.touched.has(entry.name)) {
+      board.sliders[entry.name] = boardDefault(session, entry.name, attempts);
+    }
+    const head = node("div", "agent-board-class-head");
+    const swatch = node("span", "agent-board-swatch");
+    swatch.style.background = `rgb(${color.join(",")})`;
+    head.append(swatch, node("strong", null, entry.name), node("span", "agent-board-prompt", `SAM 3: “${entry.prompt}”`));
+    panel.appendChild(head);
+
+    const controls = node("div", "agent-board-controls");
+    const slider = document.createElement("input");
+    slider.type = "range";
+    slider.min = "0.05";
+    slider.max = "0.95";
+    slider.step = "0.01";
+    slider.value = String(board.sliders[entry.name]);
+    slider.className = "agent-board-slider";
+    slider.setAttribute("aria-label", `Threshold for ${entry.name}`);
+    const value = node("output", "agent-board-value", Number(slider.value).toFixed(2));
+    controls.append(node("span", null, "Threshold"), slider, value);
+    panel.appendChild(controls);
+
+    const chips = node("div", "agent-board-chips");
+    attempts.forEach((attempt) => {
+      const chip = node("button", "chip agent-board-chip", `${Number(attempt.threshold).toFixed(2)} · ${attempt.accepted_count}/${attempt.sample_count}`);
+      chip.type = "button";
+      if (attempt.chosen != null && Number(attempt.chosen) === Number(attempt.threshold)) chip.dataset.chosen = "true";
+      chip.title = "Show this threshold";
+      chip.addEventListener("click", () => {
+        slider.value = String(attempt.threshold);
+        slider.dispatchEvent(new Event("input"));
+      });
+      chips.appendChild(chip);
+    });
+    if (!attempts.length) chips.appendChild(node("span", "agent-board-waiting", session.status === "calibrating" ? "Waiting for the vision check…" : "No verdicts recorded"));
+    panel.appendChild(chips);
+
+    const grid = node("div", "agent-board-grid");
+    const tiles = entry.samples.map((sample) => {
+      const tile = node("figure", "agent-board-tile");
+      const canvas = document.createElement("canvas");
+      const ratio = sample.height / sample.width;
+      canvas.width = 240;
+      canvas.height = Math.max(60, Math.round(240 * ratio));
+      const caption = node("figcaption", "agent-board-caption");
+      tile.append(canvas, caption);
+      grid.appendChild(tile);
+      return { sample, canvas, caption, tile, img: null };
+    });
+    panel.appendChild(grid);
+    container.appendChild(panel);
+
+    const redraw = () => {
+      const threshold = Number(slider.value);
+      value.textContent = threshold.toFixed(2);
+      tiles.forEach((item) => {
+        const count = drawBoardTile(item.canvas, item.img, item.sample, threshold, color);
+        const verdict = verdictAt(attempts, threshold, item.sample.image_id);
+        item.caption.innerHTML = "";
+        item.caption.appendChild(node("span", null, `${count} mask${count === 1 ? "" : "s"}`));
+        delete item.tile.dataset.verdict;
+        if (verdict) {
+          const label = verdict.accepted
+            ? (verdict.prediction_count === 0 ? "✓ no target" : "✓ accepted")
+            : (verdict.prediction_count === 0 && verdict.target_present ? "✗ missed" : "✗ rejected");
+          item.tile.dataset.verdict = verdict.accepted ? "ok" : "bad";
+          const badge = node("span", "agent-board-verdict", label);
+          if (verdict.reasoning) badge.title = verdict.reasoning;
+          item.caption.appendChild(badge);
+        }
+      });
+    };
+    slider.addEventListener("input", () => {
+      board.sliders[entry.name] = Number(slider.value);
+      board.touched.add(entry.name);
+      redraw();
+    });
+    redraw();
+    tiles.forEach((item) => {
+      boardImage(session, item.sample.image_id)
+        .then((img) => { item.img = img; redraw(); })
+        .catch(() => item.caption.appendChild(node("span", "agent-board-verdict", "image unavailable")));
+    });
+  }
+
+  function renderAgentBoard(session) {
+    const board = state.agentBoard;
+    const section = $("agent-board");
+    const container = $("agent-board-classes");
+    if (!section || !container) return;
+    const preview = board.preview;
+    if (!preview || !(preview.classes || []).length) {
+      section.hidden = true;
+      return;
+    }
+    section.hidden = false;
+    const attempts = boardAttempts(session);
+    const live = session.status === "calibrating";
+    if ($("agent-board-badge")) $("agent-board-badge").hidden = !live;
+    if ($("agent-board-summary")) {
+      $("agent-board-summary").textContent = live
+        ? "SAM 3 ran on the sample images; the vision model is judging each threshold."
+        : session.status === "needs_attention"
+          ? "No threshold passed. Inspect the samples, set a threshold per class, and label with it."
+          : "SAM 3 results on the sample images. Move a slider to see each threshold.";
+    }
+    const key = JSON.stringify([preview, attempts, session.status, session.calibration && session.calibration.class_thresholds]);
+    if (key !== board.renderKey) {
+      board.renderKey = key;
+      container.innerHTML = "";
+      (preview.classes || []).forEach((entry, index) => {
+        renderBoardClass(container, session, entry, attempts[entry.name] || [], index);
+      });
+    }
+    const actions = $("agent-board-actions");
+    if (actions) actions.hidden = session.status !== "needs_attention";
+  }
+
+  async function fetchAgentBoard(session) {
+    const board = state.agentBoard;
+    if (board.fetching) return;
+    board.fetching = true;
+    try {
+      const response = await fetch(
+        `/v1/agent/sessions/${encodeURIComponent(session.session_id)}/calibration-preview`,
+        { headers: tenantHeaders(false) },
+      );
+      board.fetchedAt = Date.now();
+      if (response.ok) board.preview = await response.json();
+    } catch {
+      board.fetchedAt = Date.now();
+    } finally {
+      board.fetching = false;
+    }
+    if (state.agentSession && state.agentSession.session_id === session.session_id) renderAgentBoard(state.agentSession);
+  }
+
+  function syncAgentBoard(session) {
+    const board = state.agentBoard;
+    if (!session || board.sessionId !== session.session_id) {
+      Object.assign(board, { sessionId: session ? session.session_id : null, preview: null, fetchedAt: 0, images: new Map(), sliders: {}, touched: new Set(), renderKey: "" });
+    }
+    const section = $("agent-board");
+    if (!session || !BOARD_STATES.has(session.status)) {
+      if (section) section.hidden = true;
+      return;
+    }
+    const calibrating = session.status === "calibrating";
+    const missingClasses = !board.preview || (board.preview.classes || []).length < (session.classes || []).length;
+    const stale = Date.now() - board.fetchedAt > (calibrating ? 1500 : 60000);
+    if ((calibrating && stale) || (!board.preview && stale) || (missingClasses && calibrating)) fetchAgentBoard(session);
+    renderAgentBoard(session);
+  }
+
+  if ($("agent-board-apply")) $("agent-board-apply").addEventListener("click", () => {
     const session = state.agentSession;
     if (!session) return;
-    const button = threshold == null ? $("agent-confirm") : $("agent-retry");
+    const values = {};
+    (session.classes || []).forEach((item) => {
+      const value = state.agentBoard.sliders[item.name];
+      values[item.name] = Number((value == null ? 0.5 : value).toFixed(2));
+    });
+    confirmAgentTask(null, values);
+  });
+
+  function formatDuration(seconds) {
+    if (seconds == null || !Number.isFinite(Number(seconds))) return "—";
+    const total = Math.round(Number(seconds));
+    if (total < 60) return `${total} s`;
+    const minutes = Math.floor(total / 60);
+    return `${minutes} min ${String(total % 60).padStart(2, "0")} s`;
+  }
+
+  function renderAgentHealth(session) {
+    const section = $("agent-health");
+    if (!section) return;
+    const health = session && session.health;
+    if (!health || !health.total) {
+      section.hidden = true;
+      return;
+    }
+    section.hidden = false;
+    const done = health.status === "done";
+    const stateText = { running: "Watching", paused: "Paused", resuming: "Resuming", done: "Finished" }[health.status] || health.status;
+    if ($("agent-health-state")) {
+      $("agent-health-state").textContent = stateText;
+      $("agent-health-state").dataset.state = health.status;
+    }
+    const alert = $("agent-health-alert");
+    if (alert) {
+      alert.hidden = !health.alert;
+      alert.textContent = health.alert ? cleanMessage(health.alert.message) : "";
+    }
+    const bar = $("agent-health-bar");
+    if (bar) bar.style.width = `${Math.min(100, (100 * health.processed) / health.total).toFixed(1)}%`;
+    const metrics = $("agent-health-metrics");
+    if (metrics) {
+      metrics.innerHTML = "";
+      [
+        ["Images", `${health.processed} / ${health.total}`],
+        ["Speed", health.images_per_sec ? `${Number(health.images_per_sec).toFixed(2)} img/s` : "—"],
+        ["Time left", done ? "—" : formatDuration(health.eta_sec)],
+        ["No detections", `${health.empty_images} (${Math.round((health.empty_rate || 0) * 100)}%)`],
+      ].forEach(([term, value]) => {
+        metrics.append(node("dt", null, term), node("dd", null, value));
+      });
+    }
+    const classes = $("agent-health-classes");
+    if (classes) {
+      classes.innerHTML = "";
+      (health.classes || []).forEach((item, index) => {
+        const row = node("div", "agent-health-class");
+        const swatch = node("span", "agent-board-swatch");
+        swatch.style.background = `rgb(${BOARD_COLORS[index % BOARD_COLORS.length].join(",")})`;
+        const score = item.mean_score == null ? "—" : Number(item.mean_score).toFixed(2);
+        row.append(
+          swatch,
+          node("strong", null, item.name),
+          node("span", null, `${item.detections} found in ${item.images_with} image${item.images_with === 1 ? "" : "s"}`),
+          node("span", "agent-health-score", `mean score ${score}`),
+        );
+        classes.appendChild(row);
+      });
+    }
+    const acknowledged = (health.acknowledged || []).length;
+    section.dataset.acknowledged = String(acknowledged);
+  }
+
+  async function confirmAgentTask(threshold, classThresholds) {
+    const session = state.agentSession;
+    if (!session) return;
+    const fixed = threshold != null || !!classThresholds;
+    const button = classThresholds ? $("agent-board-apply") : threshold == null ? $("agent-confirm") : $("agent-retry");
     const original = button ? button.textContent : "";
     if (button) {
       button.disabled = true;
-      button.textContent = threshold == null ? "Calibrating…" : "Starting…";
+      button.textContent = fixed ? "Starting…" : "Calibrating…";
     }
     const confirm = $("agent-confirm");
     const retry = $("agent-retry");
     const cancel = $("agent-cancel");
-    if (confirm && threshold == null) confirm.hidden = true;
-    if (retry && threshold != null) retry.hidden = true;
+    if (confirm && !fixed) confirm.hidden = true;
+    if (retry && fixed) retry.hidden = true;
     if (cancel) {
       cancel.hidden = false;
       cancel.disabled = false;
     }
     setStatus(
       "agent-status",
-      threshold == null ? "Calibrating on a sample. This can take a moment…" : "Starting at the fixed threshold…",
+      classThresholds
+        ? "Starting with your thresholds…"
+        : threshold == null
+          ? "Calibrating on the sample images. Watch the calibration board…"
+          : "Starting at the fixed threshold…",
       "busy",
     );
     try {
-      const body = threshold == null ? {} : { threshold };
+      const body = classThresholds ? { class_thresholds: classThresholds } : threshold == null ? {} : { threshold };
       const fresh = await request(`/v1/agent/sessions/${encodeURIComponent(session.session_id)}/confirm`, {
         method: "POST",
         headers: tenantHeaders(true),
@@ -1363,6 +2264,12 @@
   }
 
   if ($("agent-plan")) $("agent-plan").addEventListener("click", planAgentTask);
+  if ($("agent-message")) $("agent-message").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      if (!$("agent-plan").disabled) planAgentTask();
+    }
+  });
   if ($("agent-confirm")) $("agent-confirm").addEventListener("click", () => confirmAgentTask(null));
   if ($("agent-retry")) $("agent-retry").addEventListener("click", () => confirmAgentTask(0.5));
   if ($("agent-cancel")) $("agent-cancel").addEventListener("click", cancelAgentTask);
@@ -1405,7 +2312,891 @@
     };
   }
 
-  async function openDatasetReview(dataset, card) {
+  function showDatasetList(opts = {}) {
+    if (window.location.hash !== "#/datasets") {
+      window.history.replaceState(null, "", "#/datasets");
+    }
+    closeDatasetGallery();
+    if (!opts.keepCards) loadDatasets();
+  }
+
+  function showDatasetsForHash() {
+    const versionId = galleryVersionFromHash();
+    if (versionId) openDatasetGallery(versionId);
+    else {
+      closeDatasetGallery();
+      loadDatasets();
+    }
+  }
+
+  function closeDatasetGallery() {
+    const gallery = state.gallery;
+    gallery.objectUrls.forEach((url) => URL.revokeObjectURL(url));
+    gallery.objectUrls = [];
+    state.gallery.images.forEach((image) => { delete image._url; });
+    Object.assign(gallery, {
+      open: false, versionId: null, dataset: null, images: [], visible: [], index: -1,
+      total: 0, offset: 0, hasMore: false,
+    });
+    const section = $("dataset-gallery");
+    if (section) section.hidden = true;
+    const list = $("datasets-list");
+    if (list) list.hidden = false;
+  }
+
+  function galleryClassName(dataset, categoryId) {
+    const categories = (dataset && dataset.categories) || [];
+    const match = categories.find(
+      (category) => String(category.category_id) === String(categoryId)
+    );
+    return match ? match.name : `class ${categoryId}`;
+  }
+
+  function galleryStatus(message, kind) {
+    setStatus("dataset-gallery-status", message, kind);
+  }
+
+  async function openDatasetGallery(versionId, knownDataset = null) {
+    if (state.gallery.open && state.gallery.versionId === String(versionId)) return;
+    closeDatasetGallery();
+    const section = $("dataset-gallery");
+    const list = $("datasets-list");
+    if (!section) return;
+    if (list) list.hidden = true;
+    section.hidden = false;
+    Object.assign(state.gallery, {
+      open: true,
+      versionId: String(versionId),
+      dataset: knownDataset,
+      index: -1,
+      filters: { categoryId: "all", split: "all", unannotated: false, lowConfidence: false, status: "all" },
+      toggles: { boxes: true, masks: true, labels: true },
+      selected: new Set(),
+      counts: null,
+      selectedAnnotation: null,
+    });
+    closeGalleryClick();
+    if ($("gallery-filter-status")) $("gallery-filter-status").value = "all";
+    if ($("gallery-title")) $("gallery-title").textContent = "Dataset gallery";
+    if ($("gallery-subtitle")) $("gallery-subtitle").textContent = `Version ${String(versionId).slice(0, 8)}`;
+    if ($("gallery-filter-class")) $("gallery-filter-class").value = "all";
+    if ($("gallery-filter-split")) $("gallery-filter-split").value = "all";
+    if ($("gallery-filter-unannotated")) $("gallery-filter-unannotated").checked = false;
+    if ($("gallery-filter-lowconfidence")) $("gallery-filter-lowconfidence").checked = false;
+    if ($("gallery-toggle-boxes")) $("gallery-toggle-boxes").checked = true;
+    if ($("gallery-toggle-masks")) $("gallery-toggle-masks").checked = true;
+    if ($("gallery-toggle-labels")) $("gallery-toggle-labels").checked = true;
+    if ($("gallery-counter")) $("gallery-counter").textContent = "image 0 of 0";
+    galleryStatus("Loading dataset images…", "busy");
+    try {
+      if (!state.gallery.dataset) {
+        const datasets = await request("/v1/datasets", { headers: tenantHeaders(false) });
+        state.gallery.dataset = (datasets || []).find(
+          (item) => String(item.version_id) === String(versionId)
+        ) || null;
+      }
+      const dataset = state.gallery.dataset;
+      if (!dataset) throw new Error("Dataset version not found");
+      if ($("gallery-title")) $("gallery-title").textContent = dataset.name || "Dataset gallery";
+      if ($("gallery-subtitle")) {
+        $("gallery-subtitle").textContent = `${dataset.source_asset || "Source asset"} · ${formatDate(dataset.created_at)}`;
+      }
+      renderGalleryClassCounts();
+      const classSelect = $("gallery-filter-class");
+      if (classSelect) {
+        classSelect.innerHTML = "";
+        const all = node("option", null, "All classes");
+        all.value = "all";
+        classSelect.appendChild(all);
+        const counts = dataset.class_counts || dataset.categories || [];
+        counts.forEach((item) => {
+          const option = node("option", null, `${item.name}${item.count != null ? ` (${item.count})` : ""}`);
+          option.value = String(item.category_id);
+          classSelect.appendChild(option);
+        });
+      }
+      if (window.location.hash !== `#/datasets/${versionId}`) {
+        window.history.replaceState(null, "", `#/datasets/${versionId}`);
+      }
+      await loadGalleryImages(versionId, true);
+    } catch (err) {
+      galleryStatus(cleanMessage(err.message || err), "error");
+    }
+  }
+
+  function renderGalleryClassCounts() {
+    const row = $("gallery-class-counts");
+    if (!row) return;
+    row.replaceChildren();
+    const dataset = state.gallery.dataset;
+    const counts = (dataset && dataset.class_counts) || [];
+    if (!counts.length) {
+      row.appendChild(node("span", "gallery-empty-note", "No annotations in this version."));
+      return;
+    }
+    counts.forEach((item) => {
+      const chip = node("span", "category-chip", `${item.name} · ${item.count}`);
+      chip.dataset.classCount = String(item.category_id);
+      chip.style.borderColor = item.color || classColor(item.category_id);
+      row.appendChild(chip);
+    });
+  }
+
+  async function galleryImageUrl(image) {
+    if (image._url) return image._url;
+    const path = `/v1/datasets/${encodeURIComponent(state.gallery.versionId)}/images/${encodeURIComponent(image.image_id)}/file`;
+    const response = await fetch(path, { headers: tenantHeaders(false) });
+    if (!response.ok) throw new Error(`Image request failed (${response.status})`);
+    const url = URL.createObjectURL(await response.blob());
+    image._url = url;
+    state.gallery.objectUrls.push(url);
+    return url;
+  }
+
+  function galleryVisibleImages() {
+    const filters = state.gallery.filters;
+    return state.gallery.images.filter((image) => {
+      const annotations = image.annotations || [];
+      if (filters.categoryId !== "all" && !annotations.some(
+        (item) => String(item.category_id) === String(filters.categoryId)
+      )) return false;
+      if (filters.split !== "all" && image.split !== filters.split) return false;
+      if (filters.status && filters.status !== "all" && (image.status || "pending") !== filters.status) return false;
+      if (filters.unannotated && annotations.length) return false;
+      if (filters.lowConfidence && !annotations.some(
+        (item) => item.score != null && Number(item.score) < 0.5
+      )) return false;
+      return true;
+    });
+  }
+
+  function applyGalleryFilters() {
+    const gallery = state.gallery;
+    gallery.visible = galleryVisibleImages();
+    if (gallery.index >= gallery.visible.length) {
+      gallery.index = gallery.visible.length ? gallery.visible.length - 1 : -1;
+    }
+  }
+
+  async function loadGalleryImages(versionId, reset) {
+    const gallery = state.gallery;
+    if (reset) {
+      gallery.images = [];
+      gallery.offset = 0;
+      gallery.total = 0;
+      gallery.hasMore = true;
+      gallery.index = -1;
+    }
+    if (!gallery.hasMore) return;
+    galleryStatus("Loading images…", "busy");
+    try {
+      const data = await request(
+        `/v1/datasets/${encodeURIComponent(versionId)}/review?limit=200&offset=${gallery.offset}`,
+        { headers: tenantHeaders(false) }
+      );
+      if (data && data.counts) gallery.counts = data.counts;
+      const page = (data && data.images) || [];
+      gallery.images = gallery.images.concat(page);
+      gallery.total = Number(data && data.total) || gallery.images.length;
+      gallery.offset = gallery.images.length;
+      gallery.hasMore = !!(data && data.has_more);
+      await Promise.all(gallery.images.map((image) => galleryImageUrl(image).catch(() => null)));
+      applyGalleryFilters();
+      if (gallery.visible.length && gallery.index < 0) gallery.index = 0;
+      renderGallery();
+      galleryStatus("", null);
+    } catch (err) {
+      galleryStatus(cleanMessage(err.message || err), "error");
+    }
+  }
+
+  async function selectGalleryImage(index) {
+    const gallery = state.gallery;
+    if (!gallery.open || index < 0 || index >= gallery.visible.length) return;
+    if (gallery.index !== index) {
+      closeGalleryClick();
+      gallery.selectedAnnotation = null;
+    }
+    gallery.index = index;
+    const image = gallery.visible[index];
+    renderGallery();
+    try {
+      const url = await galleryImageUrl(image);
+      if (!gallery.open || gallery.visible[index] !== image) return;
+      const img = $("gallery-image");
+      if (!img) return;
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = () => reject(new Error("Could not display this image"));
+        img.src = url;
+      });
+      if (!gallery.open || gallery.visible[index] !== image) return;
+      drawGalleryOverlay();
+    } catch (err) {
+      galleryStatus(cleanMessage(err.message || err), "error");
+    }
+  }
+
+  function renderGallery() {
+    const gallery = state.gallery;
+    if (!gallery.open) return;
+    const visible = gallery.visible;
+    const image = visible[gallery.index] || null;
+    if ($("gallery-counter")) {
+      $("gallery-counter").textContent = `image ${image ? gallery.index + 1 : 0} of ${visible.length}`;
+    }
+    const filmstrip = $("gallery-filmstrip");
+    if (filmstrip) {
+      filmstrip.replaceChildren();
+      visible.forEach((item, index) => {
+        const wrap = node("div", "gallery-thumb-wrap");
+        wrap.dataset.status = item.status || "pending";
+        const button = node("button", "gallery-thumb");
+        button.type = "button";
+        button.dataset.galleryIndex = String(index);
+        button.dataset.annotated = String((item.annotations || []).length > 0);
+        button.dataset.status = item.status || "pending";
+        button.setAttribute("aria-label", `Open ${cleanMessage(item.file_name)} (${item.status || "pending"})`);
+        if (index === gallery.index) button.classList.add("is-active");
+        const thumb = node("img");
+        thumb.alt = "";
+        thumb.loading = "lazy";
+        if (item._url) thumb.src = item._url;
+        button.appendChild(thumb);
+        button.addEventListener("click", () => selectGalleryImage(index));
+        const pick = document.createElement("input");
+        pick.type = "checkbox";
+        pick.className = "gallery-thumb-pick";
+        pick.checked = gallery.selected.has(item.image_id);
+        pick.setAttribute("aria-label", `Select ${cleanMessage(item.file_name)}`);
+        pick.addEventListener("change", () => {
+          if (pick.checked) gallery.selected.add(item.image_id); else gallery.selected.delete(item.image_id);
+          renderGalleryReviewBar();
+        });
+        const badge = node("span", "gallery-thumb-status", { approved: "✓", rejected: "✗" }[item.status] || "");
+        wrap.append(button, pick, badge);
+        filmstrip.appendChild(wrap);
+      });
+    }
+    const loadMore = $("gallery-load-more");
+    if (loadMore) {
+      loadMore.hidden = !gallery.hasMore;
+      loadMore.textContent = `Load more images (${Math.max(0, gallery.total - gallery.images.length)} remaining)`;
+    }
+    if ($("gallery-prev")) $("gallery-prev").disabled = gallery.index <= 0;
+    if ($("gallery-next")) $("gallery-next").disabled = gallery.index < 0 || gallery.index >= visible.length - 1;
+    if ($("gallery-caption")) {
+      $("gallery-caption").textContent = image
+        ? `${cleanMessage(image.source_name || image.file_name)} · ${image.split || "train"}`
+        : "No images match these filters.";
+    }
+    const details = $("gallery-details");
+    if (details) {
+      details.replaceChildren();
+      const rows = image ? [
+        ["File", cleanMessage(image.source_name || image.file_name)],
+        ["Review", image.status || "pending"],
+        ["Split", image.split || "train"],
+        ["Dimensions", `${image.width}×${image.height}`],
+        ["Annotations", String((image.annotations || []).length)],
+      ] : [["File", "—"]];
+      rows.forEach(([term, value]) => {
+        details.appendChild(node("dt", null, term));
+        details.appendChild(node("dd", null, value));
+      });
+    }
+    const annotations = $("gallery-annotations");
+    if (annotations) {
+      annotations.replaceChildren();
+      const items = (image && image.annotations) || [];
+      if (!items.length) {
+        annotations.appendChild(node("p", "gallery-empty-note", "No annotations for this image."));
+      }
+      items.forEach((annotation) => {
+        const row = node("div", "gallery-annotation");
+        row.dataset.annotationId = String(annotation.annotation_id);
+        const swatch = node("span", "gallery-annotation-swatch");
+        swatch.style.background = classColor(annotation.category_id);
+        const copy = node("div");
+        const score = annotation.score == null ? "" : ` · ${Number(annotation.score).toFixed(2)}`;
+        copy.append(
+          node("strong", null, `${cleanMessage(galleryClassName(gallery.dataset, annotation.category_id))}${score}`),
+          node("span", "gallery-annotation-meta", `${Math.round(annotationArea(annotation, image))} px²`)
+        );
+        row.append(swatch, copy);
+        row.tabIndex = 0;
+        if (gallery.selectedAnnotation === annotation.annotation_id) row.classList.add("is-selected");
+        row.addEventListener("click", () => {
+          gallery.selectedAnnotation = gallery.selectedAnnotation === annotation.annotation_id ? null : annotation.annotation_id;
+          renderGallery();
+        });
+        const categories = (gallery.dataset && gallery.dataset.categories) || [];
+        if (categories.length > 1) {
+          const select = document.createElement("select");
+          select.className = "gallery-annotation-class";
+          select.setAttribute("aria-label", "Class");
+          categories.forEach((category) => {
+            const option = node("option", null, category.name);
+            option.value = String(category.category_id);
+            select.appendChild(option);
+          });
+          select.value = String(annotation.category_id);
+          select.addEventListener("click", (event) => event.stopPropagation());
+          select.addEventListener("change", () => changeAnnotationClass(image, annotation, Number(select.value)));
+          row.appendChild(select);
+        }
+        const remove = node("button", "gallery-annotation-delete", "✕");
+        remove.type = "button";
+        remove.title = "Delete this annotation";
+        remove.setAttribute("aria-label", "Delete annotation");
+        remove.addEventListener("click", (event) => {
+          event.stopPropagation();
+          deleteGalleryAnnotation(image, annotation);
+        });
+        row.appendChild(remove);
+        annotations.appendChild(row);
+      });
+    }
+    const refine = $("gallery-refine");
+    if (refine) refine.disabled = !image;
+    if ($("gallery-click-mode")) $("gallery-click-mode").disabled = !image;
+    renderGalleryReviewBar();
+    drawGalleryOverlay();
+  }
+
+  function drawGalleryOverlay() {
+    const gallery = state.gallery;
+    const canvas = $("gallery-overlay");
+    const img = $("gallery-image");
+    if (!canvas || !img || !img.complete || !img.naturalWidth) return;
+    const width = img.naturalWidth;
+    const height = img.naturalHeight;
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
+    // The image is letterboxed (object-fit: contain); lay the canvas exactly
+    // over the displayed pixels so drawings and clicks line up with the photo.
+    const boxWidth = img.clientWidth;
+    const boxHeight = img.clientHeight;
+    if (boxWidth && boxHeight) {
+      const scale = Math.min(boxWidth / width, boxHeight / height);
+      const shownWidth = width * scale;
+      const shownHeight = height * scale;
+      canvas.style.width = `${shownWidth}px`;
+      canvas.style.height = `${shownHeight}px`;
+      canvas.style.left = `${img.offsetLeft + (boxWidth - shownWidth) / 2}px`;
+      canvas.style.top = `${img.offsetTop + (boxHeight - shownHeight) / 2}px`;
+    }
+    canvas.dataset.boxes = String(gallery.toggles.boxes);
+    canvas.dataset.masks = String(gallery.toggles.masks);
+    canvas.dataset.labels = String(gallery.toggles.labels);
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, width, height);
+    const image = gallery.visible[gallery.index];
+    const annotations = (image && image.annotations) || [];
+    annotations.forEach((annotation) => {
+      const color = classColor(annotation.category_id);
+      const highlighted = gallery.selectedAnnotation === annotation.annotation_id;
+      ctx.globalAlpha = gallery.selectedAnnotation && !highlighted ? 0.35 : 1;
+      if (gallery.toggles.masks) {
+        (annotation.segmentation || []).forEach((coords) => {
+          if (!coords || coords.length < 6) return;
+          ctx.beginPath();
+          ctx.moveTo(coords[0], coords[1]);
+          for (let i = 2; i + 1 < coords.length; i += 2) ctx.lineTo(coords[i], coords[i + 1]);
+          ctx.closePath();
+          ctx.fillStyle = `${color}2e`;
+          ctx.fill();
+          ctx.strokeStyle = color;
+          ctx.lineWidth = Math.max(1, width / 500);
+          ctx.stroke();
+        });
+      }
+      if (gallery.toggles.boxes) {
+        const [x, y, boxWidth, boxHeight] = annotation.bbox || [];
+        if (x != null && y != null && boxWidth != null && boxHeight != null) {
+          ctx.strokeStyle = color;
+          ctx.lineWidth = Math.max(2, width / 300);
+          ctx.strokeRect(x, y, boxWidth, boxHeight);
+        }
+      }
+      if (gallery.toggles.labels) {
+        const [x, y] = annotation.bbox || [];
+        const score = annotation.score == null ? "" : ` ${Number(annotation.score).toFixed(2)}`;
+        const text = `${galleryClassName(gallery.dataset, annotation.category_id)}${score}`;
+        const size = Math.max(11, Math.round(width / 44));
+        ctx.font = `${size}px sans-serif`;
+        const textWidth = ctx.measureText(text).width;
+        const labelY = Math.max(size, (Number(y) || 0) - 4);
+        ctx.fillStyle = color;
+        ctx.fillRect(Number(x) || 0, labelY - size, textWidth + 8, size + 3);
+        ctx.fillStyle = "#081015";
+        ctx.fillText(text, (Number(x) || 0) + 4, labelY);
+      }
+    });
+    ctx.globalAlpha = 1;
+    drawGalleryClickPreview(ctx, width);
+  }
+
+  async function refineGalleryImage() {
+    const gallery = state.gallery;
+    const image = gallery.visible[gallery.index];
+    if (!gallery.open || !image) return;
+    const fullIndex = gallery.images.indexOf(image);
+    let dataset = gallery.dataset;
+    let card = document.querySelector(`[data-version-id="${CSS.escape(String(gallery.versionId))}"]`);
+    if (!dataset || !card) {
+      await loadDatasets();
+      dataset = (state.datasets || []).find((item) => String(item.version_id) === String(gallery.versionId)) || dataset;
+      card = document.querySelector(`[data-version-id="${CSS.escape(String(gallery.versionId))}"]`);
+    }
+    showDatasetList({ keepCards: true });
+    if (dataset && card) openDatasetReview(dataset, card, Math.max(0, fullIndex));
+  }
+
+  if ($("dataset-gallery-back")) {
+    $("dataset-gallery-back").addEventListener("click", (event) => {
+      event.preventDefault();
+      showDatasetList();
+    });
+  }
+  if ($("gallery-prev")) $("gallery-prev").addEventListener("click", () => selectGalleryImage(state.gallery.index - 1));
+  if ($("gallery-next")) $("gallery-next").addEventListener("click", () => selectGalleryImage(state.gallery.index + 1));
+  if ($("gallery-image")) $("gallery-image").addEventListener("load", drawGalleryOverlay);
+  if ($("gallery-filter-class")) {
+    $("gallery-filter-class").addEventListener("change", (event) => {
+      state.gallery.filters.categoryId = event.target.value;
+      state.gallery.index = 0;
+      applyGalleryFilters();
+      renderGallery();
+    });
+  }
+  if ($("gallery-filter-split")) {
+    $("gallery-filter-split").addEventListener("change", (event) => {
+      state.gallery.filters.split = event.target.value;
+      state.gallery.index = 0;
+      applyGalleryFilters();
+      renderGallery();
+    });
+  }
+  if ($("gallery-filter-unannotated")) {
+    $("gallery-filter-unannotated").addEventListener("change", (event) => {
+      state.gallery.filters.unannotated = event.target.checked;
+      state.gallery.index = 0;
+      applyGalleryFilters();
+      renderGallery();
+    });
+  }
+  if ($("gallery-filter-lowconfidence")) {
+    $("gallery-filter-lowconfidence").addEventListener("change", (event) => {
+      state.gallery.filters.lowConfidence = event.target.checked;
+      state.gallery.index = 0;
+      applyGalleryFilters();
+      renderGallery();
+    });
+  }
+  if ($("gallery-reset-filters")) {
+    $("gallery-reset-filters").addEventListener("click", () => {
+      Object.assign(state.gallery.filters, { categoryId: "all", split: "all", unannotated: false, lowConfidence: false, status: "all" });
+      if ($("gallery-filter-status")) $("gallery-filter-status").value = "all";
+      if ($("gallery-filter-class")) $("gallery-filter-class").value = "all";
+      if ($("gallery-filter-split")) $("gallery-filter-split").value = "all";
+      if ($("gallery-filter-unannotated")) $("gallery-filter-unannotated").checked = false;
+      if ($("gallery-filter-lowconfidence")) $("gallery-filter-lowconfidence").checked = false;
+      state.gallery.index = 0;
+      applyGalleryFilters();
+      renderGallery();
+    });
+  }
+  [["gallery-toggle-boxes", "boxes"], ["gallery-toggle-masks", "masks"], ["gallery-toggle-labels", "labels"]].forEach(([id, key]) => {
+    const input = $(id);
+    if (!input) return;
+    input.addEventListener("change", (event) => {
+      state.gallery.toggles[key] = event.target.checked;
+      drawGalleryOverlay();
+    });
+  });
+  if ($("gallery-load-more")) {
+    $("gallery-load-more").addEventListener("click", () => {
+      loadGalleryImages(state.gallery.versionId, false);
+    });
+  }
+  if ($("gallery-refine")) $("gallery-refine").addEventListener("click", refineGalleryImage);
+
+  // Review: status, bulk actions, annotation edits, click-to-segment.
+  function galleryCurrentImage() {
+    const gallery = state.gallery;
+    return gallery.visible[gallery.index] || null;
+  }
+
+  function renderGalleryReviewBar() {
+    const gallery = state.gallery;
+    const counts = gallery.counts;
+    if ($("gallery-review-counts")) {
+      $("gallery-review-counts").textContent = counts
+        ? `${counts.pending} pending · ${counts.approved} approved · ${counts.rejected} rejected`
+        : "";
+    }
+    const selected = gallery.selected ? gallery.selected.size : 0;
+    if ($("gallery-approve-selected")) {
+      $("gallery-approve-selected").disabled = !selected;
+      $("gallery-approve-selected").textContent = selected ? `Approve ${selected} selected` : "Approve selected";
+    }
+    if ($("gallery-reject-selected")) {
+      $("gallery-reject-selected").disabled = !selected;
+      $("gallery-reject-selected").textContent = selected ? `Reject ${selected} selected` : "Reject selected";
+    }
+    const image = galleryCurrentImage();
+    if ($("gallery-approve")) $("gallery-approve").disabled = !image;
+    if ($("gallery-reject")) $("gallery-reject").disabled = !image;
+    if ($("gallery-approve-pending")) $("gallery-approve-pending").disabled = !counts || !counts.pending;
+    if ($("gallery-build-approved")) $("gallery-build-approved").disabled = !counts || !counts.approved;
+  }
+
+  async function setGalleryReview(body) {
+    const gallery = state.gallery;
+    const result = await request(`/v1/datasets/${encodeURIComponent(gallery.versionId)}/review`, {
+      method: "POST",
+      headers: tenantHeaders(true),
+      body: JSON.stringify(body),
+    });
+    gallery.counts = result.counts;
+    return result;
+  }
+
+  async function reviewCurrentImage(status) {
+    const gallery = state.gallery;
+    const image = galleryCurrentImage();
+    if (!gallery.open || !image) return;
+    try {
+      await setGalleryReview({ status, image_ids: [image.image_id] });
+      image.status = status;
+      const position = gallery.index;
+      applyGalleryFilters();
+      // Stay at the same position when the image left the filtered list,
+      // otherwise move on: "approve and next".
+      const stillShown = gallery.visible[position] === image;
+      const next = stillShown ? position + 1 : position;
+      gallery.index = Math.min(next, Math.max(0, gallery.visible.length - 1));
+      if (!gallery.visible.length) gallery.index = -1;
+      galleryStatus(`${status === "approved" ? "Approved" : "Rejected"} ${cleanMessage(image.file_name)}.`, "ok");
+      if (gallery.index >= 0) await selectGalleryImage(gallery.index); else renderGallery();
+    } catch (err) {
+      galleryStatus(cleanMessage(err.message || err), "error");
+    }
+  }
+
+  async function reviewSelected(status) {
+    const gallery = state.gallery;
+    const ids = [...gallery.selected];
+    if (!ids.length) return;
+    try {
+      const result = await setGalleryReview({ status, image_ids: ids });
+      gallery.images.forEach((image) => { if (gallery.selected.has(image.image_id)) image.status = status; });
+      gallery.selected.clear();
+      applyGalleryFilters();
+      renderGallery();
+      galleryStatus(`${result.updated} image${result.updated === 1 ? "" : "s"} ${status}.`, "ok");
+    } catch (err) {
+      galleryStatus(cleanMessage(err.message || err), "error");
+    }
+  }
+
+  async function reloadGalleryAnnotations() {
+    // Re-read live annotations and statuses for every loaded image, keeping
+    // the current image and filters.
+    const gallery = state.gallery;
+    const current = galleryCurrentImage();
+    const currentId = current && current.image_id;
+    const data = await request(
+      `/v1/datasets/${encodeURIComponent(gallery.versionId)}/review?limit=${Math.max(200, gallery.images.length)}&offset=0`,
+      { headers: tenantHeaders(false) },
+    );
+    const fresh = new Map(((data && data.images) || []).map((image) => [image.image_id, image]));
+    gallery.images.forEach((image) => {
+      const update = fresh.get(image.image_id);
+      if (update) {
+        image.annotations = update.annotations;
+        image.status = update.status;
+      }
+    });
+    if (data && data.counts) gallery.counts = data.counts;
+    applyGalleryFilters();
+    const index = gallery.visible.findIndex((image) => image.image_id === currentId);
+    if (index >= 0) gallery.index = index;
+    renderGallery();
+  }
+
+  async function deleteGalleryAnnotation(image, annotation) {
+    const gallery = state.gallery;
+    try {
+      await request(
+        `/v1/datasets/${encodeURIComponent(gallery.versionId)}/images/${encodeURIComponent(image.image_id)}/annotations/${annotation.annotation_id.split("/").map(encodeURIComponent).join("/")}`,
+        { method: "DELETE", headers: tenantHeaders(false) },
+      );
+      if (gallery.selectedAnnotation === annotation.annotation_id) gallery.selectedAnnotation = null;
+      galleryStatus("Annotation deleted.", "ok");
+      await reloadGalleryAnnotations();
+    } catch (err) {
+      galleryStatus(cleanMessage(err.message || err), "error");
+    }
+  }
+
+  async function changeAnnotationClass(image, annotation, categoryId) {
+    const gallery = state.gallery;
+    try {
+      await request(
+        `/v1/datasets/${encodeURIComponent(gallery.versionId)}/images/${encodeURIComponent(image.image_id)}/annotations/${annotation.annotation_id.split("/").map(encodeURIComponent).join("/")}`,
+        {
+          method: "PATCH",
+          headers: tenantHeaders(true),
+          body: JSON.stringify({ category_id: categoryId, expected_revision: annotation.revision }),
+        },
+      );
+      galleryStatus(`Moved to ${cleanMessage(galleryClassName(gallery.dataset, categoryId))}.`, "ok");
+      await reloadGalleryAnnotations();
+    } catch (err) {
+      galleryStatus(cleanMessage(err.message || err), "error");
+    }
+  }
+
+  function clickStatus(message, kind) {
+    setStatus("gallery-click-status", message, kind);
+  }
+
+  function closeGalleryClick() {
+    const gallery = state.gallery;
+    const click = gallery.click;
+    if (click && click.socket) {
+      click.socket.onclose = null;
+      click.socket.close();
+    }
+    gallery.click = null;
+    if ($("gallery-click-panel")) $("gallery-click-panel").hidden = true;
+    if ($("gallery-click-mode")) $("gallery-click-mode").hidden = false;
+    const stage = $("gallery-stage");
+    if (stage) stage.classList.remove("is-clicking");
+    drawGalleryOverlay();
+  }
+
+  function openGalleryClick() {
+    const gallery = state.gallery;
+    const image = galleryCurrentImage();
+    if (!gallery.open || !image) return;
+    closeGalleryClick();
+    const select = $("gallery-click-class");
+    if (select) {
+      select.innerHTML = "";
+      ((gallery.dataset && gallery.dataset.categories) || []).forEach((category) => {
+        const option = node("option", null, category.name);
+        option.value = String(category.category_id);
+        select.appendChild(option);
+      });
+      const selected = (image.annotations || []).find((item) => item.annotation_id === gallery.selectedAnnotation);
+      if (selected) select.value = String(selected.category_id);
+    }
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const path = `/v1/refinement/${encodeURIComponent(gallery.versionId)}/${encodeURIComponent(image.image_id)}?tenant_id=${encodeURIComponent(DEFAULT_TENANT)}&format=polygons`;
+    const socket = new WebSocket(`${protocol}//${window.location.host}${path}`);
+    gallery.click = { socket, snapshot: null, imageId: image.image_id, pending: false };
+    if ($("gallery-click-panel")) $("gallery-click-panel").hidden = false;
+    if ($("gallery-click-mode")) $("gallery-click-mode").hidden = true;
+    if ($("gallery-click-save")) $("gallery-click-save").disabled = true;
+    const stage = $("gallery-stage");
+    if (stage) stage.classList.add("is-clicking");
+    clickStatus("Connecting…", "busy");
+    socket.addEventListener("message", (event) => {
+      const click = gallery.click;
+      if (!click || click.socket !== socket) return;
+      const message = JSON.parse(event.data);
+      if (message.type === "snapshot") {
+        click.snapshot = message;
+        click.pending = false;
+        const found = (message.predictions || []).length > 0;
+        if ($("gallery-click-save")) $("gallery-click-save").disabled = !found;
+        clickStatus(
+          !message.points.length
+            ? "Click the object to segment it."
+            : found ? "Mask ready. Add points to refine, or save it." : "No mask at that point; try another point.",
+          found || !message.points.length ? "ok" : "error",
+        );
+        drawGalleryOverlay();
+      } else if (message.type === "error") {
+        click.pending = false;
+        clickStatus(cleanMessage(message.detail || "Refinement failed"), "error");
+      }
+    });
+    socket.addEventListener("close", (event) => {
+      const click = gallery.click;
+      if (click && click.socket === socket && event.reason) clickStatus(cleanMessage(event.reason), "error");
+    });
+  }
+
+  function drawGalleryClickPreview(ctx, width) {
+    const click = state.gallery.click;
+    if (!click || !click.snapshot) return;
+    const snapshot = click.snapshot;
+    ctx.save();
+    (snapshot.predictions || []).slice(0, 1).forEach((prediction) => {
+      (prediction.polygons || []).forEach((coords) => {
+        if (!coords || coords.length < 6) return;
+        ctx.beginPath();
+        ctx.moveTo(coords[0], coords[1]);
+        for (let i = 2; i + 1 < coords.length; i += 2) ctx.lineTo(coords[i], coords[i + 1]);
+        ctx.closePath();
+        ctx.fillStyle = "rgba(255, 214, 10, 0.35)";
+        ctx.fill();
+        ctx.strokeStyle = "#ffd60a";
+        ctx.lineWidth = Math.max(2, width / 300);
+        ctx.stroke();
+      });
+    });
+    (snapshot.points || []).forEach((point) => {
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, Math.max(5, width / 120), 0, Math.PI * 2);
+      ctx.fillStyle = point.label === "positive" ? "#3fb950" : "#e5534b";
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "#ffffff";
+      ctx.stroke();
+    });
+    ctx.restore();
+  }
+
+  function sendGalleryClick(event) {
+    const click = state.gallery.click;
+    const canvas = $("gallery-overlay");
+    if (!click || !click.snapshot || !canvas || click.pending) return;
+    if (!click.socket || click.socket.readyState !== WebSocket.OPEN) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = (event.clientX - rect.left) * (canvas.width / rect.width);
+    const y = (event.clientY - rect.top) * (canvas.height / rect.height);
+    click.pending = true;
+    click.socket.send(JSON.stringify({
+      type: "click",
+      expected_revision: click.snapshot.revision,
+      x,
+      y,
+      label: event.shiftKey ? "negative" : "positive",
+    }));
+    clickStatus("Segmenting…", "busy");
+  }
+
+  async function saveGalleryClick() {
+    const gallery = state.gallery;
+    const click = gallery.click;
+    if (!click || !click.snapshot || !(click.snapshot.predictions || []).length) return;
+    const button = $("gallery-click-save");
+    setBusy(button, true, "Saving…");
+    try {
+      await request(`/v1/refinements/${encodeURIComponent(click.snapshot.session_id)}/accept`, {
+        method: "POST",
+        headers: tenantHeaders(true),
+        body: JSON.stringify({
+          prediction_index: 0,
+          refinement_revision: click.snapshot.revision,
+          annotation_id: gallery.selectedAnnotation || null,
+          category_id: Number(($("gallery-click-class") && $("gallery-click-class").value) || click.snapshot.category_id),
+        }),
+      });
+      const replaced = !!gallery.selectedAnnotation;
+      gallery.selectedAnnotation = null;
+      await reloadGalleryAnnotations();
+      galleryStatus(replaced ? "Annotation replaced." : "Object added.", "ok");
+      openGalleryClick();  // fresh session for the next object
+    } catch (err) {
+      clickStatus(cleanMessage(err.message || err), "error");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  if ($("gallery-filter-status")) {
+    $("gallery-filter-status").addEventListener("change", (event) => {
+      state.gallery.filters.status = event.target.value;
+      state.gallery.index = 0;
+      applyGalleryFilters();
+      renderGallery();
+    });
+  }
+  if ($("gallery-approve")) $("gallery-approve").addEventListener("click", () => reviewCurrentImage("approved"));
+  if ($("gallery-reject")) $("gallery-reject").addEventListener("click", () => reviewCurrentImage("rejected"));
+  if ($("gallery-select-visible")) $("gallery-select-visible").addEventListener("click", () => {
+    state.gallery.visible.forEach((image) => state.gallery.selected.add(image.image_id));
+    renderGallery();
+  });
+  if ($("gallery-select-clear")) $("gallery-select-clear").addEventListener("click", () => {
+    state.gallery.selected.clear();
+    renderGallery();
+  });
+  if ($("gallery-approve-selected")) $("gallery-approve-selected").addEventListener("click", () => reviewSelected("approved"));
+  if ($("gallery-reject-selected")) $("gallery-reject-selected").addEventListener("click", () => reviewSelected("rejected"));
+  if ($("gallery-approve-pending")) $("gallery-approve-pending").addEventListener("click", async () => {
+    try {
+      const result = await setGalleryReview({ status: "approved", all: true, only_status: "pending" });
+      state.gallery.images.forEach((image) => { if ((image.status || "pending") === "pending") image.status = "approved"; });
+      applyGalleryFilters();
+      renderGallery();
+      galleryStatus(`${result.updated} pending image${result.updated === 1 ? "" : "s"} approved.`, "ok");
+    } catch (err) {
+      galleryStatus(cleanMessage(err.message || err), "error");
+    }
+  });
+  if ($("gallery-build-approved")) $("gallery-build-approved").addEventListener("click", async () => {
+    const gallery = state.gallery;
+    const button = $("gallery-build-approved");
+    setBusy(button, true, "Building…");
+    try {
+      const built = await request(`/v1/datasets/${encodeURIComponent(gallery.versionId)}/rebuild-approved`, {
+        method: "POST",
+        headers: tenantHeaders(true),
+        body: JSON.stringify({ idempotency_key: `approved-${gallery.versionId}-${Date.now()}` }),
+      });
+      galleryStatus(
+        `Built “${cleanMessage(built.name)}”: ${built.image_count} approved image${built.image_count === 1 ? "" : "s"}, ${built.annotation_count} annotation${built.annotation_count === 1 ? "" : "s"}. Opening it…`,
+        "ok",
+      );
+      state.datasets = null;
+      window.location.hash = `#/datasets/${built.version_id}`;
+    } catch (err) {
+      galleryStatus(cleanMessage(err.message || err), "error");
+    } finally {
+      setBusy(button, false);
+    }
+  });
+  if ($("gallery-click-mode")) $("gallery-click-mode").addEventListener("click", openGalleryClick);
+  if ($("gallery-click-done")) $("gallery-click-done").addEventListener("click", closeGalleryClick);
+  if ($("gallery-click-reset")) $("gallery-click-reset").addEventListener("click", openGalleryClick);
+  if ($("gallery-click-save")) $("gallery-click-save").addEventListener("click", saveGalleryClick);
+  if ($("gallery-overlay")) $("gallery-overlay").addEventListener("click", sendGalleryClick);
+  window.addEventListener("resize", () => { if (state.gallery.open) drawGalleryOverlay(); });
+  document.addEventListener("keydown", (event) => {
+    if (!state.gallery.open || $("view-datasets").hidden) return;
+    const active = document.activeElement;
+    const typing = active && (
+      ["SELECT", "TEXTAREA"].includes(active.tagName)
+      || (active.tagName === "INPUT" && !["checkbox", "radio", "range"].includes(active.type))
+    );
+    if (typing || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.key === "a" || event.key === "A") {
+      event.preventDefault();
+      reviewCurrentImage("approved");
+      return;
+    }
+    if (event.key === "r" || event.key === "R") {
+      event.preventDefault();
+      reviewCurrentImage("rejected");
+      return;
+    }
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      selectGalleryImage(state.gallery.index - 1);
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      selectGalleryImage(state.gallery.index + 1);
+    }
+  });
+
+  async function openDatasetReview(dataset, card, initialIndex = 0) {
     const panel = card.querySelector('[data-review-panel="true"]');
     if (!panel) return;
     if (state.review.open && state.review.versionId === String(dataset.version_id)) {
@@ -1486,7 +3277,7 @@
     const hint = node(
       "p",
       "review-hint",
-      "A click ranks the SAM 3 masks for this image's category. Negative clicks push a mask away; if no preview appears, try another point."
+      "A click ranks the SAM 3 masks for this image's category. Click on an existing object to correct it, or elsewhere to add a missed one. Negative clicks push a mask away; if no preview appears, try another point."
     );
     controls.append(modes, save, hint);
     workspace.append(stage, labelEl, controls);
@@ -1521,7 +3312,7 @@
         button.addEventListener("click", () => selectReviewImage(index));
         list.appendChild(button);
       });
-      await selectReviewImage(0);
+      await selectReviewImage(initialIndex);
     } catch (err) {
       reviewStatus(cleanMessage(err.message || err), "error");
     }
@@ -1691,6 +3482,27 @@
     reviewStatus("Finding the best mask for that point…", "busy");
   }
 
+  // Clicking on an existing object corrects that annotation; clicking anywhere
+  // else adds a new one. (Replacing the first annotation blindly overwrote
+  // correct labels when the user was adding a missed object.)
+  function annotationUnderClick(annotations, points) {
+    const positive = (points || []).find((point) => point.label === "positive");
+    if (!positive || !annotations || !annotations.length) return null;
+    let best = null;
+    let bestArea = Infinity;
+    for (const annotation of annotations) {
+      const [x, y, width, height] = annotation.bbox || [];
+      if (positive.x >= x && positive.x <= x + width && positive.y >= y && positive.y <= y + height) {
+        const area = width * height;
+        if (area < bestArea) {
+          best = annotation;
+          bestArea = area;
+        }
+      }
+    }
+    return best;
+  }
+
   async function acceptReview() {
     const review = state.review;
     const snapshot = review.snapshot;
@@ -1701,7 +3513,7 @@
     setBusy(save, true, "Saving…");
     reviewStatus("Saving the annotation revision…", "busy");
     try {
-      const existing = image.annotations && image.annotations.length ? image.annotations[0] : null;
+      const existing = annotationUnderClick(image.annotations, snapshot.points);
       const accepted = await request(
         `/v1/refinements/${encodeURIComponent(snapshot.session_id)}/accept`,
         {
@@ -1740,8 +3552,8 @@
     }
   }
 
-  async function loadDatasets() {
-    closeReview();
+  async function loadDatasets(opts = {}) {
+    if (!opts.keepGallery) closeReview();
     const list = $("datasets-list");
     const meta = $("datasets-meta");
     if (!list) return;
@@ -1752,9 +3564,10 @@
     list.appendChild(statePanel("loading", "Loading dataset versions…"));
     try {
       const datasets = await request("/v1/datasets", { headers: tenantHeaders(false) });
+      state.datasets = datasets || [];
       list.innerHTML = "";
       setBusyRegion("datasets-list", false);
-      if (!datasets || !datasets.length) {
+      if (!state.datasets.length) {
         list.appendChild(
           statePanel(
             "empty",
@@ -1765,9 +3578,19 @@
           )
         );
       } else {
-        datasets.forEach((dataset) => list.appendChild(renderDatasetCard(dataset)));
+        state.datasets.forEach((dataset) => list.appendChild(renderDatasetCard(dataset)));
+        loadDatasetMosaics(state.datasets);
       }
-      if (meta) meta.textContent = `${(datasets || []).length} dataset version${(datasets || []).length === 1 ? "" : "s"}`;
+      if (meta) meta.textContent = `${state.datasets.length} dataset version${state.datasets.length === 1 ? "" : "s"}`;
+      if (state.gallery.open) {
+        const current = state.datasets.find(
+          (item) => String(item.version_id) === String(state.gallery.versionId)
+        );
+        if (current) {
+          state.gallery.dataset = current;
+          renderGalleryClassCounts();
+        }
+      }
     } catch (err) {
       const message = cleanMessage(err.message || err);
       setStatus("datasets-status", message, "error");
@@ -1780,18 +3603,67 @@
     }
   }
 
+  async function loadDatasetMosaics(datasets) {
+    for (const dataset of datasets.slice(0, 12)) {
+      const card = document.querySelector(
+        `[data-version-id="${CSS.escape(String(dataset.version_id))}"]`
+      );
+      const mosaic = card && card.querySelector('[data-dataset-mosaic="true"]');
+      if (!mosaic) continue;
+      try {
+        const data = await request(
+          `/v1/datasets/${encodeURIComponent(dataset.version_id)}/images?limit=4&offset=0`,
+          { headers: tenantHeaders(false) }
+        );
+        const images = (data && data.images) || [];
+        mosaic.replaceChildren();
+        for (const image of images) {
+          const path = `/v1/datasets/${encodeURIComponent(dataset.version_id)}/images/${encodeURIComponent(image.image_id)}/file`;
+          const response = await fetch(path, { headers: tenantHeaders(false) });
+          if (!response.ok) continue;
+          const url = URL.createObjectURL(await response.blob());
+          state.datasetThumbUrls.push(url);
+          const thumb = node("img");
+          thumb.alt = cleanMessage(image.file_name);
+          thumb.loading = "lazy";
+          thumb.src = url;
+          mosaic.appendChild(thumb);
+        }
+      } catch {
+        /* A card still works without its thumbnail mosaic. */
+      }
+    }
+  }
+
   function renderDatasetCard(dataset) {
     const card = node("article", "card dataset-card");
+    card.dataset.versionId = String(dataset.version_id);
+    card.dataset.galleryOpen = "false";
     const head = node("div", "dataset-head");
     const title = node("div");
+    const openButton = node("button", "dataset-title-button");
+    openButton.type = "button";
+    openButton.dataset.openGallery = "true";
+    openButton.appendChild(node("h2", "card-title", dataset.name || "Untitled dataset"));
+    openButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openDatasetGallery(dataset.version_id, dataset);
+    });
     title.append(
-      node("h2", "card-title", dataset.name || "Untitled dataset"),
-      node("p", "dataset-meta", `${dataset.image_count} image${dataset.image_count === 1 ? "" : "s"} · ${dataset.annotation_count} annotation${dataset.annotation_count === 1 ? "" : "s"} · ${formatDate(dataset.created_at)}`)
+      openButton,
+      node(
+        "p",
+        "dataset-meta",
+        `${dataset.source_asset || "Source asset"} · ${dataset.image_count} image${dataset.image_count === 1 ? "" : "s"} · ${dataset.annotation_count} annotation${dataset.annotation_count === 1 ? "" : "s"} · ${formatDate(dataset.created_at)}`
+      )
     );
     const actions = node("div", "actions");
     const reviewButton = node("button", "btn btn-secondary btn-small", "Review labels");
     reviewButton.type = "button";
-    reviewButton.addEventListener("click", () => openDatasetReview(dataset, card));
+    reviewButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openDatasetReview(dataset, card);
+    });
     actions.appendChild(reviewButton);
     const format = node("select", "dataset-format");
     format.dataset.exportFormat = "true";
@@ -1809,25 +3681,49 @@
     const exportButton = node("button", "btn btn-secondary btn-small", "Export");
     exportButton.type = "button";
     exportButton.disabled = !dataset.annotation_count;
-    exportButton.addEventListener("click", () => exportDataset(dataset, exportButton, card, format.value));
+    exportButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      exportDataset(dataset, exportButton, card, format.value);
+    });
     actions.appendChild(exportButton);
     head.append(title, actions);
     card.appendChild(head);
 
-    if ((dataset.categories || []).length) {
+    const mosaic = node("div", "dataset-mosaic");
+    mosaic.dataset.datasetMosaic = "true";
+    card.appendChild(mosaic);
+
+    const counts = (dataset.class_counts || []).length
+      ? dataset.class_counts
+      : (dataset.categories || []).map((category) => ({
+          category_id: category.category_id,
+          name: category.name,
+          count: 0,
+          color: classColor(category.category_id),
+        }));
+    if (counts.length) {
       const categories = node("div", "category-row");
-      dataset.categories.forEach((category) => {
-        categories.appendChild(node("span", "category-chip", category.name));
+      counts.forEach((item) => {
+        const chip = node("span", "category-chip", `${item.name} · ${item.count}`);
+        chip.dataset.classCount = String(item.category_id);
+        chip.style.borderColor = item.color || classColor(item.category_id);
+        categories.appendChild(chip);
       });
       card.appendChild(categories);
     }
     const status = node("div", "status");
     status.dataset.datasetStatus = "true";
+    status.textContent = dataset.status || "ready";
+    status.dataset.kind = "ok";
     card.appendChild(status);
     const reviewPanel = node("div", "review-panel");
     reviewPanel.dataset.reviewPanel = "true";
     reviewPanel.hidden = true;
     card.appendChild(reviewPanel);
+    card.addEventListener("click", (event) => {
+      if (event.target.closest("button, select, a, input, .review-panel")) return;
+      openDatasetGallery(dataset.version_id, dataset);
+    });
     return card;
   }
 
@@ -1961,4 +3857,7 @@
   // Init
   checkRuntime();
   loadAssets({ quiet: true });
+  if (window.location.hash === "#/datasets" || galleryVersionFromHash()) {
+    showView("datasets");
+  }
 })();

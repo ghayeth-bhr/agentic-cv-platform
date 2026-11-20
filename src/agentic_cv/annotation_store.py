@@ -11,6 +11,7 @@ from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 from .dataset import Annotation
+from .sqlite_utils import connect_sqlite
 
 
 def _utc_now() -> str:
@@ -62,7 +63,7 @@ class AnnotationRevisionBackend(Protocol):
 
 class AnnotationRevisionStore:
     def __init__(self, path: str) -> None:
-        self._connection = sqlite3.connect(path, check_same_thread=False)
+        self._connection = connect_sqlite(path)
         self._connection.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self._connection.execute(
@@ -200,6 +201,7 @@ class AnnotationRevisionStore:
             "bbox": list(annotation.bbox),
             "segmentation": [list(polygon) for polygon in annotation.segmentation],
             "score": annotation.score,
+            **({"deleted": True} if annotation.deleted else {}),
         }
 
     @classmethod
@@ -210,6 +212,7 @@ class AnnotationRevisionStore:
             category_id=value["category_id"], bbox=tuple(value["bbox"]),
             segmentation=tuple(tuple(polygon) for polygon in value["segmentation"]),
             score=value["score"],
+            deleted=bool(value.get("deleted", False)),
         )
         return AnnotationRevision(
             revision_id=UUID(row["revision_id"]), tenant_id=UUID(row["tenant_id"]),

@@ -63,12 +63,16 @@ def create_app(dependencies: PreviewApiDependencies) -> FastAPI:
     @app.get("/v1/jobs/{job_id}/preview")
     def preview_stream(
         job_id: UUID,
-        x_tenant_id: str = Header(...),
+        x_tenant_id: str | None = Header(None),
+        tenant_id_q: str | None = Query(None, alias="tenant_id"),
         x_api_key: str | None = Header(None),
         authorization: str | None = Header(None),
         after_event_id: int = Query(default=0, ge=0),
     ) -> StreamingResponse:
-        tenant_id = _tenant(x_tenant_id)
+        raw_tenant = x_tenant_id or tenant_id_q
+        if raw_tenant is None:
+            raise HTTPException(status_code=400, detail="X-Tenant-ID or tenant_id is required")
+        tenant_id = _tenant(raw_tenant)
         _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id)
         events = dependencies.store.list_for_job(
             tenant_id=tenant_id, job_id=job_id, after_event_id=after_event_id

@@ -210,6 +210,70 @@ class LocalSam3Provider:
                 )
             return predictions
 
+    def predict_many(
+        self,
+        image: Image.Image,
+        prompts: list[tuple[str, float]],
+        *,
+        mask_threshold: float | None = None,
+    ) -> list[list[Sam3Prediction]]:
+        """Several (prompt, threshold) pairs on one image with one vision pass.
+
+        The vision encoder dominates SAM 3's cost; its features are computed
+        once and reused for every class prompt. Measured on an RTX 4050
+        Laptop with two classes: 1.11 s -> 0.63 s per 720x1280 image, with
+        identical detections.
+        """
+
+        if not prompts:
+            return []
+        if len(prompts) == 1:
+            prompt, threshold = prompts[0]
+            return [self.predict(image, prompt, threshold=threshold, mask_threshold=mask_threshold)]
+        mask_threshold = self.config.default_mask_threshold if mask_threshold is None else mask_threshold
+        for prompt, threshold in prompts:
+            if not prompt.strip():
+                raise ValueError("prompt must not be empty")
+            if not 0 <= threshold <= 1:
+                raise ValueError("thresholds must be between 0 and 1")
+        with self._guard():
+            self._load()
+            rgb = image.convert("RGB")
+            inputs = self._processor(images=rgb, return_tensors="pt").to(self.config.device)
+            pixel_values = inputs["pixel_values"]
+            if self.config.precision == "float16":
+                pixel_values = pixel_values.half()
+            context = self._torch.inference_mode() if self._torch is not None else nullcontext()
+            results: list[list[Sam3Prediction]] = []
+            with context:
+                vision = self._model.get_vision_features(pixel_values=pixel_values)
+                for prompt, threshold in prompts:
+                    text = self._processor(text=prompt, return_tensors="pt").to(self.config.device)
+                    outputs = self._model(
+                        vision_embeds=vision,
+                        input_ids=text["input_ids"],
+                        attention_mask=text["attention_mask"],
+                    )
+                    processed = self._processor.post_process_instance_segmentation(
+                        outputs,
+                        threshold=threshold,
+                        mask_threshold=mask_threshold,
+                        target_sizes=inputs["original_sizes"].tolist(),
+                    )[0]
+                    results.append(self._predictions(processed, image))
+            return results
+
+    def _predictions(self, results: Any, image: Image.Image) -> list[Sam3Prediction]:
+        predictions = []
+        for mask, box, score in zip(results["masks"], results["boxes"], results["scores"]):
+            clipped = clip_box(
+                tuple(float(value) for value in box), width=image.width, height=image.height
+            )
+            if clipped is None:
+                continue
+            predictions.append(Sam3Prediction(score=float(score), box=clipped, mask=mask.cpu().numpy()))
+        return predictions
+
     def close(self) -> None:
         guard = (
             self._resources.lock
