@@ -346,6 +346,50 @@ def create_app(dependencies: AgentApiDependencies) -> FastAPI:
             ) from exc
         return FileResponse(path, media_type="image/png")
 
+    @router.get("/v1/agent/sessions/{session_id}/calibration-preview")
+    def get_calibration_preview(
+        session_id: UUID,
+        x_tenant_id: str = Header(...),
+        x_api_key: str | None = Header(None),
+        authorization: str | None = Header(None),
+    ) -> dict:
+        """Raw SAM 3 predictions per class and sample, for the live threshold slider."""
+
+        tenant_id = _tenant(x_tenant_id)
+        _authorize(
+            dependencies.authorizer,
+            credential=_credential(authorization, x_api_key),
+            tenant_id=tenant_id,
+            role="labels:read",
+        )
+        try:
+            return dependencies.service.calibration_preview(tenant_id=tenant_id, session_id=session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="calibration preview not found") from exc
+
+    @router.get("/v1/agent/sessions/{session_id}/calibration-samples/{image_id}/image")
+    def get_calibration_sample_image(
+        session_id: UUID,
+        image_id: str,
+        x_tenant_id: str = Header(...),
+        x_api_key: str | None = Header(None),
+        authorization: str | None = Header(None),
+    ) -> FileResponse:
+        tenant_id = _tenant(x_tenant_id)
+        _authorize(
+            dependencies.authorizer,
+            credential=_credential(authorization, x_api_key),
+            tenant_id=tenant_id,
+            role="labels:read",
+        )
+        try:
+            path = dependencies.service.calibration_sample_path(
+                tenant_id=tenant_id, session_id=session_id, image_id=image_id
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="calibration sample not found") from exc
+        return FileResponse(path)
+
     @router.post(
         "/v1/agent/sessions/{session_id}/confirm", response_model=AgentSessionResponse
     )

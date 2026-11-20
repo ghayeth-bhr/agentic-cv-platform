@@ -124,3 +124,144 @@ def test_user_thresholds_per_class_after_calibration_needs_attention(tmp_path):
         assert chosen["calibration"]["previous"]["status"] == "no_acceptable_threshold"
         assert "Using your thresholds: helmets 0.40, vests 0.55" in chosen["messages"][-1]["content"]
         wait_for_session(client, session["session_id"], statuses=("complete",))
+
+
+class TwoScoreSam3:
+    """A strong and a weak mask, so a threshold slider changes what is shown."""
+
+    def __init__(self, scores=(0.91, 0.4)):
+        self.scores = scores
+
+    def predict(self, image, prompt, *, threshold=None, mask_threshold=None):
+        import numpy as np
+
+        from agentic_cv.sam3 import Sam3Prediction
+
+        width, height = image.size
+        predictions = []
+        for index, score in enumerate(self.scores):
+            mask = np.zeros((height, width), dtype=bool)
+            if index == 0:
+                mask[1 : height // 2, 1 : width // 2] = True
+                box = (1, 1, width // 2, height // 2)
+            else:
+                mask[height // 2 : height - 1, width // 2 : width - 1] = True
+                box = (width // 2, height // 2, width - 1, height - 1)
+            if threshold is None or score >= threshold:
+                predictions.append(Sam3Prediction(score=score, box=box, mask=mask))
+        return predictions
+
+
+def test_calibration_preview_and_sample_images(tmp_path):
+    with TestClient(make_app(tmp_path, sam3=TwoScoreSam3()), raise_server_exceptions=False) as client:
+        session = plan(client)
+        sid = session["session_id"]
+        assert client.get(f"/v1/agent/sessions/{sid}/calibration-preview", headers=headers()).status_code == 404
+        done = client.post(f"/v1/agent/sessions/{sid}/confirm", headers=headers(), json={"wait": True}).json()
+        assert done["status"] == "labeling"
+
+        preview = client.get(f"/v1/agent/sessions/{sid}/calibration-preview", headers=headers())
+        assert preview.status_code == 200, preview.text
+        entry = preview.json()["classes"][0]
+        assert entry["name"] == "workers"
+        sample = entry["samples"][0]
+        # Raw predictions at the lowest threshold, with polygons for the slider.
+        assert sorted(prediction["score"] for prediction in sample["predictions"]) == [0.4, 0.91]
+        assert all(prediction["polygons"] for prediction in sample["predictions"])
+
+        from urllib.parse import quote
+
+        image = client.get(
+            f"/v1/agent/sessions/{sid}/calibration-samples/{quote(sample['image_id'], safe='')}/image",
+            headers=headers(),
+        )
+        assert image.status_code == 200
+        assert image.content[:4] == b"\x89PNG"
+        other = client.get(
+            f"/v1/agent/sessions/{sid}/calibration-samples/not-a-sample/image", headers=headers()
+        )
+        assert other.status_code == 404
+        foreign = client.get(
+            f"/v1/agent/sessions/{sid}/calibration-preview",
+            headers={"X-Tenant-ID": "00000000-0000-0000-0000-000000000009"},
+        )
+        assert foreign.status_code == 404
+
+
+def test_browser_calibration_board_slider_and_threshold_override(tmp_path):
+    import pytest
+
+    playwright_api = pytest.importorskip("playwright.sync_api")
+    from PIL import Image
+
+    from test_agent_ui_playwright import FakeEmbeddingProvider, _serve
+
+    expect = playwright_api.expect
+    image_path = tmp_path / "yard.png"
+    Image.new("RGB", (96, 64), (30, 90, 150)).save(image_path)
+
+    def strict_validator(sample, predictions):
+        # Only a single strong mask is acceptable, so nothing passes
+        # (the weak mask is filtered above 0.4, the strong one above 0.91).
+        return False
+
+    app = create_local_app(
+        LocalAppConfig(
+            data_dir=tmp_path / "data",
+            embedding_provider=FakeEmbeddingProvider(),
+            sam3_provider=TwoScoreSam3(),
+            agent_planner=RulesTaskPlanner(),
+            calibration_timeout_sec=30,
+            calibration_validator_factory=lambda tenant_id, session_id: ValidatorSelection(
+                validator=strict_validator, mode="custom"
+            ),
+            start_workers=True,
+            worker_poll_interval=0.05,
+        )
+    )
+    with _serve(app) as base_url:
+        with playwright_api.sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch()
+            except playwright_api.Error as exc:
+                pytest.skip(f"Playwright Chromium is not installed: {exc}")
+            page = browser.new_page(viewport={"width": 1440, "height": 1100})
+            page.goto(base_url, wait_until="domcontentloaded")
+            page.locator("#upload-toggle").click()
+            page.locator("#asset-name").fill("Yard")
+            page.locator("#asset-file").set_input_files(str(image_path))
+            page.locator("#upload-button").click()
+            expect(page.locator("#upload-status")).to_contain_text("indexed for search", timeout=30_000)
+
+            page.locator(".nav-item[data-view='agent']").click()
+            page.locator("#agent-message").fill("Segment workers")
+            page.locator("#agent-plan").click()
+            expect(page.locator("#agent-run-pill")).to_have_text("Awaiting confirmation", timeout=10_000)
+            page.locator("#agent-confirm").click()
+
+            expect(page.locator("#agent-run-pill")).to_have_text("Needs attention", timeout=30_000)
+            expect(page.locator("#agent-calibration")).not_to_contain_text("Fallback validator")
+            board = page.locator("#agent-board")
+            expect(board).to_be_visible(timeout=10_000)
+            expect(board.locator(".agent-board-class")).to_have_count(1)
+            expect(board.locator(".agent-board-tile")).to_have_count(1)
+            expect(board.locator(".agent-board-chip")).to_have_count(5)
+            caption = board.locator(".agent-board-caption").first
+
+            slider = board.locator(".agent-board-slider")
+            slider.fill("0.3")
+            expect(board.locator(".agent-board-value")).to_have_text("0.30")
+            expect(caption).to_contain_text("2 masks")
+            slider.fill("0.6")
+            expect(caption).to_contain_text("1 mask")
+            expect(caption).to_contain_text("✗ rejected")  # 0.60 was a tried threshold
+            slider.fill("0.95")
+            expect(caption).to_contain_text("0 masks")
+
+            # Label at a user-picked threshold.
+            slider.fill("0.6")
+            expect(page.locator("#agent-board-actions")).to_be_visible()
+            page.locator("#agent-board-apply").click()
+            expect(page.locator("#agent-run-pill")).to_have_text("Dataset ready", timeout=30_000)
+            expect(page.locator("#agent-messages")).to_contain_text("Using the fixed threshold 0.60")
+            browser.close()
