@@ -402,6 +402,8 @@ def _dataset_source(
     """Name the source asset(s) from recorded ids; parse the name for old versions."""
 
     ids = record.dataset.source_asset_ids
+    if not ids and (record.dataset.annotation_set or "").startswith("import-"):
+        return "Imported COCO dataset"
     if ids and asset_names is not None:
         names = [asset_names[asset_id] for asset_id in ids if asset_id in asset_names]
         if names:
