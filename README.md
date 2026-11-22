@@ -30,9 +30,24 @@ From raw street video to a reviewed taxi segmentation dataset:
 | 6. Review | The gallery shows each mask. A wrong one is deleted, and one click on the taxi segments it again. The rest are approved in one go. |
 | 7. Export | The dataset downloads as a YOLO segmentation zip, ready to train. |
 
+## Benchmarks
+
+Measured against hand-labeled ground truth on one RTX 4050 Laptop GPU (6 GB), with the app's own code. Full method, every table, and how to reproduce: [`benchmarks/README.md`](benchmarks/README.md).
+
+| | Open Images V7 taxis (independent, 98 images) | Demo street footage (42 frames) |
+|---|---|---|
+| Mask AP50, prompt `taxi` | **0.919** | 0.993 |
+| Mask IoU of each matched taxi | **0.935** | 0.966 |
+| F1 at the agent's calibrated threshold | **0.844** (plain SAM 3 at 0.5: 0.832) | 0.889 (plain SAM 3: 0.912) |
+| Bad prompt `taxi car` | calibration refuses it | calibration refuses it (the old judge accepted it: 141 wrong cars) |
+| SAM 3 speed / peak GPU memory | 0.63 to 0.69 s per image, 2,782 MiB | 0.67 to 0.80 s per image, 2,163 MiB |
+
+The first run showed the calibration judge was too lenient: shown one image with every mask drawn, the vision model approved almost every threshold. It now judges each mask on its own crop, which made it reject prompts that label the wrong objects. A known gap remains: the calibrated threshold is often lower than the best one in hindsight.
+
 ## Contents
 
 - [Demo](#demo)
+- [Benchmarks](#benchmarks)
 - [Quick start: run it on your PC](#quick-start-run-it-on-your-pc)
 - [What the app does](#what-the-app-does)
 - [Architecture](#architecture)
@@ -450,6 +465,7 @@ All settings are optional environment variables; the defaults suit a single loca
 | `AGENTIC_CV_VLM_MAX_CALLS` | `50` | cap on verdicts per calibration |
 | `AGENTIC_CV_VLM_MIN_CONFIDENCE` | `0.7` | minimum confidence for an accepted mask |
 | `AGENTIC_CV_VLM_MIN_PREDICTION_SCORE` | `0.2` | masks scored below this make a threshold too permissive |
+| `AGENTIC_CV_VLM_JUDGE` | `instance` | `instance` judges each mask on its own crop; `scene` judges one image with every mask drawn (the earlier behavior) |
 | `AGENTIC_CV_VLM_MAX_SIDE` | `768` | longest side of images sent to the VLM (`0` = full size) |
 | `AGENTIC_CV_VLM_PROBE_TIMEOUT_SEC` | `1.0` | Ollama reachability probe |
 | **Media and refinement** | | |
