@@ -17,6 +17,7 @@ A friendly, modern, easy-to-use interface for a local studio that turns raw phot
 - **Copy says what each screen is for.** Empty screens make the next step the primary button.
 - **The only ambient motion** is the pulsing dot on the Live badge while something runs, and it respects reduced motion.
 - **Dark theme switch** in the sidebar. Until it is used, the app follows the system setting. Once flipped, the choice is remembered in this browser (`localStorage`, key `agentic-cv-theme`) and applied before first paint, so there is no light flash. It is an accessible `role="switch"` and stays visible on phones.
+- **Import dataset** in the Datasets view: upload one ZIP with a COCO `.json` file and its images (`POST /v1/datasets/import`, on main). The new version opens in the gallery and works like any other: review, delete, click-to-fix, approve, export.
 
 Tokens: canvas `#F3F5F9`, surface `#FFFFFF`, ink `#1A2230`, action `#2B59F0`, mask `#FFC93C`, stage `#1C212B`, success `#1C9A5B`, danger `#D9423C`.
 
@@ -35,7 +36,7 @@ A re-skin: every element id, data attribute, and visible text that behaviour or 
 
 ```text
 $ .venv/Scripts/python -m pytest -q
-367 passed, 10 skipped, 1 warning   # includes all Playwright journeys and the theme switch
+376 passed, 10 skipped, 1 warning   # includes all Playwright journeys, the theme switch and dataset import
 $ node --check src/agentic_cv/web/app.js   # ok
 ```
 
