@@ -203,6 +203,7 @@ def test_imported_dataset_works_in_gallery_review_edit_and_export(tmp_path):
         assert body["image_count"] == 2 and body["annotation_count"] == 3
         assert body["missing_images"] == ["not-in-zip.png"]
         assert body["dataset"]["name"] == "Open Images taxis"
+        assert body["dataset"]["source_asset"] == "Imported COCO dataset"
 
         listed = client.get("/v1/datasets", headers=headers).json()
         assert [item["version_id"] for item in listed] == [version_id]
