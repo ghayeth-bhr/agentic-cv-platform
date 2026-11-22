@@ -1,0 +1,350 @@
+{
+  "audit_image_ids": [],
+  "dataset": {
+    "name": "BotFlow demo street footage",
+    "source": "Street-yellow-taxi-coco.zip",
+    "images": 42,
+    "annotations": 55,
+    "calibration_image_ids": [
+      3,
+      17,
+      25,
+      27,
+      33
+    ],
+    "scored_images": 37,
+    "scored_annotations": 52
+  },
+  "settings": {
+    "floor": 0.05,
+    "seed": 0,
+    "calibration_thresholds": [
+      0.3,
+      0.45,
+      0.6,
+      0.75,
+      0.85
+    ],
+    "minimum_agreement": 0.6,
+    "vlm_judge": "scene",
+    "match_iou": 0.5
+  },
+  "environment": {
+    "gpu": "NVIDIA GeForce RTX 4050 Laptop GPU",
+    "device": "cuda",
+    "precision": "float16",
+    "torch": "2.6.0+cu124",
+    "python": "3.12.13",
+    "vlm": "qwen3-vl:4b"
+  },
+  "prompts": [
+    {
+      "prompt": "taxi",
+      "calibration": {
+        "status": "calibrated",
+        "threshold": 0.45,
+        "seconds": 69.0,
+        "validator": "vlm",
+        "notice": null,
+        "attempts": [
+          {
+            "threshold": 0.3,
+            "accepted": 4,
+            "of": 5
+          },
+          {
+            "threshold": 0.45,
+            "accepted": 4,
+            "of": 5
+          },
+          {
+            "threshold": 0.6,
+            "accepted": 4,
+            "of": 5
+          },
+          {
+            "threshold": 0.75,
+            "accepted": 3,
+            "of": 5
+          },
+          {
+            "threshold": 0.85,
+            "accepted": 2,
+            "of": 5
+          }
+        ]
+      },
+      "coco": {
+        "segm": {
+          "AP": 0.9754,
+          "AP50": 0.993,
+          "AP75": 0.993,
+          "AP_small": -1.0,
+          "AP_medium": 0.8943,
+          "AP_large": 1.0,
+          "AR100": 0.9827
+        },
+        "bbox": {
+          "AP": 0.9892,
+          "AP50": 0.993,
+          "AP75": 0.993,
+          "AP_small": -1.0,
+          "AP_medium": 0.9345,
+          "AP_large": 1.0,
+          "AR100": 0.9962
+        }
+      },
+      "operating_points": {
+        "0.3": {
+          "threshold": 0.3,
+          "tp": 52,
+          "fp": 26,
+          "fn": 0,
+          "precision": 0.6667,
+          "recall": 1.0,
+          "f1": 0.8,
+          "mean_mask_iou_of_matches": 0.9663
+        },
+        "0.4": {
+          "threshold": 0.4,
+          "tp": 52,
+          "fp": 18,
+          "fn": 0,
+          "precision": 0.7429,
+          "recall": 1.0,
+          "f1": 0.8525,
+          "mean_mask_iou_of_matches": 0.9663
+        },
+        "0.5": {
+          "threshold": 0.5,
+          "tp": 52,
+          "fp": 10,
+          "fn": 0,
+          "precision": 0.8387,
+          "recall": 1.0,
+          "f1": 0.9123,
+          "mean_mask_iou_of_matches": 0.9663
+        },
+        "0.6": {
+          "threshold": 0.6,
+          "tp": 52,
+          "fp": 6,
+          "fn": 0,
+          "precision": 0.8966,
+          "recall": 1.0,
+          "f1": 0.9455,
+          "mean_mask_iou_of_matches": 0.9663
+        },
+        "0.7": {
+          "threshold": 0.7,
+          "tp": 52,
+          "fp": 3,
+          "fn": 0,
+          "precision": 0.9455,
+          "recall": 1.0,
+          "f1": 0.972,
+          "mean_mask_iou_of_matches": 0.9663
+        },
+        "0.8": {
+          "threshold": 0.8,
+          "tp": 49,
+          "fp": 2,
+          "fn": 3,
+          "precision": 0.9608,
+          "recall": 0.9423,
+          "f1": 0.9515,
+          "mean_mask_iou_of_matches": 0.971
+        },
+        "0.9": {
+          "threshold": 0.9,
+          "tp": 43,
+          "fp": 1,
+          "fn": 9,
+          "precision": 0.9773,
+          "recall": 0.8269,
+          "f1": 0.8958,
+          "mean_mask_iou_of_matches": 0.9741
+        }
+      },
+      "speed": {
+        "load_seconds": 30.36,
+        "seconds_first_image": 33.834,
+        "seconds_per_image_median": 0.666,
+        "seconds_per_image_mean": 0.674,
+        "peak_gpu_memory_mb": 2144
+      },
+      "calibrated_point": {
+        "threshold": 0.45,
+        "tp": 52,
+        "fp": 13,
+        "fn": 0,
+        "precision": 0.8,
+        "recall": 1.0,
+        "f1": 0.8889,
+        "mean_mask_iou_of_matches": 0.9663
+      },
+      "calibrated_f1_ci95": [
+        0.8095,
+        0.96
+      ],
+      "default_f1_ci95": [
+        0.8333,
+        0.9778
+      ]
+    },
+    {
+      "prompt": "taxi car",
+      "calibration": {
+        "status": "calibrated",
+        "threshold": 0.3,
+        "seconds": 85.3,
+        "validator": "vlm",
+        "notice": null,
+        "attempts": [
+          {
+            "threshold": 0.3,
+            "accepted": 5,
+            "of": 5
+          },
+          {
+            "threshold": 0.45,
+            "accepted": 4,
+            "of": 5
+          },
+          {
+            "threshold": 0.6,
+            "accepted": 4,
+            "of": 5
+          },
+          {
+            "threshold": 0.75,
+            "accepted": 4,
+            "of": 5
+          },
+          {
+            "threshold": 0.85,
+            "accepted": 4,
+            "of": 5
+          }
+        ]
+      },
+      "coco": {
+        "segm": {
+          "AP": 0.9506,
+          "AP50": 0.9623,
+          "AP75": 0.9623,
+          "AP_small": -1.0,
+          "AP_medium": 0.7865,
+          "AP_large": 0.9975,
+          "AR100": 0.9865
+        },
+        "bbox": {
+          "AP": 0.9589,
+          "AP50": 0.9623,
+          "AP75": 0.9623,
+          "AP_small": -1.0,
+          "AP_medium": 0.8075,
+          "AP_large": 0.9975,
+          "AR100": 0.9962
+        }
+      },
+      "operating_points": {
+        "0.3": {
+          "threshold": 0.3,
+          "tp": 52,
+          "fp": 141,
+          "fn": 0,
+          "precision": 0.2694,
+          "recall": 1.0,
+          "f1": 0.4245,
+          "mean_mask_iou_of_matches": 0.9667
+        },
+        "0.4": {
+          "threshold": 0.4,
+          "tp": 52,
+          "fp": 93,
+          "fn": 0,
+          "precision": 0.3586,
+          "recall": 1.0,
+          "f1": 0.5279,
+          "mean_mask_iou_of_matches": 0.9667
+        },
+        "0.5": {
+          "threshold": 0.5,
+          "tp": 52,
+          "fp": 64,
+          "fn": 0,
+          "precision": 0.4483,
+          "recall": 1.0,
+          "f1": 0.619,
+          "mean_mask_iou_of_matches": 0.9667
+        },
+        "0.6": {
+          "threshold": 0.6,
+          "tp": 52,
+          "fp": 38,
+          "fn": 0,
+          "precision": 0.5778,
+          "recall": 1.0,
+          "f1": 0.7324,
+          "mean_mask_iou_of_matches": 0.9667
+        },
+        "0.7": {
+          "threshold": 0.7,
+          "tp": 52,
+          "fp": 15,
+          "fn": 0,
+          "precision": 0.7761,
+          "recall": 1.0,
+          "f1": 0.8739,
+          "mean_mask_iou_of_matches": 0.9667
+        },
+        "0.8": {
+          "threshold": 0.8,
+          "tp": 49,
+          "fp": 9,
+          "fn": 3,
+          "precision": 0.8448,
+          "recall": 0.9423,
+          "f1": 0.8909,
+          "mean_mask_iou_of_matches": 0.9719
+        },
+        "0.9": {
+          "threshold": 0.9,
+          "tp": 43,
+          "fp": 5,
+          "fn": 9,
+          "precision": 0.8958,
+          "recall": 0.8269,
+          "f1": 0.86,
+          "mean_mask_iou_of_matches": 0.9747
+        }
+      },
+      "speed": {
+        "load_seconds": 30.36,
+        "seconds_first_image": 0.703,
+        "seconds_per_image_median": 0.74,
+        "seconds_per_image_mean": 0.742,
+        "peak_gpu_memory_mb": 2163
+      },
+      "calibrated_point": {
+        "threshold": 0.3,
+        "tp": 52,
+        "fp": 141,
+        "fn": 0,
+        "precision": 0.2694,
+        "recall": 1.0,
+        "f1": 0.4245,
+        "mean_mask_iou_of_matches": 0.9667
+      },
+      "calibrated_f1_ci95": [
+        0.3571,
+        0.4955
+      ],
+      "default_f1_ci95": [
+        0.514,
+        0.7195
+      ]
+    }
+  ]
+}

@@ -142,9 +142,19 @@ class VlmCalibrationValidator:
         model_revision: str = "default",
         fallback: Validator | None = None,
         minimum_prediction_score: float = 0.0,
+        instance_builder: Callable[[CalibrationSample, Sam3Prediction], OverlayArtifact] | None = None,
+        max_instances_per_sample: int = 6,
     ) -> None:
         if not 0 <= minimum_prediction_score <= 1:
             raise ValueError("minimum_prediction_score must be between 0 and 1")
+        if max_instances_per_sample < 1:
+            raise ValueError("max_instances_per_sample must be at least 1")
+        self.instance_builder = instance_builder
+        self.max_instances_per_sample = max_instances_per_sample
+        # Per sample: every mask seen at the lowest threshold, highest score
+        # first. Calibration scores thresholds in ascending order, so the first
+        # call per sample carries the full set; later calls are subsets.
+        self._instances: dict[tuple[str, str], list[Sam3Prediction]] = {}
         self.validator = validator
         self.overlay_builder = overlay_builder
         self.model_revision = model_revision
@@ -184,6 +194,8 @@ class VlmCalibrationValidator:
             )
         if self._failure_notice is not None:
             return self._fallback_trace(sample, predictions)
+        if self.instance_builder is not None:
+            return self._instance_trace(sample, predictions, prompt)
         artifact = self._overlay_artifact(sample, predictions)
         try:
             judgment = self.validator.validate(
@@ -206,6 +218,81 @@ class VlmCalibrationValidator:
             reasoning=judgment.reasoning,
             overlay_id=artifact.overlay_id,
             target_present=judgment.target_present,
+        )
+
+    def _instance_trace(
+        self,
+        sample: CalibrationSample,
+        predictions: list[Sam3Prediction],
+        prompt: str,
+    ) -> CalibrationTrace:
+        """Judge each mask on its own, then score this threshold.
+
+        A threshold is too low when it keeps a mask the VLM rejected (a false
+        positive) and too high when it drops a mask the VLM confirmed (a missed
+        target). Each mask is judged once; the cache answers every other
+        threshold, so the VLM cost does not grow with the threshold grid.
+        """
+
+        target = prompt.strip()
+        known = self._instances.setdefault((sample.image_id, target), [])
+        for prediction in predictions:
+            if not any(prediction is item for item in known):
+                known.append(prediction)
+        known.sort(key=lambda item: -item.score)
+        judged = known[: self.max_instances_per_sample]
+        verdicts: list[tuple[Sam3Prediction, bool | None]] = []
+        try:
+            for prediction in judged:
+                artifact = self.instance_builder(sample, prediction)
+                judgment = self.validator.validate(
+                    overlay_uri=artifact.uri,
+                    prompt=_instance_instruction(target),
+                    model_revision=self.model_revision,
+                )
+                if judgment.confidence < 0.5:
+                    verdicts.append((prediction, None))  # unsure: counts neither way
+                else:
+                    verdicts.append((prediction, judgment.target_present and not judgment.false_positive))
+        except Exception as exc:
+            if self.fallback is None:
+                raise
+            self._failure_notice = (
+                "Vision validation failed during calibration "
+                f"({type(exc).__name__}: {exc}). Calibration continued with the "
+                "fallback \"at least one prediction\" check."
+            )
+            return self._fallback_trace(sample, predictions)
+
+        kept_ids = {id(item) for item in predictions}
+        wrong_kept = [item for item, verdict in verdicts if verdict is False and id(item) in kept_ids]
+        right_dropped = [item for item, verdict in verdicts if verdict is True and id(item) not in kept_ids]
+        right_kept = [item for item, verdict in verdicts if verdict is True and id(item) in kept_ids]
+        problems = []
+        if wrong_kept:
+            problems.append(
+                f"keeps {len(wrong_kept)} mask(s) that are not a {target} "
+                f"(scores {', '.join(f'{item.score:.2f}' for item in wrong_kept)})"
+            )
+        if right_dropped:
+            problems.append(
+                f"drops {len(right_dropped)} {target} mask(s) "
+                f"(scores {', '.join(f'{item.score:.2f}' for item in right_dropped)})"
+            )
+        accepted = not problems and bool(right_kept)
+        if accepted:
+            reasoning = f"All {len(right_kept)} kept mask(s) are a {target}, and none were dropped."
+        elif problems:
+            reasoning = "This threshold " + " and ".join(problems) + "."
+        else:
+            reasoning = f"The vision model could not confirm any kept mask as a {target}."
+        artifact = self._overlay_artifact(sample, predictions)
+        return CalibrationTrace(
+            accepted=accepted,
+            confidence=1.0 if accepted else 0.0,
+            reasoning=reasoning,
+            overlay_id=artifact.overlay_id,
+            target_present=True if right_kept or right_dropped else None,
         )
 
     def _presence_trace(self, sample: CalibrationSample, prompt: str) -> CalibrationTrace:
@@ -323,6 +410,19 @@ def _validation_instruction(prompt: str) -> str:
         f"fully_detected: every visible {target} is covered by a mask. "
         f"false_positive: a mask covers background or something that is not a {target}. "
         "mask_tight: the mask follows the object boundary closely. "
+        "Return confidence from 0 to 1 and one short reasoning sentence."
+    )
+
+
+def _instance_instruction(target: str) -> str:
+    return (
+        f"Target object: {target}. The image is a crop of a photo. ONE object is "
+        "outlined with a red box and a light red mask. Judge only that outlined object. "
+        f"target_present: true only if the outlined object is a {target}; false if it "
+        "is anything else, such as a different kind of vehicle, a person, or background. "
+        f"false_positive: true if the outlined object is not a {target}. "
+        "fully_detected: true if the red mask covers the whole object. "
+        "mask_tight: true if the mask follows the object's outline closely. "
         "Return confidence from 0 to 1 and one short reasoning sentence."
     )
 

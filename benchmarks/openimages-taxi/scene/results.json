@@ -1,0 +1,350 @@
+{
+  "dataset": {
+    "name": "Open Images V7 taxis (corrected)",
+    "source": "openimages-taxi-approved-coco.zip",
+    "images": 98,
+    "annotations": 162,
+    "calibration_image_ids": [
+      6,
+      34,
+      50,
+      54,
+      98
+    ],
+    "scored_images": 93,
+    "scored_annotations": 156
+  },
+  "settings": {
+    "floor": 0.05,
+    "seed": 0,
+    "calibration_thresholds": [
+      0.3,
+      0.45,
+      0.6,
+      0.75,
+      0.85
+    ],
+    "minimum_agreement": 0.6,
+    "match_iou": 0.5,
+    "vlm_judge": "scene"
+  },
+  "environment": {
+    "gpu": "NVIDIA GeForce RTX 4050 Laptop GPU",
+    "device": "cuda",
+    "precision": "float16",
+    "torch": "2.6.0+cu124",
+    "python": "3.12.13",
+    "vlm": "qwen3-vl:4b"
+  },
+  "prompts": [
+    {
+      "prompt": "taxi",
+      "calibration": {
+        "status": "calibrated",
+        "threshold": 0.45,
+        "seconds": 61.5,
+        "validator": "vlm",
+        "notice": null,
+        "attempts": [
+          {
+            "threshold": 0.3,
+            "accepted": 5,
+            "of": 5
+          },
+          {
+            "threshold": 0.45,
+            "accepted": 5,
+            "of": 5
+          },
+          {
+            "threshold": 0.6,
+            "accepted": 5,
+            "of": 5
+          },
+          {
+            "threshold": 0.75,
+            "accepted": 5,
+            "of": 5
+          },
+          {
+            "threshold": 0.85,
+            "accepted": 3,
+            "of": 5
+          }
+        ]
+      },
+      "coco": {
+        "segm": {
+          "AP": 0.8348,
+          "AP50": 0.9186,
+          "AP75": 0.8759,
+          "AP_small": -1.0,
+          "AP_medium": 0.7365,
+          "AP_large": 0.8702,
+          "AR100": 0.9269
+        },
+        "bbox": {
+          "AP": 0.814,
+          "AP50": 0.908,
+          "AP75": 0.8658,
+          "AP_small": -1.0,
+          "AP_medium": 0.7132,
+          "AP_large": 0.8509,
+          "AR100": 0.9167
+        }
+      },
+      "operating_points": {
+        "0.3": {
+          "threshold": 0.3,
+          "tp": 149,
+          "fp": 113,
+          "fn": 7,
+          "precision": 0.5687,
+          "recall": 0.9551,
+          "f1": 0.7129,
+          "mean_mask_iou_of_matches": 0.9354
+        },
+        "0.4": {
+          "threshold": 0.4,
+          "tp": 146,
+          "fp": 66,
+          "fn": 10,
+          "precision": 0.6887,
+          "recall": 0.9359,
+          "f1": 0.7935,
+          "mean_mask_iou_of_matches": 0.9347
+        },
+        "0.5": {
+          "threshold": 0.5,
+          "tp": 141,
+          "fp": 42,
+          "fn": 15,
+          "precision": 0.7705,
+          "recall": 0.9038,
+          "f1": 0.8319,
+          "mean_mask_iou_of_matches": 0.9343
+        },
+        "0.6": {
+          "threshold": 0.6,
+          "tp": 139,
+          "fp": 28,
+          "fn": 17,
+          "precision": 0.8323,
+          "recall": 0.891,
+          "f1": 0.8607,
+          "mean_mask_iou_of_matches": 0.934
+        },
+        "0.7": {
+          "threshold": 0.7,
+          "tp": 129,
+          "fp": 17,
+          "fn": 27,
+          "precision": 0.8836,
+          "recall": 0.8269,
+          "f1": 0.8543,
+          "mean_mask_iou_of_matches": 0.9365
+        },
+        "0.8": {
+          "threshold": 0.8,
+          "tp": 121,
+          "fp": 10,
+          "fn": 35,
+          "precision": 0.9237,
+          "recall": 0.7756,
+          "f1": 0.8432,
+          "mean_mask_iou_of_matches": 0.9383
+        },
+        "0.9": {
+          "threshold": 0.9,
+          "tp": 91,
+          "fp": 3,
+          "fn": 65,
+          "precision": 0.9681,
+          "recall": 0.5833,
+          "f1": 0.728,
+          "mean_mask_iou_of_matches": 0.9477
+        }
+      },
+      "speed": {
+        "load_seconds": 19.62,
+        "seconds_first_image": 21.613,
+        "seconds_per_image_median": 0.632,
+        "seconds_per_image_mean": 0.644,
+        "peak_gpu_memory_mb": 2749
+      },
+      "calibrated_point": {
+        "threshold": 0.45,
+        "tp": 145,
+        "fp": 51,
+        "fn": 11,
+        "precision": 0.7398,
+        "recall": 0.9295,
+        "f1": 0.8239,
+        "mean_mask_iou_of_matches": 0.935
+      },
+      "calibrated_f1_ci95": [
+        0.7799,
+        0.8783
+      ],
+      "default_f1_ci95": [
+        0.7859,
+        0.8791
+      ]
+    },
+    {
+      "prompt": "taxi car",
+      "calibration": {
+        "status": "calibrated",
+        "threshold": 0.6,
+        "seconds": 98.2,
+        "validator": "vlm",
+        "notice": null,
+        "attempts": [
+          {
+            "threshold": 0.3,
+            "accepted": 5,
+            "of": 5
+          },
+          {
+            "threshold": 0.45,
+            "accepted": 5,
+            "of": 5
+          },
+          {
+            "threshold": 0.6,
+            "accepted": 5,
+            "of": 5
+          },
+          {
+            "threshold": 0.75,
+            "accepted": 5,
+            "of": 5
+          },
+          {
+            "threshold": 0.85,
+            "accepted": 5,
+            "of": 5
+          }
+        ]
+      },
+      "coco": {
+        "segm": {
+          "AP": 0.8191,
+          "AP50": 0.8992,
+          "AP75": 0.8627,
+          "AP_small": -1.0,
+          "AP_medium": 0.7495,
+          "AP_large": 0.8509,
+          "AR100": 0.9192
+        },
+        "bbox": {
+          "AP": 0.8038,
+          "AP50": 0.8896,
+          "AP75": 0.8486,
+          "AP_small": -1.0,
+          "AP_medium": 0.7208,
+          "AP_large": 0.8402,
+          "AR100": 0.9103
+        }
+      },
+      "operating_points": {
+        "0.3": {
+          "threshold": 0.3,
+          "tp": 152,
+          "fp": 282,
+          "fn": 4,
+          "precision": 0.3502,
+          "recall": 0.9744,
+          "f1": 0.5153,
+          "mean_mask_iou_of_matches": 0.932
+        },
+        "0.4": {
+          "threshold": 0.4,
+          "tp": 152,
+          "fp": 206,
+          "fn": 4,
+          "precision": 0.4246,
+          "recall": 0.9744,
+          "f1": 0.5914,
+          "mean_mask_iou_of_matches": 0.932
+        },
+        "0.5": {
+          "threshold": 0.5,
+          "tp": 152,
+          "fp": 150,
+          "fn": 4,
+          "precision": 0.5033,
+          "recall": 0.9744,
+          "f1": 0.6638,
+          "mean_mask_iou_of_matches": 0.932
+        },
+        "0.6": {
+          "threshold": 0.6,
+          "tp": 149,
+          "fp": 107,
+          "fn": 7,
+          "precision": 0.582,
+          "recall": 0.9551,
+          "f1": 0.7233,
+          "mean_mask_iou_of_matches": 0.9319
+        },
+        "0.7": {
+          "threshold": 0.7,
+          "tp": 148,
+          "fp": 62,
+          "fn": 8,
+          "precision": 0.7048,
+          "recall": 0.9487,
+          "f1": 0.8087,
+          "mean_mask_iou_of_matches": 0.9327
+        },
+        "0.8": {
+          "threshold": 0.8,
+          "tp": 144,
+          "fp": 38,
+          "fn": 12,
+          "precision": 0.7912,
+          "recall": 0.9231,
+          "f1": 0.8521,
+          "mean_mask_iou_of_matches": 0.9341
+        },
+        "0.9": {
+          "threshold": 0.9,
+          "tp": 114,
+          "fp": 16,
+          "fn": 42,
+          "precision": 0.8769,
+          "recall": 0.7308,
+          "f1": 0.7972,
+          "mean_mask_iou_of_matches": 0.9508
+        }
+      },
+      "speed": {
+        "load_seconds": 19.62,
+        "seconds_first_image": 0.597,
+        "seconds_per_image_median": 0.639,
+        "seconds_per_image_mean": 0.663,
+        "peak_gpu_memory_mb": 2782
+      },
+      "calibrated_point": {
+        "threshold": 0.6,
+        "tp": 149,
+        "fp": 107,
+        "fn": 7,
+        "precision": 0.582,
+        "recall": 0.9551,
+        "f1": 0.7233,
+        "mean_mask_iou_of_matches": 0.9319
+      },
+      "calibrated_f1_ci95": [
+        0.6639,
+        0.7847
+      ],
+      "default_f1_ci95": [
+        0.6039,
+        0.7291
+      ]
+    }
+  ],
+  "audit_image_ids": []
+}
