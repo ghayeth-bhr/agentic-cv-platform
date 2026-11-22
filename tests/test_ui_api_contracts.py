@@ -42,6 +42,7 @@ UI_ROUTES = {
     "/v1/agent/sessions/{session_id}/cancel": {"post"},
     "/v1/agent/sessions/{session_id}/calibration-overlays/{overlay_id}": {"get"},
     "/v1/datasets": {"get"},
+    "/v1/datasets/import": {"post"},
     "/v1/datasets/{version_id}/images": {"get"},
     "/v1/datasets/{version_id}/images/{image_id}/file": {"get"},
     "/v1/jobs/{job_id}/preview": {"get"},
@@ -172,7 +173,8 @@ def test_ui_selector_and_navigation_contract():
         "agent-live-progress-bar", "agent-live-count", "agent-open-gallery",
         "agent-assets", "agent-quick-replies", "agent-message", "agent-plan",
         "agent-board", "agent-board-classes", "agent-board-apply", "agent-board-actions",
-        "theme-toggle",
+        "theme-toggle", "dataset-import-toggle", "dataset-import-panel", "dataset-import-name",
+        "dataset-import-file", "dataset-import-button", "dataset-import-status",
     ):
         assert f'id="{element_id}"' in html, f"missing DOM id: {element_id}"
     assert "tenant-id" not in html

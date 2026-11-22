@@ -3625,7 +3625,7 @@
           statePanel(
             "empty",
             "No dataset versions yet.",
-            "Run the Agent on an asset to build a dataset automatically.",
+            "Run the Agent on an asset to build a dataset automatically, or import a COCO dataset.",
             "Open Agent",
             () => showView("agent")
           )
@@ -3839,6 +3839,62 @@
   }
 
   if ($("datasets-refresh")) $("datasets-refresh").addEventListener("click", loadDatasets);
+
+  // Import an external COCO dataset (ZIP) as a dataset version.
+  function showDatasetImport(show) {
+    const panel = $("dataset-import-panel");
+    const toggle = $("dataset-import-toggle");
+    if (!panel) return;
+    panel.hidden = !show;
+    if (toggle) toggle.setAttribute("aria-expanded", show ? "true" : "false");
+    if (show && $("dataset-import-name")) $("dataset-import-name").focus();
+  }
+
+  async function importDataset() {
+    const button = $("dataset-import-button");
+    const fileInput = $("dataset-import-file");
+    const nameInput = $("dataset-import-name");
+    const file = fileInput && fileInput.files && fileInput.files[0];
+    if (!file) {
+      setStatus("dataset-import-status", "Choose a ZIP file first.", "error");
+      return;
+    }
+    const name = (nameInput && nameInput.value.trim()) || file.name.replace(/\.zip$/i, "");
+    const form = new FormData();
+    form.append("name", name);
+    form.append("file", file);
+    setBusy(button, true, "Importing…");
+    setStatus("dataset-import-status", `Importing ${file.name}…`, "busy");
+    try {
+      const result = await request("/v1/datasets/import", {
+        method: "POST",
+        headers: tenantHeaders(false),
+        body: form,
+      });
+      const notes = [];
+      if (result.skipped_annotations) notes.push(`${result.skipped_annotations} annotation${result.skipped_annotations === 1 ? "" : "s"} skipped`);
+      if (result.missing_images.length) notes.push(`${result.missing_images.length} listed image${result.missing_images.length === 1 ? "" : "s"} not in the ZIP`);
+      const message = `Imported ${result.image_count} image${result.image_count === 1 ? "" : "s"} and ${result.annotation_count} object${result.annotation_count === 1 ? "" : "s"}${notes.length ? ` (${notes.join(", ")})` : ""}.`;
+      if (fileInput) fileInput.value = "";
+      if (nameInput) nameInput.value = "";
+      setStatus("dataset-import-status", "");
+      showDatasetImport(false);
+      await loadDatasets();
+      setStatus("datasets-status", message, "ok");
+      window.location.hash = `#/datasets/${result.dataset.version_id}`;
+    } catch (err) {
+      setStatus("dataset-import-status", cleanMessage(err.message || err), "error");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  if ($("dataset-import-toggle")) $("dataset-import-toggle").addEventListener("click", () => {
+    const panel = $("dataset-import-panel");
+    showDatasetImport(!panel || panel.hidden);
+  });
+  if ($("dataset-import-close")) $("dataset-import-close").addEventListener("click", () => showDatasetImport(false));
+  if ($("dataset-import-button")) $("dataset-import-button").addEventListener("click", importDataset);
 
   // Jobs
   function jobKindLabel(kind) {

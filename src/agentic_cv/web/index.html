@@ -318,7 +318,31 @@
       <section id="view-datasets" class="view" aria-labelledby="datasets-heading" hidden>
         <div class="toolbar">
           <div class="toolbar-meta" id="datasets-meta">Dataset versions</div>
-          <button type="button" class="btn btn-secondary" id="datasets-refresh">Refresh</button>
+          <div class="toolbar-actions">
+            <button type="button" class="btn btn-secondary" id="dataset-import-toggle" aria-expanded="false" aria-controls="dataset-import-panel">Import dataset</button>
+            <button type="button" class="btn btn-secondary" id="datasets-refresh">Refresh</button>
+          </div>
+        </div>
+        <div class="card upload-panel" id="dataset-import-panel" hidden>
+          <div class="upload-heading">
+            <div>
+              <h2 class="card-title">Import a COCO dataset</h2>
+              <p class="card-desc">Upload one ZIP holding a COCO <code>.json</code> file and its images. It opens in the gallery like any other dataset, so you can review it, fix masks, and export it.</p>
+            </div>
+            <button type="button" class="btn btn-ghost" id="dataset-import-close">Close</button>
+          </div>
+          <label class="field">
+            <span>Dataset name</span>
+            <input id="dataset-import-name" type="text" placeholder="e.g. Open Images taxis" autocomplete="off">
+          </label>
+          <label class="field">
+            <span>ZIP file</span>
+            <input id="dataset-import-file" type="file" accept=".zip,application/zip">
+          </label>
+          <div class="actions">
+            <button id="dataset-import-button" type="button" class="btn btn-primary">Import</button>
+          </div>
+          <div id="dataset-import-status" class="status" role="status" aria-live="polite"></div>
         </div>
         <div id="datasets-status" class="status" role="status" aria-live="polite"></div>
         <div id="datasets-list" class="stack" aria-live="polite"></div>
