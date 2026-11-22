@@ -88,3 +88,21 @@ def test_jobs_endpoint_lists_queued_index_job_without_other_tenants(tmp_path):
     assert values[0]["kind"] == "index-asset"
     assert values[0]["status"] == "queued"
     assert "job_id" in values[0]
+
+
+def test_ui_files_are_revalidated_so_updates_are_never_stale(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from agentic_cv.application import LocalAppConfig, create_local_app
+
+    app = create_local_app(LocalAppConfig(data_dir=tmp_path / "data", start_workers=False))
+    with TestClient(app) as client:
+        for path in ("/", "/static/app.js", "/static/app.css"):
+            response = client.get(path)
+            assert response.status_code == 200, path
+            assert response.headers["cache-control"] == "no-cache", path
+        script = client.get("/static/app.js")
+        unchanged = client.get(
+            "/static/app.js", headers={"If-None-Match": script.headers["etag"]}
+        )
+        assert unchanged.status_code == 304
