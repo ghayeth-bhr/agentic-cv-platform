@@ -30,6 +30,7 @@ from .click_refinement import (
 from .contracts import EventEnvelope, TaskSpec
 from .dataset import Annotation
 from .dataset_builder import DatasetBuilder
+from .dataset_import import DatasetImportError, DatasetImporter
 from .dataset_export import ExportFormat
 from .dataset_export_workflow import DatasetExportWorkflow
 from .dataset_store import DatasetVersionBackend, DatasetVersionRecord
@@ -149,6 +150,7 @@ class DatasetApiDependencies:
     builder: DatasetBuilder
     versions: DatasetVersionBackend
     images_root: Path | None = None
+    importer: DatasetImporter | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -293,6 +295,14 @@ class DatasetImagesResponse(BaseModel):
     limit: int = 0
     offset: int = 0
     has_more: bool = False
+
+
+class DatasetImportResponse(BaseModel):
+    dataset: DatasetSummaryResponse
+    image_count: int
+    annotation_count: int
+    skipped_annotations: int
+    missing_images: list[str]
 
 
 class DatasetRebuildRequest(BaseModel):
@@ -1327,6 +1337,39 @@ def create_app(dependencies: ApiDependencies) -> FastAPI:
             return _dataset_summary(
                 result.record, _asset_names(dependencies.registry, tenant_id)
             )
+
+        if dependencies.datasets.importer is not None:
+            importer = dependencies.datasets.importer
+
+            @app.post(
+                "/v1/datasets/import",
+                response_model=DatasetImportResponse,
+                status_code=201,
+            )
+            def import_dataset(
+                file: UploadFile = File(...),
+                name: str = Form(...),
+                x_tenant_id: str = Header(...),
+                x_api_key: str | None = Header(None),
+                authorization: str | None = Header(None),
+            ) -> DatasetImportResponse:
+                tenant_id = _tenant(x_tenant_id)
+                _authorize(dependencies.authorizer, credential=_credential(authorization, x_api_key), tenant_id=tenant_id, role="labels:write")
+                try:
+                    result = importer.import_coco_zip(
+                        tenant_id=tenant_id, archive=file.file, name=name
+                    )
+                except DatasetImportError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+                return DatasetImportResponse(
+                    dataset=_dataset_summary(
+                        result.record, _asset_names(dependencies.registry, tenant_id)
+                    ),
+                    image_count=result.image_count,
+                    annotation_count=result.annotation_count,
+                    skipped_annotations=result.skipped_annotations,
+                    missing_images=list(result.missing_images[:50]),
+                )
 
         @app.get("/v1/datasets", response_model=list[DatasetSummaryResponse])
         def list_datasets(

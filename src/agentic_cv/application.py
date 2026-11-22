@@ -50,6 +50,7 @@ from .click_refinement import (
     Sam3ClickRefinementProvider,
 )
 from .dataset_builder import DatasetBuilder
+from .dataset_import import DatasetImporter
 from .dataset_export import DatasetExportService
 from .dataset_export_workflow import DatasetExportWorkflow, DatasetExportWorkflowDependencies
 from .dataset_export_worker import DatasetExportWorker
@@ -485,6 +486,11 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
                 builder=dataset_builder,
                 versions=versions,
                 images_root=dataset_images_root,
+                importer=DatasetImporter(
+                    annotations=annotations,
+                    versions=versions,
+                    images_root=dataset_images_root,
+                ),
             ),
             refinement=RefinementApiDependencies(
                 service=refinement_service,
