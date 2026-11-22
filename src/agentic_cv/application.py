@@ -81,6 +81,19 @@ from .sub_assets import SubAssetBackend, SubAssetStore
 from .uploads import ResumableUploadService
 
 
+# The UI is a few plain files. "no-cache" makes the browser revalidate them on
+# every load (a cheap 304 when unchanged) so an updated index.html is never
+# paired with a stale app.js from the browser cache.
+UI_CACHE_HEADERS = {"Cache-Control": "no-cache"}
+
+
+class _RevalidatedStaticFiles(StaticFiles):
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers.update(UI_CACHE_HEADERS)
+        return response
+
+
 def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
     raw = os.getenv(name)
     if raw is None or not raw.strip():
@@ -473,7 +486,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
         return response
 
     web_dir = Path(__file__).parent / "web"
-    app.mount("/static", StaticFiles(directory=web_dir), name="static")
+    app.mount("/static", _RevalidatedStaticFiles(directory=web_dir), name="static")
     app.state.outbox_dispatcher = outbox_dispatcher
     app.include_router(
         create_core_app(ApiDependencies(
@@ -565,7 +578,7 @@ def create_local_app(config: LocalAppConfig) -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     def dashboard() -> FileResponse:
-        return FileResponse(web_dir / "index.html")
+        return FileResponse(web_dir / "index.html", headers=UI_CACHE_HEADERS)
 
     @app.get("/health/live")
     def liveness() -> dict[str, str]:
