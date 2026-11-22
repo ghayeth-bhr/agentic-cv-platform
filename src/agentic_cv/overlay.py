@@ -51,6 +51,47 @@ def render_prediction_overlay(
     return output_path
 
 
+def render_instance_crop(
+    image: Image.Image,
+    prediction: Sam3Prediction,
+    output_path: Path,
+    *,
+    margin: float = 0.6,
+    min_side: int = 320,
+) -> Path:
+    """Save a crop around one prediction with only that mask outlined in red.
+
+    A small VLM judging a whole street scene with several masks drawn on it
+    misses the one mask that covers a plain car. One object per question, with
+    some context around it, is a question it can answer.
+    """
+
+    width, height = image.size
+    x1, y1, x2, y2 = (float(value) for value in prediction.box)
+    pad_x = max((x2 - x1) * margin, 16.0)
+    pad_y = max((y2 - y1) * margin, 16.0)
+    left, top = max(0, int(x1 - pad_x)), max(0, int(y1 - pad_y))
+    right, bottom = min(width, int(x2 + pad_x) + 1), min(height, int(y2 + pad_y) + 1)
+    canvas = image.convert("RGBA")
+    if prediction.mask is not None:
+        mask = np.asarray(prediction.mask).astype(bool)
+        if mask.shape != (height, width):
+            raise ValueError("prediction mask dimensions must match the image")
+        tint = Image.new("RGBA", canvas.size, (255, 40, 40, 0))
+        tint.putalpha(Image.fromarray(np.where(mask, 70, 0).astype(np.uint8)))
+        canvas = Image.alpha_composite(canvas, tint)
+    draw = ImageDraw.Draw(canvas)
+    draw.rectangle((x1, y1, x2, y2), outline=(255, 40, 40), width=3)
+    crop = canvas.crop((left, top, right, bottom)).convert("RGB")
+    shortest = min(crop.size)
+    if shortest < min_side:
+        scale = min_side / max(shortest, 1)
+        crop = crop.resize((round(crop.width * scale), round(crop.height * scale)), Image.LANCZOS)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    crop.save(output_path, format="PNG")
+    return output_path
+
+
 def render_annotation_overlay(
     image: Image.Image,
     annotations: list[Annotation],

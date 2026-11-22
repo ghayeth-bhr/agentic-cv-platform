@@ -2,7 +2,7 @@ from PIL import Image
 
 from agentic_cv.calibration import CalibrationSample, Sam3Calibrator
 from agentic_cv.sam3 import Sam3Prediction
-from agentic_cv.vlm_validator import VlmCalibrationValidator, VlmValidator
+from agentic_cv.vlm_validator import OverlayArtifact, VlmCalibrationValidator, VlmValidator
 
 
 class FakeVlmClient:
@@ -173,3 +173,89 @@ def test_vlm_client_downscales_large_overlays(tmp_path):
     Image.new("RGB", (300, 200)).save(small)
     assert _downscale(small.read_bytes(), 768) == small.read_bytes()
     assert _downscale(path.read_bytes(), 0) == path.read_bytes()
+
+
+class PerMaskVlmClient:
+    """Says yes for crops whose uri names a taxi, no otherwise."""
+
+    def __init__(self):
+        self.calls = []
+
+    def judge(self, *, overlay_uri, prompt):
+        self.calls.append((overlay_uri, prompt))
+        is_taxi = "taxi" in overlay_uri
+        return {
+            "target_present": is_taxi,
+            "fully_detected": True,
+            "false_positive": not is_taxi,
+            "mask_tight": True,
+            "confidence": 0.9,
+            "reasoning": "Outlined object judged.",
+        }
+
+
+class TwoObjectSam3:
+    """A real taxi scored 0.9, a plain car scored 0.4, a faint taxi scored 0.35."""
+
+    def predict(self, image, prompt, *, threshold=None, mask_threshold=None):
+        found = [
+            Sam3Prediction(score=0.9, box=(0, 0, 4, 4), mask=None),
+            Sam3Prediction(score=0.4, box=(4, 4, 8, 8), mask=None),
+        ]
+        return [item for item in found if item.score >= threshold]
+
+
+def _instance_validator(client, names):
+    return VlmCalibrationValidator(
+        VlmValidator(client),
+        lambda sample, predictions: f"overlay://{sample.image_id}/{len(predictions)}",
+        instance_builder=lambda sample, prediction: OverlayArtifact(
+            uri=f"crop://{sample.image_id}/{names[prediction.score]}",
+            overlay_id=f"{names[prediction.score]}.png",
+        ),
+    )
+
+
+def test_instance_judge_rejects_thresholds_that_keep_a_wrong_object():
+    client = PerMaskVlmClient()
+    validator = _instance_validator(client, {0.9: "taxi", 0.4: "car"})
+    samples = [CalibrationSample(image_id="street", image=Image.new("RGB", (8, 8)))]
+
+    result = Sam3Calibrator(TwoObjectSam3(), validator, minimum_agreement=1.0).calibrate(
+        samples, prompt="taxi", thresholds=[0.3, 0.6]
+    )
+
+    low, high = result.attempts
+    assert low.accepted_count == 0 and "not a taxi" in low.verdicts[0].reasoning
+    assert high.accepted_count == 1
+    assert result.threshold == 0.6
+    # each mask is judged once; the second threshold is answered from cache
+    assert len(client.calls) == 2
+    assert all("ONE object is outlined" in prompt for _, prompt in client.calls)
+
+
+def test_instance_judge_rejects_thresholds_that_drop_a_confirmed_target():
+    client = PerMaskVlmClient()
+    validator = _instance_validator(client, {0.9: "taxi", 0.4: "taxi-faint"})
+    samples = [CalibrationSample(image_id="street", image=Image.new("RGB", (8, 8)))]
+
+    result = Sam3Calibrator(TwoObjectSam3(), validator, minimum_agreement=1.0).calibrate(
+        samples, prompt="taxi", thresholds=[0.3, 0.6]
+    )
+
+    low, high = result.attempts
+    assert low.accepted_count == 1
+    assert high.accepted_count == 0 and "drops 1 taxi mask" in high.verdicts[0].reasoning
+    assert result.threshold == 0.3
+
+
+def test_instance_memory_is_per_prompt():
+    client = PerMaskVlmClient()
+    validator = _instance_validator(client, {0.9: "taxi", 0.4: "car"})
+    sample = CalibrationSample(image_id="street", image=Image.new("RGB", (8, 8)))
+    taxi = Sam3Prediction(score=0.9, box=(0, 0, 4, 4), mask=None)
+
+    validator.validate_with_trace(sample, [taxi], "taxi")
+    trace = validator.validate_with_trace(sample, [], "bus")
+
+    assert trace.reasoning is None or "drops" not in trace.reasoning

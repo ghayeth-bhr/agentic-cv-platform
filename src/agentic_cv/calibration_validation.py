@@ -16,7 +16,7 @@ import numpy as np
 
 from .calibration import CalibrationSample, Validator
 from .ollama_vlm import OllamaVlmClient
-from .overlay import render_prediction_overlay
+from .overlay import render_instance_crop, render_prediction_overlay
 from .sam3 import Sam3Prediction
 from .vlm_validator import OverlayArtifact, VlmCalibrationValidator, VlmValidator
 
@@ -159,6 +159,15 @@ def default_validator_selection(
         tenant_id=tenant_id,
         session_id=session_id,
     )
+    # "instance" (default) judges each mask on its own crop; "scene" judges
+    # one overlay with every mask drawn, which a small VLM accepts too easily
+    # when one of several masks covers the wrong object (see benchmarks/).
+    judge = os.getenv("AGENTIC_CV_VLM_JUDGE", "instance").strip().lower()
+    instance_builder = (
+        build_instance_builder(overlay_root=overlay_root, tenant_id=tenant_id, session_id=session_id)
+        if judge != "scene"
+        else None
+    )
     validator = VlmCalibrationValidator(
         VlmValidator(
             OllamaVlmClient(
@@ -174,6 +183,7 @@ def default_validator_selection(
         model_revision=model,
         fallback=at_least_one_prediction,
         minimum_prediction_score=minimum_prediction_score,
+        instance_builder=instance_builder,
     )
     return ValidatorSelection(
         validator=validator,
@@ -199,6 +209,25 @@ def build_overlay_builder(
         overlay_id = f"{digest}.png"
         path = directory / overlay_id
         render_prediction_overlay(sample.image, predictions, path)
+        return OverlayArtifact(uri=str(path), overlay_id=overlay_id)
+
+    return build
+
+
+def build_instance_builder(
+    *,
+    overlay_root: Path,
+    tenant_id: UUID,
+    session_id: UUID,
+):
+    directory = overlay_root / str(tenant_id) / str(session_id) / "instances"
+
+    def build(sample: CalibrationSample, prediction: Sam3Prediction) -> OverlayArtifact:
+        digest = _prediction_digest(sample.image_id, [prediction])
+        overlay_id = f"{digest}.png"
+        path = directory / overlay_id
+        if not path.exists():
+            render_instance_crop(sample.image, prediction, path)
         return OverlayArtifact(uri=str(path), overlay_id=overlay_id)
 
     return build
